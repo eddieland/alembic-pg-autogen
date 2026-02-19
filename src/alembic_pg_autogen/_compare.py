@@ -62,11 +62,7 @@ _TRIGGER_RE = re.compile(
 
 def setup(plugin: Plugin) -> None:
     """Register the PostgreSQL object comparator with Alembic's plugin system."""
-    plugin.add_autogenerate_comparator(
-        _compare_pg_objects,
-        "schema",
-        "pg_objects",
-    )
+    plugin.add_autogenerate_comparator(_compare_pg_objects, "schema")
     log.debug("alembic-pg-autogen comparator registered")
 
 
