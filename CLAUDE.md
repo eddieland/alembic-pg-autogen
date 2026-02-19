@@ -32,6 +32,7 @@ uv run pytest -k "test_name"
 
 ## Code Style & Tooling
 
+- **Line length**: 120 characters for all files (code, markdown, etc.).
 - **Ruff**: Line length 120. Lints for errors, style, import ordering, modern Python idioms, bug-prone patterns,
   docstrings (Google convention), and logging format. **Wildcard (`*`) imports are banned** — always use explicit
   imports. All public modules/functions/classes in `src/` require docstrings; tests are exempt.
