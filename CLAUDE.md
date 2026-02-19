@@ -46,6 +46,11 @@ uv run pytest -k "test_name"
   reading the module. Do not use visual fences/separators (e.g. `# ---- Private helpers ----`) to demarcate sections.
 - **Prefer `NamedTuple` over `dataclass`**: Use `typing.NamedTuple` for data containers wherever possible — they are
   much cheaper to construct than frozen dataclasses and are immutable by default.
+- **Use `if TYPE_CHECKING:` guards**: Import types used only for annotations inside `if TYPE_CHECKING:` blocks to
+  minimize runtime import cost.
+- **Prefer `Final` and immutable collection types**: Use `Final` for module-level and instance constants. Annotate
+  collections with immutable types (`Mapping` over `dict`, `Sequence` over `list`, `AbstractSet` over `set`) unless
+  mutation is intended.
 
 ## Python Version
 
