@@ -1,5 +1,9 @@
 """Alembic autogenerate extension for PostgreSQL-specific objects."""
 
-from typing import Final
+from typing import TYPE_CHECKING
 
-__all__: Final[list[str]] = []
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from typing import Final
+
+__all__: Final[Sequence[str]] = []
