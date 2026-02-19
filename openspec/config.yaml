@@ -1,20 +1,30 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Domain: Alembic plugin for PostgreSQL-specific autogeneration
+  Tech stack: Python 3.11+, Alembic, SQLAlchemy, PostgreSQL
+  Package manager: uv
+  Build: hatchling with uv-dynamic-versioning (git-tag-based versions)
+  Layout: src layout (src/alembic_pg_autogen/)
+  Linting: ruff (120 char line width, rules E/F/UP/B/I), basedpyright, codespell
+  Testing: pytest (discovers tests in both src/ and tests/)
+  Commands: make install, make lint, make test, make build
+  Early-stage project — currently placeholder, building foundational infrastructure
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Keep proposals concise — under 500 words
+    - Always include a "Non-goals" section to bound scope
+    - Consider backwards compatibility with standard Alembic workflows
+  specs:
+    - Use Requirement / Scenario format with WHEN/THEN conditions
+    - Reference existing Alembic and SQLAlchemy APIs and patterns
+    - Specify which PostgreSQL-specific features are targeted
+  design:
+    - Reference existing Alembic extension points (MigrationContext, comparators, renderers)
+    - Include a "Non-goals" section
+    - Identify risks and trade-offs explicitly
+  tasks:
+    - Each task should be independently testable
+    - Include which files to create or modify
+    - Order tasks so earlier ones unblock later ones
