@@ -42,16 +42,21 @@ log = logging.getLogger(__name__)
 #: burdening the public API with redundant ``(schema, name)`` declarations.
 #:
 #: The patterns are intentionally minimal — they match only the ``CREATE ... name`` preamble and ignore the rest of
-#: the statement.  They will *not* handle every legal PostgreSQL DDL form (e.g. quoted identifiers, comments before
-#: the object name), but they cover the practical subset that this library's users are expected to provide.  If
-#: robustness becomes an issue, the preferred fix is to push identity resolution into the database (e.g. parse inside
-#: a PL/pgSQL helper) rather than expanding the regex.
-_FUNCTION_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:(\w+)\.)?(\w+)", re.IGNORECASE)
+#: the statement.  They will *not* handle every legal PostgreSQL DDL form (e.g. comments before the object name), but
+#: they cover the practical subset that this library's users are expected to provide.  If robustness becomes an issue,
+#: the preferred fix is to push identity resolution into the database (e.g. parse inside a PL/pgSQL helper) rather
+#: than expanding the regex.
+
+#: A single PostgreSQL identifier — either ``"double-quoted"`` or a bare word.
+_IDENT = r'(?:"[^"]*"|\w+)'
+
+_FUNCTION_RE = re.compile(rf"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:({_IDENT})\.)?({_IDENT})", re.IGNORECASE)
 
 #: Extract ``(trigger_name, schema, table_name)`` from a ``CREATE [OR REPLACE] TRIGGER`` statement.  See
 #: :data:`_FUNCTION_RE` for the rationale on why lightweight regex extraction is used here.
 _TRIGGER_RE = re.compile(
-    r"CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+(\w+)\s+.*?ON\s+(?:(\w+)\.)?(\w+)", re.IGNORECASE | re.DOTALL
+    rf"CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+({_IDENT})\s+.*?ON\s+(?:({_IDENT})\.)?({_IDENT})",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -133,8 +138,8 @@ def _parse_function_names(ddl_list: Sequence[str], conn: object) -> set[tuple[st
     for ddl in ddl_list:
         m = _FUNCTION_RE.search(ddl)
         if m:
-            schema = m.group(1) or default_schema
-            names.add((schema, m.group(2)))
+            schema = _dequote_ident(m.group(1)) if m.group(1) else default_schema
+            names.add((schema, _dequote_ident(m.group(2))))
     return names
 
 
@@ -145,11 +150,22 @@ def _parse_trigger_identities(ddl_list: Sequence[str], conn: object) -> set[tupl
     for ddl in ddl_list:
         m = _TRIGGER_RE.search(ddl)
         if m:
-            trigger_name = m.group(1)
-            schema = m.group(2) or default_schema
-            table_name = m.group(3)
+            trigger_name = _dequote_ident(m.group(1))
+            schema = _dequote_ident(m.group(2)) if m.group(2) else default_schema
+            table_name = _dequote_ident(m.group(3))
             identities.add((schema, table_name, trigger_name))
     return identities
+
+
+def _dequote_ident(ident: str) -> str:
+    """Normalize a SQL identifier to its catalog form.
+
+    Quoted identifiers (``"Foo"``) have quotes stripped and case preserved.  Unquoted identifiers are folded to
+    lowercase, matching PostgreSQL's default behaviour.
+    """
+    if ident.startswith('"') and ident.endswith('"'):
+        return ident[1:-1].replace('""', '"')
+    return ident.lower()
 
 
 def _get_default_schema(conn: object) -> str:
