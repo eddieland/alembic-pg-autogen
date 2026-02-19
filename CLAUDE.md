@@ -32,7 +32,8 @@ uv run pytest -k "test_name"
 
 ## Code Style & Tooling
 
-- **Ruff**: Line length 120. Enabled rule sets: E, F, UP, B, I. E501 (line-too-long) is ignored.
+- **Ruff**: Line length 120. Enabled rule sets: E, F, UP, B, I. E501 (line-too-long) is ignored. **Wildcard (`*`)
+  imports are banned** (F403 is unfixable) — always use explicit imports.
 - **BasedPyright**: Type checker. Configured in pyproject.toml with several strict rules relaxed (reportAny,
   reportUnusedCallResult, etc.).
 - **mdformat**: Markdown formatter (wrap 120, LF line endings). Plugins: mdformat-gfm (GitHub Flavored Markdown),

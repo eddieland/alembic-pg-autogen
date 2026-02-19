@@ -102,6 +102,9 @@ ignore = [
     "COM819", # https://docs.astral.sh/ruff/rules/prohibited-trailing-comma/
     "ISC002", # https://docs.astral.sh/ruff/rules/multi-line-implicit-string-concatenation/
 ]
+unfixable = [
+    "F403", # https://docs.astral.sh/ruff/rules/undefined-local-with-import-star/ — wildcard imports are banned
+]
 
 [tool.basedpyright]
 # BasedPyright currently seems like the best type checker option, much faster
