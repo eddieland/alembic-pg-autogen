@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 def postgis_engine(request: pytest.FixtureRequest) -> Generator[Engine]:
     """Session-scoped engine backed by a PostGIS-enabled PostgreSQL container.
 
-    The ``postgis/postgis`` image ships with PostGIS pre-installed in the
-    ``public`` schema, so no ``CREATE EXTENSION`` is needed.
+    The ``postgis/postgis`` image ships with PostGIS pre-installed in the ``public`` schema, so no ``CREATE EXTENSION``
+    is needed.
     """
     pg_version: str = request.config.getoption("--pg-version")
     with PostgresContainer(f"postgis/postgis:{pg_version}-3.5", driver="psycopg") as pg:

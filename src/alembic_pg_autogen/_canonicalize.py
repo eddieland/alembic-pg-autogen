@@ -37,19 +37,16 @@ def canonicalize(
 ) -> CanonicalState:
     """Canonicalize user-provided DDL by round-tripping through PostgreSQL.
 
-    Executes the given DDL statements inside a savepoint, reads back canonical
-    forms via ``inspect_functions`` / ``inspect_triggers``, then rolls back the
-    savepoint — leaving the database unchanged.
+    Executes the given DDL statements inside a savepoint, reads back canonical forms via ``inspect_functions`` /
+    ``inspect_triggers``, then rolls back the savepoint — leaving the database unchanged.
 
-    Function DDL is executed before trigger DDL so that triggers may reference
-    functions declared in the same batch.
+    Function DDL is executed before trigger DDL so that triggers may reference functions declared in the same batch.
 
     Args:
         conn: An open SQLAlchemy connection (may have an active transaction).
         function_ddl: ``CREATE FUNCTION`` / ``CREATE PROCEDURE`` statements.
         trigger_ddl: ``CREATE TRIGGER`` statements.
-        schemas: Optional schema list passed to the inspect helpers.  When
-            *None*, all user schemas are included.
+        schemas: Optional schema list passed to the inspect helpers.  When *None*, all user schemas are included.
 
     Returns:
         A :class:`CanonicalState` with the full post-DDL catalog state.
@@ -79,8 +76,7 @@ def canonicalize_functions(
 ) -> Sequence[FunctionInfo]:
     """Canonicalize function DDL and return the resulting ``FunctionInfo`` list.
 
-    Convenience wrapper around :func:`canonicalize` with only *function_ddl*
-    populated.
+    Convenience wrapper around :func:`canonicalize` with only *function_ddl* populated.
     """
     return canonicalize(conn, function_ddl=ddl, schemas=schemas).functions
 
@@ -92,8 +88,7 @@ def canonicalize_triggers(
 ) -> Sequence[TriggerInfo]:
     """Canonicalize trigger DDL and return the resulting ``TriggerInfo`` list.
 
-    Convenience wrapper around :func:`canonicalize` with only *trigger_ddl*
-    populated.
+    Convenience wrapper around :func:`canonicalize` with only *trigger_ddl* populated.
     """
     return canonicalize(conn, trigger_ddl=ddl, schemas=schemas).triggers
 
@@ -101,10 +96,9 @@ def canonicalize_triggers(
 def _ensure_or_replace(ddl: str, pattern: re.Pattern[str]) -> str:
     """Rewrite ``CREATE FUNCTION/TRIGGER`` to ``CREATE OR REPLACE`` if needed.
 
-    DDL executed during canonicalization may collide with objects already in the
-    database.  Using ``OR REPLACE`` avoids ``DuplicateFunction`` /
-    ``DuplicateObject`` errors inside the savepoint.  Statements that already
-    contain ``OR REPLACE`` are returned unchanged.
+    DDL executed during canonicalization may collide with objects already in the database.  Using ``OR REPLACE`` avoids
+    ``DuplicateFunction`` / ``DuplicateObject`` errors inside the savepoint.  Statements that already contain
+    ``OR REPLACE`` are returned unchanged.
     """
     if _CREATE_OR_REPLACE_RE.search(ddl):
         return ddl

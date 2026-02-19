@@ -70,8 +70,8 @@ def _render_execute(ddl: str) -> str:
 def _quote_ddl(ddl: str) -> str:
     """Quote a DDL string for inclusion in generated Python source.
 
-    Uses triple-quoting with a raw prefix when the DDL contains single quotes
-    or backslashes, and simple repr quoting otherwise.
+    Uses triple-quoting with a raw prefix when the DDL contains single quotes or backslashes, and simple repr quoting
+    otherwise.
     """
     if "'" not in ddl and "\\" not in ddl:
         return repr(ddl)

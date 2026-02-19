@@ -21,10 +21,9 @@ if TYPE_CHECKING:
 class AlembicProject:
     """An isolated Alembic project directory backed by a unique PostgreSQL schema.
 
-    Provides helpers for executing SQL and obtaining connections with the
-    ``search_path`` set to the isolated schema.  Intended for integration tests
-    that create PG objects (functions, triggers, tables) and verify inspection
-    or autogenerate results.
+    Provides helpers for executing SQL and obtaining connections with the ``search_path`` set to the isolated schema.
+    Intended for integration tests that create PG objects (functions, triggers, tables) and verify inspection or
+    autogenerate results.
     """
 
     def __init__(self, engine: Engine, tmp_path: Path) -> None:

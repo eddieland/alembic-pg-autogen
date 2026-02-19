@@ -33,15 +33,14 @@ class TriggerInfo(NamedTuple):
 def inspect_functions(conn: Connection, schemas: Sequence[str] | None = None) -> Sequence[FunctionInfo]:
     """Bulk-load function definitions from PostgreSQL system catalogs.
 
-    Queries ``pg_proc`` joined with ``pg_namespace`` to retrieve all user-defined
-    functions and procedures.  Uses ``pg_get_functiondef()`` for canonical DDL and
-    ``pg_get_function_identity_arguments()`` for the overload-distinguishing
-    argument signature.
+    Queries ``pg_proc`` joined with ``pg_namespace`` to retrieve all user-defined functions and procedures.  Uses
+    ``pg_get_functiondef()`` for canonical DDL and ``pg_get_function_identity_arguments()`` for the
+    overload-distinguishing argument signature.
 
     Args:
         conn: An open SQLAlchemy connection.
-        schemas: Optional list of schema names to inspect.  When *None*, all
-            schemas except ``pg_catalog`` and ``information_schema`` are included.
+        schemas: Optional list of schema names to inspect.  When *None*, all schemas except ``pg_catalog`` and
+            ``information_schema`` are included.
 
     Returns:
         A sequence of :class:`FunctionInfo` instances, one per function/procedure.
@@ -57,14 +56,13 @@ def inspect_functions(conn: Connection, schemas: Sequence[str] | None = None) ->
 def inspect_triggers(conn: Connection, schemas: Sequence[str] | None = None) -> Sequence[TriggerInfo]:
     """Bulk-load trigger definitions from PostgreSQL system catalogs.
 
-    Queries ``pg_trigger`` joined with ``pg_class`` and ``pg_namespace`` to
-    retrieve all user-defined (non-internal) triggers.  Uses
-    ``pg_get_triggerdef()`` for canonical DDL.
+    Queries ``pg_trigger`` joined with ``pg_class`` and ``pg_namespace`` to retrieve all user-defined (non-internal)
+    triggers.  Uses ``pg_get_triggerdef()`` for canonical DDL.
 
     Args:
         conn: An open SQLAlchemy connection.
-        schemas: Optional list of schema names to inspect.  When *None*, all
-            schemas except ``pg_catalog`` and ``information_schema`` are included.
+        schemas: Optional list of schema names to inspect.  When *None*, all schemas except ``pg_catalog`` and
+            ``information_schema`` are included.
 
     Returns:
         A sequence of :class:`TriggerInfo` instances, one per trigger.

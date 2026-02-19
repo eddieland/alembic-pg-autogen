@@ -34,27 +34,22 @@ log = logging.getLogger(__name__)
 
 #: Extract ``(schema, name)`` from a ``CREATE [OR REPLACE] FUNCTION`` statement.
 #:
-#: **Why regex is acceptable here.** The canonicalization layer honours the project's
-#: "no SQL parsing" rule — it passes DDL verbatim to PostgreSQL and never inspects
-#: the strings.  However, ``canonicalize()`` intentionally returns the *full* catalog
-#: state for every schema it touches, not just the objects the user declared (see the
-#: canonicalization design doc for why snapshot-diff was rejected).  The comparator
-#: therefore needs a way to narrow that full catalog back to user-declared objects.
-#: Extracting object identities from the DDL is the only way to do that without
+#: **Why regex is acceptable here.** The canonicalization layer honours the project's "no SQL parsing" rule — it passes
+#: DDL verbatim to PostgreSQL and never inspects the strings.  However, ``canonicalize()`` intentionally returns the
+#: *full* catalog state for every schema it touches, not just the objects the user declared (see the canonicalization
+#: design doc for why snapshot-diff was rejected).  The comparator therefore needs a way to narrow that full catalog
+#: back to user-declared objects.  Extracting object identities from the DDL is the only way to do that without
 #: burdening the public API with redundant ``(schema, name)`` declarations.
 #:
-#: The patterns are intentionally minimal — they match only the ``CREATE ... name``
-#: preamble and ignore the rest of the statement.  They will *not* handle every legal
-#: PostgreSQL DDL form (e.g. quoted identifiers, comments before the object name), but
-#: they cover the practical subset that this library's users are expected to provide.
-#: If robustness becomes an issue, the preferred fix is to push identity resolution
-#: into the database (e.g. parse inside a PL/pgSQL helper) rather than expanding
-#: the regex.
+#: The patterns are intentionally minimal — they match only the ``CREATE ... name`` preamble and ignore the rest of
+#: the statement.  They will *not* handle every legal PostgreSQL DDL form (e.g. quoted identifiers, comments before
+#: the object name), but they cover the practical subset that this library's users are expected to provide.  If
+#: robustness becomes an issue, the preferred fix is to push identity resolution into the database (e.g. parse inside
+#: a PL/pgSQL helper) rather than expanding the regex.
 _FUNCTION_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:(\w+)\.)?(\w+)", re.IGNORECASE)
 
-#: Extract ``(trigger_name, schema, table_name)`` from a ``CREATE [OR REPLACE] TRIGGER``
-#: statement.  See :data:`_FUNCTION_RE` for the rationale on why lightweight regex
-#: extraction is used here.
+#: Extract ``(trigger_name, schema, table_name)`` from a ``CREATE [OR REPLACE] TRIGGER`` statement.  See
+#: :data:`_FUNCTION_RE` for the rationale on why lightweight regex extraction is used here.
 _TRIGGER_RE = re.compile(
     r"CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+(\w+)\s+.*?ON\s+(?:(\w+)\.)?(\w+)", re.IGNORECASE | re.DOTALL
 )
@@ -119,9 +114,8 @@ def _filter_to_declared(
 ) -> CanonicalState:
     """Filter canonical state to only include objects declared in user DDL.
 
-    ``canonicalize()`` returns a full catalog snapshot after executing DDL,
-    which includes pre-existing objects.  This function parses identity info
-    from the raw DDL strings and keeps only those canonical entries that match.
+    ``canonicalize()`` returns a full catalog snapshot after executing DDL, which includes pre-existing objects.  This
+    function parses identity info from the raw DDL strings and keeps only those canonical entries that match.
     """
     fn_names = _parse_function_names(pg_functions, conn)
     trg_ids = _parse_trigger_identities(pg_triggers, conn)
@@ -171,10 +165,9 @@ def _get_default_schema(conn: object) -> str:
 def _resolve_schemas(conn: object, schemas: set[str | None]) -> list[str] | None:
     """Convert Alembic's schema set to a list suitable for inspect functions.
 
-    Alembic passes ``{None}`` to mean "only the default schema".  This function
-    resolves ``None`` to the connection's ``current_schema()`` so inspect
-    functions receive concrete schema names.  If the resulting set covers all
-    user schemas, returns ``None`` (meaning "no filter").
+    Alembic passes ``{None}`` to mean "only the default schema".  This function resolves ``None`` to the connection's
+    ``current_schema()`` so inspect functions receive concrete schema names.  If the resulting set covers all user
+    schemas, returns ``None`` (meaning "no filter").
     """
     if not schemas:
         return None
@@ -205,8 +198,7 @@ def _order_ops(
 ) -> list[MigrateOperation]:
     """Convert diff ops to MigrateOperation instances in dependency-safe order.
 
-    Order: drop triggers, drop functions, create/replace functions,
-    create/replace triggers.
+    Order: drop triggers, drop functions, create/replace functions, create/replace triggers.
     """
     result: list[MigrateOperation] = []
 

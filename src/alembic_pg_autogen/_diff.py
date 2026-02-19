@@ -50,9 +50,8 @@ _OpT = TypeVar("_OpT", FunctionOp, TriggerOp)
 def diff(current: CanonicalState, desired: CanonicalState) -> DiffResult:
     """Compare two canonical catalog snapshots and produce diff operations.
 
-    Matches functions by ``(schema, name, identity_args)`` and triggers by
-    ``(schema, table_name, trigger_name)``.  Objects present only in *desired*
-    produce ``CREATE`` ops, objects only in *current* produce ``DROP`` ops, and
+    Matches functions by ``(schema, name, identity_args)`` and triggers by ``(schema, table_name, trigger_name)``.
+    Objects present only in *desired* produce ``CREATE`` ops, objects only in *current* produce ``DROP`` ops, and
     objects in both with differing definitions produce ``REPLACE`` ops.
 
     Args:
