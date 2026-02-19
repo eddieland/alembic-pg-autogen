@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import enum
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from alembic_pg_autogen._canonicalize import CanonicalState
     from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo
@@ -43,6 +43,10 @@ class DiffResult(NamedTuple):
     trigger_ops: Sequence[TriggerOp]
 
 
+_InfoT = TypeVar("_InfoT", "FunctionInfo", "TriggerInfo")
+_OpT = TypeVar("_OpT", FunctionOp, TriggerOp)
+
+
 def diff(current: CanonicalState, desired: CanonicalState) -> DiffResult:
     """Compare two canonical catalog snapshots and produce diff operations.
 
@@ -59,50 +63,29 @@ def diff(current: CanonicalState, desired: CanonicalState) -> DiffResult:
         A :class:`DiffResult` with sorted sequences of function and trigger ops.
     """
     return DiffResult(
-        function_ops=_diff_functions(current.functions, desired.functions),
-        trigger_ops=_diff_triggers(current.triggers, desired.triggers),
+        function_ops=_diff_items(current.functions, desired.functions, FunctionOp),
+        trigger_ops=_diff_items(current.triggers, desired.triggers, TriggerOp),
     )
 
 
-def _diff_functions(
-    current_items: Sequence[FunctionInfo],
-    desired_items: Sequence[FunctionInfo],
-) -> list[FunctionOp]:
-    """Diff two sequences of FunctionInfo by identity key (first 3 fields)."""
+def _diff_items(
+    current_items: Sequence[_InfoT],
+    desired_items: Sequence[_InfoT],
+    make_op: Callable[[Action, _InfoT | None, _InfoT | None], _OpT],
+) -> list[_OpT]:
+    """Diff two sequences of catalog items by identity key (first 3 fields)."""
     current_by_key = {item[:3]: item for item in current_items}
     desired_by_key = {item[:3]: item for item in desired_items}
 
-    ops: list[FunctionOp] = []
+    ops: list[_OpT] = []
     for key in sorted(current_by_key.keys() | desired_by_key.keys()):
         cur = current_by_key.get(key)
         des = desired_by_key.get(key)
         if cur is None:
-            ops.append(FunctionOp(action=Action.CREATE, current=None, desired=des))
+            ops.append(make_op(Action.CREATE, None, des))
         elif des is None:
-            ops.append(FunctionOp(action=Action.DROP, current=cur, desired=None))
+            ops.append(make_op(Action.DROP, cur, None))
         elif cur.definition != des.definition:
-            ops.append(FunctionOp(action=Action.REPLACE, current=cur, desired=des))
-
-    return ops
-
-
-def _diff_triggers(
-    current_items: Sequence[TriggerInfo],
-    desired_items: Sequence[TriggerInfo],
-) -> list[TriggerOp]:
-    """Diff two sequences of TriggerInfo by identity key (first 3 fields)."""
-    current_by_key = {item[:3]: item for item in current_items}
-    desired_by_key = {item[:3]: item for item in desired_items}
-
-    ops: list[TriggerOp] = []
-    for key in sorted(current_by_key.keys() | desired_by_key.keys()):
-        cur = current_by_key.get(key)
-        des = desired_by_key.get(key)
-        if cur is None:
-            ops.append(TriggerOp(action=Action.CREATE, current=None, desired=des))
-        elif des is None:
-            ops.append(TriggerOp(action=Action.DROP, current=cur, desired=None))
-        elif cur.definition != des.definition:
-            ops.append(TriggerOp(action=Action.REPLACE, current=cur, desired=des))
+            ops.append(make_op(Action.REPLACE, cur, des))
 
     return ops
