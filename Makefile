@@ -5,7 +5,7 @@
 .DEFAULT_GOAL := help
 
 SRC_PATHS := src tests
-DOC_PATHS := README.md
+DOC_PATHS := README.md CLAUDE.md docs/ openspec/
 
 ##@ Development
 
@@ -15,6 +15,7 @@ install: ## Install dependencies
 	uv sync --all-extras
 
 fmt: ## Run autoformatters and autofixers
+	uv run mdformat $(DOC_PATHS)
 	uv run codespell --write-changes $(SRC_PATHS) $(DOC_PATHS)
 	uv run ruff check --fix $(SRC_PATHS)
 	uv run ruff format $(SRC_PATHS)

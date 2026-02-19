@@ -11,6 +11,15 @@ repos:
       - id: check-yaml
       - id: check-toml
 
+  - repo: https://github.com/hukkin/mdformat
+    rev: 0.7.22
+    hooks:
+      - id: mdformat
+        additional_dependencies:
+          - mdformat-gfm
+          - mdformat-pyproject
+          - mdformat-ruff
+
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.1
     hooks:

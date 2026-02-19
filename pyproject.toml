@@ -51,6 +51,10 @@ dev = [
     "ruff>=0.15.1",
     "codespell>=2.4.1",
     "basedpyright>=1.38.0",
+    "mdformat>=0.7.22",
+    "mdformat-gfm>=0.4",
+    "mdformat-pyproject>=0.0.2",
+    "mdformat-ruff>=0.1",
 ]
 
 [project.scripts]
@@ -153,6 +157,10 @@ reportUnreachable = false
 # reportUnnecessaryIsInstance = false
 # reportUnknownVariableType = false
 # reportUnknownArgumentType = false
+
+[tool.mdformat]
+wrap = 120
+end_of_line = "lf"
 
 [tool.codespell]
 # Add here as needed:

@@ -20,19 +20,24 @@
 ## 3. Test Infrastructure
 
 - [ ] 3.1 Register the `integration` pytest marker in `pyproject.toml` `[tool.pytest.ini_options]`
-- [ ] 3.2 Create `tests/conftest.py` with a session-scoped `pg_engine` fixture using `testcontainers` PostgreSQL container and SQLAlchemy `create_engine`
+- [ ] 3.2 Create `tests/conftest.py` with a session-scoped `pg_engine` fixture using `testcontainers` PostgreSQL
+  container and SQLAlchemy `create_engine`
 - [ ] 3.3 Add `test-unit` target to `Makefile` that runs `uv run pytest -m "not integration"`
 - [ ] 3.4 Update `.PHONY` in `Makefile` to include `test-unit`
 
 ## 4. Tests
 
-- [ ] 4.1 Replace `tests/test_placeholder.py` with `tests/test_import.py` — unit test verifying `import alembic_pg_autogen` and that the extension point modules are importable
-- [ ] 4.2 Create `tests/test_pg_connection.py` — integration test (marked `@pytest.mark.integration`) that uses the `pg_engine` fixture to create a table, insert a row, and query it back
+- [ ] 4.1 Replace `tests/test_placeholder.py` with `tests/test_import.py` — unit test verifying
+  `import alembic_pg_autogen` and that the extension point modules are importable
+- [ ] 4.2 Create `tests/test_pg_connection.py` — integration test (marked `@pytest.mark.integration`) that uses the
+  `pg_engine` fixture to create a table, insert a row, and query it back
 
 ## 5. Documentation
 
-- [ ] 5.1 Rewrite `README.md` — project description, installation, basic usage (how to configure Alembic to use this extension), development setup link
-- [ ] 5.2 Update `docs/development.md` to mention Docker requirement for integration tests and the `make test-unit` target
+- [ ] 5.1 Rewrite `README.md` — project description, installation, basic usage (how to configure Alembic to use this
+  extension), development setup link
+- [ ] 5.2 Update `docs/development.md` to mention Docker requirement for integration tests and the `make test-unit`
+  target
 
 ## 6. Validation
 

@@ -2,7 +2,9 @@
 
 ### Requirement: Core runtime dependencies
 
-The package SHALL declare `alembic` and `sqlalchemy>=2` as runtime dependencies in `pyproject.toml`. Only SQLAlchemy 2.x is supported. The PostgreSQL driver is NOT a runtime dependency — users bring their own driver (psycopg, psycopg2, asyncpg, etc.). The package SHALL require Python >= 3.10.
+The package SHALL declare `alembic` and `sqlalchemy>=2` as runtime dependencies in `pyproject.toml`. Only SQLAlchemy 2.x
+is supported. The PostgreSQL driver is NOT a runtime dependency — users bring their own driver (psycopg, psycopg2,
+asyncpg, etc.). The package SHALL require Python >= 3.10.
 
 #### Scenario: Package installs with core runtime dependencies
 
@@ -29,7 +31,8 @@ The package SHALL declare `alembic` and `sqlalchemy>=2` as runtime dependencies 
 
 ### Requirement: Module structure for Alembic autogenerate extension
 
-The package SHALL provide a module layout with separate private modules for the three Alembic autogenerate extension points: comparators, operations, and renderers.
+The package SHALL provide a module layout with separate private modules for the three Alembic autogenerate extension
+points: comparators, operations, and renderers.
 
 #### Scenario: Extension point modules exist
 
@@ -53,7 +56,8 @@ The package SHALL provide a module layout with separate private modules for the 
 
 ### Requirement: Integration testing with ephemeral PostgreSQL
 
-The package SHALL include test infrastructure that spins up an ephemeral PostgreSQL instance using Docker containers via the `testcontainers` library.
+The package SHALL include test infrastructure that spins up an ephemeral PostgreSQL instance using Docker containers via
+the `testcontainers` library.
 
 #### Scenario: testcontainers and psycopg are dev dependencies
 
