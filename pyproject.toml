@@ -170,4 +170,5 @@ norecursedirs = []
 filterwarnings = []
 markers = [
     "integration: tests requiring Docker and a PostgreSQL container",
+    "postgis: tests requiring a PostGIS-enabled PostgreSQL container",
 ]

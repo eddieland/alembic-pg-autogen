@@ -90,6 +90,12 @@ FROM pg_catalog.pg_proc p
 JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
 WHERE p.prokind IN ('f', 'p')
   AND ({schema_filter})
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_depend d
+      WHERE d.classid = 'pg_catalog.pg_proc'::regclass
+        AND d.objid = p.oid
+        AND d.deptype = 'e'
+  )
 ORDER BY n.nspname, p.proname, identity_args
 """
 
@@ -104,6 +110,12 @@ JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 WHERE NOT t.tgisinternal
   AND ({schema_filter})
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_depend d
+      WHERE d.classid = 'pg_catalog.pg_trigger'::regclass
+        AND d.objid = t.oid
+        AND d.deptype = 'e'
+  )
 ORDER BY n.nspname, c.relname, t.tgname
 """
 

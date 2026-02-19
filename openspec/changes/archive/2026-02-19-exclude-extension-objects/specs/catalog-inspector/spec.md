@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Bulk-load function definitions from PostgreSQL catalog
 
@@ -90,66 +90,11 @@ PostgreSQL extension by filtering out rows where `pg_depend` contains a dependen
 - **WHEN** `inspect_triggers` is called on a database with no user-defined triggers
 - **THEN** it returns an empty sequence
 
-### Requirement: FunctionInfo dataclass
-
-The module SHALL provide a `FunctionInfo` dataclass representing a single PostgreSQL function or procedure as loaded
-from the catalog.
-
-#### Scenario: FunctionInfo fields
-
-- **WHEN** a `FunctionInfo` instance is created
-- **THEN** it has the following fields:
-  - `schema` (`str`): the namespace name from `pg_namespace.nspname`
-  - `name` (`str`): the function name from `pg_proc.proname`
-  - `identity_args` (`str`): the argument type signature for identity matching, derived from `pg_proc.proargtypes` using
-    `format_type()`
-  - `definition` (`str`): the complete canonical DDL from `pg_get_functiondef()`
-
-#### Scenario: FunctionInfo identity
-
-- **WHEN** two `FunctionInfo` instances have the same `schema`, `name`, and `identity_args`
-- **THEN** they represent the same database function
-
-### Requirement: TriggerInfo dataclass
-
-The module SHALL provide a `TriggerInfo` dataclass representing a single PostgreSQL trigger as loaded from the catalog.
-
-#### Scenario: TriggerInfo fields
-
-- **WHEN** a `TriggerInfo` instance is created
-- **THEN** it has the following fields:
-  - `schema` (`str`): the table's namespace name from `pg_namespace.nspname`
-  - `table_name` (`str`): the table name from `pg_class.relname`
-  - `trigger_name` (`str`): the trigger name from `pg_trigger.tgname`
-  - `definition` (`str`): the complete canonical DDL from `pg_get_triggerdef()`
-
-#### Scenario: TriggerInfo identity
-
-- **WHEN** two `TriggerInfo` instances have the same `schema`, `table_name`, and `trigger_name`
-- **THEN** they represent the same database trigger
-
-### Requirement: SQLAlchemy connection as input
-
-Both `inspect_functions` and `inspect_triggers` SHALL accept a SQLAlchemy `Connection` object as their first argument.
-They SHALL NOT create connections, engines, or manage transactions.
-
-#### Scenario: Uses provided connection
-
-- **WHEN** either inspect function is called with a SQLAlchemy `Connection`
-- **THEN** it executes catalog queries using that connection
-- **AND** it does not create any new connections or engines
-
-#### Scenario: Works within caller's transaction
-
-- **WHEN** the caller has an active transaction on the connection
-- **THEN** the inspect functions execute their queries within that existing transaction
-- **AND** they do not commit, rollback, or create savepoints
-
-### Requirement: Catalog queries use raw SQL
+### Requirement: Single query per object type
 
 Both inspect functions SHALL execute catalog queries using `sqlalchemy.text()` with raw SQL against PostgreSQL system
-catalog tables (`pg_proc`, `pg_trigger`, `pg_class`, `pg_namespace`, `pg_type`). They SHALL NOT use SQLAlchemy ORM or
-reflection APIs for catalog access.
+catalog tables. The extension-ownership check SHALL be performed within the same SQL query (via a `NOT EXISTS` subquery
+against `pg_depend`), not as a separate query or Python-side filter.
 
 #### Scenario: Single query for functions including extension filter
 
