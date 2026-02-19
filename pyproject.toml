@@ -1,23 +1,13 @@
-# ---- Project Info and Dependencies ----
-
-[project.urls]
-Repository = "https://github.com/eddie-on-gh/alembic-pg-autogen"
-# Homepage = "https://..."
-# Documentation = "https://..."
-
 [project]
 name = "alembic-pg-autogen"
 description = "Alembic autogenerate extension for PostgreSQL-specific objects"
 authors = [
-    { name="Edward Jones", email="edwardrjones97@gmail.com" },
+    { name = "Edward Jones", email = "edwardrjones97@gmail.com" },
 ]
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10,<4.0"
 dynamic = ["version"]
-
-# https://pypi.org/classifiers/
-# Adjust as needed:
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -33,17 +23,13 @@ classifiers = [
     "Topic :: Database :: Front-Ends",
     "Typing :: Typed",
 ]
-
-
-# ---- Main dependencies ----
-
 dependencies = [
     "alembic",
     "sqlalchemy>=2",
 ]
 
-
-# ---- Dev dependencies ----
+[project.urls]
+Repository = "https://github.com/eddie-on-gh/alembic-pg-autogen"
 
 [dependency-groups]
 dev = [
@@ -60,21 +46,13 @@ dev = [
     "testcontainers[postgres]",
 ]
 
-
-# ---- Build system ----
-
-# Dynamic versioning from:
-# https://github.com/ninoseki/uv-dynamic-versioning/
-
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
+# https://github.com/ninoseki/uv-dynamic-versioning/
 source = "uv-dynamic-versioning"
-# Note JSON schemas don't seem to be right for tool.hatch.version.source so
-# this may cause false warnings in IDEs.
-# https://github.com/ninoseki/uv-dynamic-versioning/issues/21
 
 [tool.uv-dynamic-versioning]
 vcs = "git"
@@ -82,14 +60,9 @@ style = "pep440"
 bump = true
 
 [tool.hatch.build.targets.wheel]
-# The source location for the package.
 packages = ["src/alembic_pg_autogen"]
 
-
-# ---- Settings ----
-
 [tool.ruff]
-# Set as desired, typically 88 (black standard) or 100 (wide).
 line-length = 120
 
 [tool.ruff.lint]
@@ -170,10 +143,7 @@ end_of_line = "lf"
 python_files = ["*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-testpaths = [
-    "src",
-    "tests",
-]
+testpaths = ["src", "tests"]
 norecursedirs = []
 filterwarnings = []
 markers = [

@@ -1,0 +1,7 @@
+# PEP 561 marker file. The presence of this file in a package indicates that
+# it supports type checking and ships inline type information.
+#
+# Without this file, type checkers like mypy and pyright will ignore the
+# package's type annotations when it is installed as a dependency.
+#
+# See: https://mypy.readthedocs.io/en/stable/installed_packages.html
