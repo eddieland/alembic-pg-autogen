@@ -23,8 +23,11 @@ fmt: ## Run autoformatters and autofixers
 lint: fmt ## Format, then type-check (basedpyright)
 	uv run basedpyright --stats $(SRC_PATHS)
 
-test: ## Run tests
+test: ## Run tests (unit + integration, requires Docker)
 	uv run pytest
+
+test-unit: ## Run unit tests only (no Docker required)
+	uv run pytest -m "not integration"
 
 ##@ Build & Release
 
@@ -52,4 +55,4 @@ help: ## Show this help
 		/^[a-zA-Z_-]+:.*?## / { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: default install fmt lint test build upgrade clean help
+.PHONY: default install fmt lint test test-unit build upgrade clean help

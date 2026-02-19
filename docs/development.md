@@ -29,8 +29,11 @@ make build
 # Linting:
 make lint
 
-# Run tests:
+# Run all tests (unit + integration, requires Docker):
 make test
+
+# Run unit tests only (no Docker needed):
+make test-unit
 
 # Delete all the build artifacts:
 make clean
@@ -64,6 +67,13 @@ source .venv/bin/activate
 ```
 
 See [uv docs](https://docs.astral.sh/uv/) for details.
+
+## Docker Requirement
+
+Integration tests use [testcontainers](https://testcontainers-python.readthedocs.io/) to spin up ephemeral PostgreSQL
+containers. You need Docker installed and running to execute the full test suite (`make test`).
+
+If you don't have Docker available, use `make test-unit` to run only the unit tests.
 
 ## IDE setup
 

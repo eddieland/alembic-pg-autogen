@@ -7,38 +7,39 @@ Repository = "https://github.com/eddie-on-gh/alembic-pg-autogen"
 
 [project]
 name = "alembic-pg-autogen"
-description = "changeme"
+description = "Alembic autogenerate extension for PostgreSQL-specific objects"
 authors = [
     { name="Edward Jones", email="edwardrjones97@gmail.com" },
 ]
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11,<4.0"
+requires-python = ">=3.10,<4.0"
 dynamic = ["version"]
 
 # https://pypi.org/classifiers/
 # Adjust as needed:
 classifiers = [
-    # Adjust as needed:
-    "Development Status :: 4 - Beta",
-    # "Development Status :: 5 - Production/Stable",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
     "Typing :: Typed",
-    # Include this to avoid accidentally publishing to PyPI:
-    # "Private :: Do Not Upload",
 ]
 
 
 # ---- Main dependencies ----
 
 dependencies = [
+    "alembic",
+    "sqlalchemy>=2",
 ]
 
 
@@ -46,20 +47,18 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "pytest>=9.0.2",
-    "pytest-sugar>=1.1.1",
-    "ruff>=0.15.1",
-    "codespell>=2.4.1",
     "basedpyright>=1.38.0",
-    "mdformat>=0.7.22",
+    "codespell>=2.4.1",
     "mdformat-gfm>=0.4",
     "mdformat-pyproject>=0.0.2",
     "mdformat-ruff>=0.1",
+    "mdformat>=0.7.22",
+    "psycopg[binary]",
+    "pytest-sugar>=1.1.1",
+    "pytest>=9.0.2",
+    "ruff>=0.15.1",
+    "testcontainers[postgres]",
 ]
-
-[project.scripts]
-# Add script entry points here:
-alembic-pg-autogen = "alembic_pg_autogen:main"
 
 
 # ---- Build system ----
@@ -177,3 +176,6 @@ testpaths = [
 ]
 norecursedirs = []
 filterwarnings = []
+markers = [
+    "integration: tests requiring Docker and a PostgreSQL container",
+]

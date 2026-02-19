@@ -1,20 +1,10 @@
 # alembic-pg-autogen
 
-An Alembic autogenerate extension for PostgreSQL. Extends Alembic's `--autogenerate` to detect and emit migrations for
+Alembic autogenerate extension for PostgreSQL. Extends Alembic's `--autogenerate` to detect and emit migrations for
 PostgreSQL-specific objects that Alembic doesn't handle out of the box.
 
-> **Note:** This project is in early development. The capabilities described below are aspirational and not yet
-> implemented.
-
-## Goals
-
-- **PostgreSQL-native autogeneration** — Detect diffs and generate migration code for PostgreSQL objects beyond what
-  Alembic covers by default (e.g., custom types, extensions, policies, and other DDL).
-- **Seamless Alembic integration** — Plug into Alembic's existing autogenerate pipeline via its standard extension
-  points (comparators, operations, renderers), so `alembic revision --autogenerate` just works.
-- **No new CLI** — This is a library extension, not a standalone tool. It enhances Alembic rather than replacing or
-  wrapping it.
-- **PostgreSQL only** — Focused entirely on PostgreSQL. No multi-database abstraction layer.
+> **Note:** This project is in early development. The extension points are scaffolded but no autogeneration logic is
+> implemented yet.
 
 ## Installation
 
@@ -22,9 +12,23 @@ PostgreSQL-specific objects that Alembic doesn't handle out of the box.
 pip install alembic-pg-autogen
 ```
 
-Requires Python 3.11+.
+Requires Python 3.10+ and SQLAlchemy 2.x. You provide your own PostgreSQL driver (psycopg, psycopg2, asyncpg, etc.).
+
+## Usage
+
+Configure Alembic's `env.py` to register this extension's comparators, operations, and renderers:
+
+```python
+# In your env.py
+import alembic_pg_autogen  # noqa: F401
+```
+
+Then run `alembic revision --autogenerate` as usual. The extension hooks into Alembic's autogenerate pipeline to detect
+PostgreSQL-specific changes.
 
 ## Development
+
+See [docs/development.md](docs/development.md) for full setup instructions.
 
 ```bash
 make install     # Install dependencies (uses uv)
@@ -33,5 +37,6 @@ make test        # Run full test suite (requires Docker for integration tests)
 make test-unit   # Run unit tests only (no Docker needed)
 ```
 
-Integration tests use [testcontainers](https://testcontainers-python.readthedocs.io/) to spin up ephemeral PostgreSQL
-instances, so Docker must be available for the full test suite.
+## License
+
+MIT
