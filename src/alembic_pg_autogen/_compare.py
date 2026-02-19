@@ -77,7 +77,14 @@ def _compare_pg_objects(
 ) -> PriorityDispatchResult:
     """Compare current database state against desired functions/triggers."""
     opts = autogen_context.opts  # pyright: ignore[reportAttributeAccessIssue]
+    log.debug(
+        "_compare_pg_objects called, schemas=%r, pg_functions in opts=%r, pg_triggers in opts=%r",
+        schemas,
+        "pg_functions" in opts,
+        "pg_triggers" in opts,
+    )
     if "pg_functions" not in opts and "pg_triggers" not in opts:
+        log.debug("Neither pg_functions nor pg_triggers in opts, skipping")
         return PriorityDispatchResult.CONTINUE
 
     pg_functions: Sequence[str] = opts.get("pg_functions", ())
@@ -87,18 +94,22 @@ def _compare_pg_objects(
     assert conn is not None  # guaranteed during online autogenerate
 
     resolved_schemas = _resolve_schemas(conn, schemas)
+    log.debug("resolved_schemas=%r", resolved_schemas)
 
     current_functions = inspect_functions(conn, resolved_schemas)
     current_triggers = inspect_triggers(conn, resolved_schemas)
     current = CanonicalState(functions=current_functions, triggers=current_triggers)
+    log.debug("current: %d functions, %d triggers", len(current_functions), len(current_triggers))
 
     canonical = canonicalize(conn, function_ddl=pg_functions, trigger_ddl=pg_triggers)
     canonical = _filter_to_schemas(canonical, resolved_schemas)
     desired = _filter_to_declared(canonical, pg_functions, pg_triggers, conn)
+    log.debug("desired: %d functions, %d triggers", len(desired.functions), len(desired.triggers))
 
     result = diff(current, desired)
 
     ops = _order_ops(result.function_ops, result.trigger_ops)
+    log.debug("generated %d ops: %r", len(ops), [type(o).__name__ for o in ops])
     upgrade_ops.ops.extend(ops)
 
     return PriorityDispatchResult.CONTINUE
