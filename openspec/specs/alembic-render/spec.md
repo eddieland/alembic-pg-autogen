@@ -1,0 +1,122 @@
+## ADDED Requirements
+
+### Requirement: Renderer registration
+
+The module SHALL register a renderer function for each of the six operation classes using
+`alembic.autogenerate.render.renderers.dispatch_for()`. Registration SHALL occur at module import time.
+
+#### Scenario: All six op types have renderers
+
+- **WHEN** `_render.py` is imported
+- **THEN** renderers are registered for `CreateFunctionOp`, `ReplaceFunctionOp`, `DropFunctionOp`, `CreateTriggerOp`,
+  `ReplaceTriggerOp`, and `DropTriggerOp`
+
+#### Scenario: Renderer signature
+
+- **WHEN** a renderer is called by Alembic
+- **THEN** it accepts `(autogen_context: AutogenContext, op: MigrateOperation)` and returns `str | list[str]`
+
+### Requirement: Function create rendering
+
+The renderer for `CreateFunctionOp` SHALL emit an `op.execute()` call containing the function's full DDL from
+`desired.definition`.
+
+#### Scenario: Render create function
+
+- **WHEN** a `CreateFunctionOp` is rendered with `desired.definition` containing
+  `"CREATE OR REPLACE FUNCTION public.my_fn() RETURNS void ..."`
+- **THEN** the output is an `op.execute(...)` call wrapping that DDL string
+
+### Requirement: Function replace rendering
+
+The renderer for `ReplaceFunctionOp` SHALL emit an `op.execute()` call containing the desired function's full DDL. The
+output is identical in form to create rendering because `CREATE OR REPLACE FUNCTION` is idempotent.
+
+#### Scenario: Render replace function
+
+- **WHEN** a `ReplaceFunctionOp` is rendered with `desired.definition` containing updated function DDL
+- **THEN** the output is an `op.execute(...)` call wrapping the desired DDL string
+
+### Requirement: Function drop rendering
+
+The renderer for `DropFunctionOp` SHALL emit an `op.execute()` call with a `DROP FUNCTION` statement constructed from
+the function's schema, name, and identity args.
+
+#### Scenario: Render drop function
+
+- **WHEN** a `DropFunctionOp` is rendered with `current.schema="public"`, `current.name="old_fn"`,
+  `current.identity_args="integer, text"`
+- **THEN** the output is `op.execute("DROP FUNCTION public.old_fn(integer, text)")`
+
+#### Scenario: Render drop function with no args
+
+- **WHEN** a `DropFunctionOp` is rendered with `current.schema="audit"`, `current.name="cleanup"`,
+  `current.identity_args=""`
+- **THEN** the output is `op.execute("DROP FUNCTION audit.cleanup()")`
+
+### Requirement: Trigger create rendering
+
+The renderer for `CreateTriggerOp` SHALL emit an `op.execute()` call containing the trigger's full DDL from
+`desired.definition`.
+
+#### Scenario: Render create trigger
+
+- **WHEN** a `CreateTriggerOp` is rendered with `desired.definition` containing
+  `"CREATE TRIGGER audit_trg AFTER INSERT ON public.orders ..."`
+- **THEN** the output is an `op.execute(...)` call wrapping that DDL string
+
+### Requirement: Trigger replace rendering
+
+The renderer for `ReplaceTriggerOp` SHALL emit two `op.execute()` calls: first a `DROP TRIGGER` statement, then the
+desired trigger's full DDL. Two statements are required because `pg_get_triggerdef()` returns `CREATE TRIGGER` (not
+`CREATE OR REPLACE TRIGGER`).
+
+#### Scenario: Render replace trigger
+
+- **WHEN** a `ReplaceTriggerOp` is rendered with `current.schema="public"`, `current.table_name="orders"`,
+  `current.trigger_name="audit_trg"`, and `desired.definition` containing updated trigger DDL
+- **THEN** the output is a list of two `op.execute(...)` calls:
+  1. `op.execute("DROP TRIGGER audit_trg ON public.orders")`
+  1. `op.execute(...)` wrapping the desired DDL string
+
+### Requirement: Trigger drop rendering
+
+The renderer for `DropTriggerOp` SHALL emit an `op.execute()` call with a `DROP TRIGGER` statement constructed from the
+trigger's name, schema, and table name.
+
+#### Scenario: Render drop trigger
+
+- **WHEN** a `DropTriggerOp` is rendered with `current.schema="public"`, `current.table_name="events"`,
+  `current.trigger_name="notify_trg"`
+- **THEN** the output is `op.execute("DROP TRIGGER notify_trg ON public.events")`
+
+### Requirement: DDL string quoting in rendered output
+
+The renderers SHALL properly quote DDL strings in the generated Python code so that the migration file is valid Python.
+DDL containing single quotes (common in PL/pgSQL function bodies) SHALL be handled without syntax errors.
+
+#### Scenario: DDL with single quotes
+
+- **WHEN** a function DDL contains single-quoted string literals (e.g., `'active'` in a PL/pgSQL body)
+- **THEN** the rendered `op.execute(...)` call uses a quoting strategy (such as `textwrap.dedent` with triple quotes)
+  that preserves the DDL without Python syntax errors
+
+#### Scenario: DDL with backslashes
+
+- **WHEN** a function DDL contains backslash characters
+- **THEN** the rendered output preserves them correctly in the migration file
+
+### Requirement: No library imports in rendered migration files
+
+The renderers SHALL NOT inject any imports from `alembic_pg_autogen` into the rendered migration files. The rendered
+code SHALL use only `op.execute()` which is provided by Alembic's built-in imports.
+
+#### Scenario: No imports added
+
+- **WHEN** any renderer is called
+- **THEN** it does not add entries to `autogen_context.imports`
+
+#### Scenario: Migration file is self-contained
+
+- **WHEN** a migration file is generated containing function/trigger operations
+- **THEN** the migration file can be executed without `alembic_pg_autogen` being installed (only `alembic` is needed)

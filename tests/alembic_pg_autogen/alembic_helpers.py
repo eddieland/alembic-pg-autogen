@@ -84,16 +84,29 @@ class AlembicProject:
 
 
 _ENV_PY = """\
+import alembic_pg_autogen  # noqa: F401  # registers plugin
 from alembic import context
+from sqlalchemy import MetaData, text
 
 config = context.config
 connection = config.attributes["connection"]
-target_metadata = config.attributes.get("target_metadata")
+target_metadata = config.attributes.get("target_metadata") or MetaData()
+pg_functions = config.attributes.get("pg_functions", ())
+pg_triggers = config.attributes.get("pg_triggers", ())
+search_path = config.attributes.get("search_path")
 
 
 def run_migrations_online() -> None:
     with connection.connect() as conn:
-        context.configure(connection=conn, target_metadata=target_metadata)
+        if search_path:
+            conn.execute(text(f"SET search_path TO {search_path}"))
+        context.configure(
+            connection=conn,
+            target_metadata=target_metadata,
+            autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+            pg_functions=pg_functions,
+            pg_triggers=pg_triggers,
+        )
         with context.begin_transaction():
             context.run_migrations()
 
