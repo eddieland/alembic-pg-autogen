@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from alembic.config import Config
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -31,6 +32,9 @@ class AlembicProject:
         self._engine: Final = engine
         self._tmp_path: Final = tmp_path
         self._schema: Final = f"test_{uuid.uuid4().hex[:12]}"
+        self._migration_engine: Final = create_engine(
+            engine.url, connect_args={"options": f"-csearch_path={self._schema}"}, poolclass=NullPool
+        )
         self._setup_schema()
         self._setup_directory()
 
@@ -44,7 +48,7 @@ class AlembicProject:
         """Return an Alembic ``Config`` pointing at the project directory."""
         cfg = Config(str(self._tmp_path / "alembic.ini"))
         cfg.set_main_option("script_location", str(self._tmp_path / "alembic"))
-        cfg.attributes["connection"] = self._engine
+        cfg.attributes["connection"] = self._migration_engine
         return cfg
 
     def execute(self, sql: str) -> None:
@@ -65,6 +69,7 @@ class AlembicProject:
 
     def teardown(self) -> None:
         """Drop the isolated schema and all objects within it."""
+        self._migration_engine.dispose()
         with self._engine.connect() as conn:
             conn.execute(text(f"DROP SCHEMA IF EXISTS {self._schema} CASCADE"))
             conn.commit()
@@ -86,20 +91,17 @@ class AlembicProject:
 _ENV_PY = """\
 import alembic_pg_autogen  # noqa: F401  # registers plugin
 from alembic import context
-from sqlalchemy import MetaData, text
+from sqlalchemy import MetaData
 
 config = context.config
 connection = config.attributes["connection"]
 target_metadata = config.attributes.get("target_metadata") or MetaData()
 pg_functions = config.attributes.get("pg_functions", ())
 pg_triggers = config.attributes.get("pg_triggers", ())
-search_path = config.attributes.get("search_path")
 
 
 def run_migrations_online() -> None:
     with connection.connect() as conn:
-        if search_path:
-            conn.execute(text(f"SET search_path TO {search_path}"))
         context.configure(
             connection=conn,
             target_metadata=target_metadata,

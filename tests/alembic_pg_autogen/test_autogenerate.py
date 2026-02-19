@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 def _autogenerate(project: AlembicProject, **attrs: object) -> str:
     """Run autogenerate and return the generated migration file content."""
     cfg = project.config
-    cfg.attributes["search_path"] = project.schema
     for key, value in attrs.items():
         cfg.attributes[key] = value
 
