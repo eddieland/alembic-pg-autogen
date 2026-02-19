@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING
 
 from alembic.operations.ops import MigrateOperation
+from typing_extensions import override
 
 if TYPE_CHECKING:
     from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo
