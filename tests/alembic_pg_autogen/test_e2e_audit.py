@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from alembic.command import downgrade, revision, upgrade
@@ -15,7 +15,9 @@ from alembic_pg_autogen import inspect_functions, inspect_triggers
 if TYPE_CHECKING:
     from .alembic_helpers import AlembicProject
 
-TABLES = ("users", "orders", "payments", "products", "inventory")
+TABLES: Final = ("users", "orders", "payments", "products", "inventory")
+SHAPE_C_TABLES: Final = ("users", "orders", "payments")
+OPERATIONS: Final = ("insert", "update", "delete")
 
 
 def _autogenerate(project: AlembicProject, **attrs: object) -> str:
@@ -94,6 +96,42 @@ def _shape_b_trigger(schema: str, table: str) -> str:
 CREATE OR REPLACE TRIGGER audit_{table}_trg
 AFTER INSERT OR UPDATE ON {schema}.{table}
 FOR EACH ROW EXECUTE FUNCTION {schema}.audit_fn()"""
+
+
+def _shape_c_helper_function(schema: str) -> str:
+    """Return the shared ``current_audit_event_id()`` helper (LANGUAGE SQL)."""
+    return f"""\
+CREATE OR REPLACE FUNCTION {schema}.current_audit_event_id()
+RETURNS integer
+LANGUAGE SQL
+AS $$
+    SELECT NULLIF(CURRENT_SETTING('app.audit_event.id', TRUE), '')::integer;
+$$"""
+
+
+def _shape_c_function(schema: str, table: str, op: str) -> str:
+    """Return a per-table per-operation trigger function that calls the helper."""
+    src = "OLD" if op == "delete" else "NEW"
+    return f"""\
+CREATE OR REPLACE FUNCTION {schema}.fn_{table}_{op}()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO {schema}.audit_log (table_name, action, row_data)
+    VALUES ('{table}', '{op.upper()}', row_to_json({src}));
+    PERFORM {schema}.current_audit_event_id();
+    RETURN {src};
+END;
+$$"""
+
+
+def _shape_c_trigger(schema: str, table: str, op: str) -> str:
+    """Return a per-operation trigger for a table."""
+    return f"""\
+CREATE OR REPLACE TRIGGER {table}_{op}
+AFTER {op.upper()} ON {schema}.{table}
+FOR EACH ROW EXECUTE FUNCTION {schema}.fn_{table}_{op}()"""
 
 
 def _reflected_metadata(project: AlembicProject) -> MetaData:
@@ -483,3 +521,229 @@ $$"""
 
         # Create/replace functions before create triggers
         assert max(create_fn_positions) < min(create_trg_positions)
+
+
+@pytest.mark.integration
+class TestShapeCInitialCreation:
+    """7.1 — Shape C: initial creation of helper + per-op trigger functions and triggers."""
+
+    def test_creates_all_functions_and_triggers(self, alembic_project: AlembicProject) -> None:
+        schema = alembic_project.schema
+        _setup_tables(alembic_project, SHAPE_C_TABLES)
+
+        fn_ddl = [_shape_c_helper_function(schema)] + [
+            _shape_c_function(schema, t, op) for t in SHAPE_C_TABLES for op in OPERATIONS
+        ]
+        trg_ddl = [_shape_c_trigger(schema, t, op) for t in SHAPE_C_TABLES for op in OPERATIONS]
+
+        content = _autogenerate(alembic_project, pg_functions=fn_ddl, pg_triggers=trg_ddl)
+        body = _upgrade_body(content)
+
+        # 1 helper + 9 trigger functions = 10 CREATE OR REPLACE FUNCTION
+        assert _count_occurrences(body, r"CREATE OR REPLACE FUNCTION") == 10
+        assert _count_occurrences(body, r"CREATE TRIGGER") == 9
+
+        # Functions must appear before triggers in upgrade
+        fn_positions = [m.start() for m in re.finditer(r"CREATE OR REPLACE FUNCTION", body, re.IGNORECASE)]
+        trg_positions = [m.start() for m in re.finditer(r"CREATE TRIGGER", body, re.IGNORECASE)]
+        assert max(fn_positions) < min(trg_positions), "All function creates should precede trigger creates"
+
+
+@pytest.mark.integration
+class TestShapeCNoOp:
+    """7.2 — Shape C: no-op when database matches desired state."""
+
+    def test_matching_state_produces_no_ops(self, alembic_project: AlembicProject) -> None:
+        schema = alembic_project.schema
+        _setup_tables(alembic_project, SHAPE_C_TABLES)
+
+        alembic_project.execute(_shape_c_helper_function(schema))
+        for t in SHAPE_C_TABLES:
+            for op in OPERATIONS:
+                alembic_project.execute(_shape_c_function(schema, t, op))
+                alembic_project.execute(_shape_c_trigger(schema, t, op))
+
+        fn_ddl = [_shape_c_helper_function(schema)] + [
+            _shape_c_function(schema, t, op) for t in SHAPE_C_TABLES for op in OPERATIONS
+        ]
+        trg_ddl = [_shape_c_trigger(schema, t, op) for t in SHAPE_C_TABLES for op in OPERATIONS]
+
+        content = _autogenerate(alembic_project, pg_functions=fn_ddl, pg_triggers=trg_ddl)
+        body = _upgrade_body(content)
+        assert "op.execute(" not in body
+
+
+@pytest.mark.integration
+class TestShapeCFunctionModification:
+    """7.3 — Shape C: modifying one trigger function body produces exactly one replace."""
+
+    def test_single_function_change(self, alembic_project: AlembicProject) -> None:
+        schema = alembic_project.schema
+        _setup_tables(alembic_project, SHAPE_C_TABLES)
+
+        alembic_project.execute(_shape_c_helper_function(schema))
+        for t in SHAPE_C_TABLES:
+            for op in OPERATIONS:
+                alembic_project.execute(_shape_c_function(schema, t, op))
+                alembic_project.execute(_shape_c_trigger(schema, t, op))
+
+        # Modify fn_orders_update to also log changed_at
+        modified_fn = f"""\
+CREATE OR REPLACE FUNCTION {schema}.fn_orders_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO {schema}.audit_log (table_name, action, row_data, changed_at)
+    VALUES ('orders', 'UPDATE', row_to_json(NEW), now());
+    PERFORM {schema}.current_audit_event_id();
+    RETURN NEW;
+END;
+$$"""
+        fn_ddl = [_shape_c_helper_function(schema)] + [
+            modified_fn if (t == "orders" and op == "update") else _shape_c_function(schema, t, op)
+            for t in SHAPE_C_TABLES
+            for op in OPERATIONS
+        ]
+        trg_ddl = [_shape_c_trigger(schema, t, op) for t in SHAPE_C_TABLES for op in OPERATIONS]
+
+        content = _autogenerate(alembic_project, pg_functions=fn_ddl, pg_triggers=trg_ddl)
+        body = _upgrade_body(content)
+
+        assert _count_occurrences(body, r"CREATE OR REPLACE FUNCTION") == 1
+        assert "fn_orders_update" in body
+        assert _count_occurrences(body, r"CREATE TRIGGER") == 0
+
+
+@pytest.mark.integration
+class TestShapeCHelperFunctionChange:
+    """7.4 — Shape C: modifying the helper function produces exactly one replace."""
+
+    def test_helper_function_change(self, alembic_project: AlembicProject) -> None:
+        schema = alembic_project.schema
+        _setup_tables(alembic_project, SHAPE_C_TABLES)
+
+        alembic_project.execute(_shape_c_helper_function(schema))
+        for t in SHAPE_C_TABLES:
+            for op in OPERATIONS:
+                alembic_project.execute(_shape_c_function(schema, t, op))
+                alembic_project.execute(_shape_c_trigger(schema, t, op))
+
+        # Modify helper body to add COALESCE fallback
+        modified_helper = f"""\
+CREATE OR REPLACE FUNCTION {schema}.current_audit_event_id()
+RETURNS integer
+LANGUAGE SQL
+AS $$
+    SELECT COALESCE(NULLIF(CURRENT_SETTING('app.audit_event.id', TRUE), '')::integer, 0);
+$$"""
+        fn_ddl = [modified_helper] + [_shape_c_function(schema, t, op) for t in SHAPE_C_TABLES for op in OPERATIONS]
+        trg_ddl = [_shape_c_trigger(schema, t, op) for t in SHAPE_C_TABLES for op in OPERATIONS]
+
+        content = _autogenerate(alembic_project, pg_functions=fn_ddl, pg_triggers=trg_ddl)
+        body = _upgrade_body(content)
+
+        assert _count_occurrences(body, r"CREATE OR REPLACE FUNCTION") == 1
+        assert "current_audit_event_id" in body
+        assert _count_occurrences(body, r"CREATE TRIGGER") == 0
+
+
+@pytest.mark.integration
+class TestShapeCAddTable:
+    """7.5 — Shape C: adding a new table adds 3 functions + 3 triggers."""
+
+    def test_adds_new_table_objects(self, alembic_project: AlembicProject) -> None:
+        schema = alembic_project.schema
+        _setup_tables(alembic_project, SHAPE_C_TABLES)
+
+        alembic_project.execute(_shape_c_helper_function(schema))
+        for t in SHAPE_C_TABLES:
+            for op in OPERATIONS:
+                alembic_project.execute(_shape_c_function(schema, t, op))
+                alembic_project.execute(_shape_c_trigger(schema, t, op))
+
+        # Add a new table
+        alembic_project.execute(f"CREATE TABLE {schema}.products (id serial PRIMARY KEY, name text)")
+        all_tables = (*SHAPE_C_TABLES, "products")
+
+        fn_ddl = [_shape_c_helper_function(schema)] + [
+            _shape_c_function(schema, t, op) for t in all_tables for op in OPERATIONS
+        ]
+        trg_ddl = [_shape_c_trigger(schema, t, op) for t in all_tables for op in OPERATIONS]
+
+        content = _autogenerate(alembic_project, pg_functions=fn_ddl, pg_triggers=trg_ddl)
+        body = _upgrade_body(content)
+
+        # 3 new functions for products (insert/update/delete), no helper change
+        assert _count_occurrences(body, r"CREATE OR REPLACE FUNCTION") == 3
+        assert _count_occurrences(body, r"CREATE TRIGGER") == 3
+        assert all(f"fn_products_{op}" in body for op in OPERATIONS)
+        assert all(f"products_{op}" in body for op in OPERATIONS)
+        # No changes to existing tables
+        for t in SHAPE_C_TABLES:
+            assert f"fn_{t}_" not in body or "products" in body
+
+
+@pytest.mark.integration
+class TestShapeCRemoveTable:
+    """7.6 — Shape C: removing a table drops 3 functions + 3 triggers."""
+
+    def test_drops_removed_table_objects(self, alembic_project: AlembicProject) -> None:
+        schema = alembic_project.schema
+        _setup_tables(alembic_project, SHAPE_C_TABLES)
+
+        alembic_project.execute(_shape_c_helper_function(schema))
+        for t in SHAPE_C_TABLES:
+            for op in OPERATIONS:
+                alembic_project.execute(_shape_c_function(schema, t, op))
+                alembic_project.execute(_shape_c_trigger(schema, t, op))
+
+        # Desired state excludes 'payments'
+        remaining = tuple(t for t in SHAPE_C_TABLES if t != "payments")
+        fn_ddl = [_shape_c_helper_function(schema)] + [
+            _shape_c_function(schema, t, op) for t in remaining for op in OPERATIONS
+        ]
+        trg_ddl = [_shape_c_trigger(schema, t, op) for t in remaining for op in OPERATIONS]
+
+        content = _autogenerate(alembic_project, pg_functions=fn_ddl, pg_triggers=trg_ddl)
+        body = _upgrade_body(content)
+
+        assert _count_occurrences(body, r"DROP FUNCTION") == 3
+        assert _count_occurrences(body, r"DROP TRIGGER") == 3
+        assert "payments" in body
+        assert "CREATE OR REPLACE FUNCTION" not in body.upper()
+        assert "CREATE TRIGGER" not in body.upper()
+
+
+@pytest.mark.integration
+class TestShapeCMigrationExecutes:
+    """7.7 — Shape C migration is executable: upgrade creates objects, downgrade removes them."""
+
+    def test_upgrade_and_downgrade(self, alembic_project: AlembicProject) -> None:
+        schema = alembic_project.schema
+        _setup_tables(alembic_project, SHAPE_C_TABLES)
+
+        fn_ddl = [_shape_c_helper_function(schema)] + [
+            _shape_c_function(schema, t, op) for t in SHAPE_C_TABLES for op in OPERATIONS
+        ]
+        trg_ddl = [_shape_c_trigger(schema, t, op) for t in SHAPE_C_TABLES for op in OPERATIONS]
+
+        cfg = alembic_project.config
+        cfg.attributes["pg_functions"] = fn_ddl
+        cfg.attributes["pg_triggers"] = trg_ddl
+        cfg.attributes["target_metadata"] = _reflected_metadata(alembic_project)
+        revision(cfg, message="shape_c", autogenerate=True)
+
+        upgrade(cfg, "head")
+        with alembic_project.connect() as conn:
+            fns = inspect_functions(conn, [schema])
+            trgs = inspect_triggers(conn, [schema])
+            assert len(fns) == 10  # 1 helper + 9 trigger functions
+            assert len(trgs) == 9
+
+        downgrade(cfg, "base")
+        with alembic_project.connect() as conn:
+            fns = inspect_functions(conn, [schema])
+            trgs = inspect_triggers(conn, [schema])
+            assert len(fns) == 0
+            assert len(trgs) == 0
