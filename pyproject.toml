@@ -75,6 +75,7 @@ select = [
     "B", # https://docs.astral.sh/ruff/rules/#flake8-bugbear-b
     "I", # https://docs.astral.sh/ruff/rules/#isort-i
     "D", # https://docs.astral.sh/ruff/rules/#pydocstyle-d
+    "G", # https://docs.astral.sh/ruff/rules/#flake8-logging-format-g
     # Other possibilities:
     # "Q", # https://docs.astral.sh/ruff/rules/#flake8-quotes-q
     # "COM", # https://docs.astral.sh/ruff/rules/#flake8-commas-com
