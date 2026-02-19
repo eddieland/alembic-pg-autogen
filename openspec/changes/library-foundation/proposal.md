@@ -4,7 +4,7 @@ This project is currently an empty scaffold from a template. Before building any
 
 ## What Changes
 
-- Add core dependencies: `alembic`, `sqlalchemy`, and a PostgreSQL driver (`psycopg`)
+- Add core runtime dependencies: `alembic` and `sqlalchemy` (no PostgreSQL driver — users bring their own)
 - Replace template-generated documentation with real project documentation (README, usage concepts, contributing guide)
 - Establish Docker-based integration testing infrastructure with ephemeral PostgreSQL containers
 - Structure tests following the testing pyramid (unit > integration > end-to-end)
@@ -15,7 +15,7 @@ This project is currently an empty scaffold from a template. Before building any
 
 ### New Capabilities
 
-- `library-foundation`: Everything needed to go from template scaffold to real Alembic extension library — core dependencies (alembic, sqlalchemy, psycopg), module layout, Docker-based integration testing with ephemeral PostgreSQL, testing pyramid structure, and project documentation replacing template boilerplate.
+- `library-foundation`: Everything needed to go from template scaffold to real Alembic extension library — core runtime dependencies (alembic, sqlalchemy>=2), Python >=3.10 support, module layout, Docker-based integration testing with ephemeral PostgreSQL (psycopg as dev dependency), testing pyramid structure, and project documentation replacing template boilerplate.
 
 ### Modified Capabilities
 
@@ -23,7 +23,7 @@ _(none — no existing specs)_
 
 ## Impact
 
-- **pyproject.toml**: New runtime dependencies (alembic, sqlalchemy, psycopg), new dev dependencies (testcontainers or similar), updated project description and metadata
+- **pyproject.toml**: New runtime dependencies (alembic, sqlalchemy), new dev dependencies (testcontainers, psycopg), updated project description and metadata
 - **src/alembic_pg_autogen/**: New module structure replacing the placeholder, though no functional logic yet
 - **tests/**: New test infrastructure replacing the placeholder test, pytest fixtures for ephemeral PostgreSQL
 - **docs/**: Rewritten documentation replacing template content
