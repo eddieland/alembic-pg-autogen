@@ -42,6 +42,10 @@ uv run pytest -k "test_name"
   a pre-commit hook.
 - **Codespell**: Spell checking on src, tests, docs, and markdown files.
 - Lint auto-fixes on run (`--fix`, `--write-changes`); running `make lint` modifies files in place.
+- **Module ordering**: Public API functions first, `_private` helpers after, generally in order of usefulness to someone
+  reading the module. Do not use visual fences/separators (e.g. `# ---- Private helpers ----`) to demarcate sections.
+- **Prefer `NamedTuple` over `dataclass`**: Use `typing.NamedTuple` for data containers wherever possible — they are
+  much cheaper to construct than frozen dataclasses and are immutable by default.
 
 ## Python Version
 

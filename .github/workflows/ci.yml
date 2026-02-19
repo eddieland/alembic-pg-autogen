@@ -57,10 +57,10 @@ jobs:
         run: uv sync --all-extras
 
       - name: Check formatting (mdformat)
-        run: uv run mdformat --check README.md CLAUDE.md docs/ openspec/
+        run: uv run mdformat --check README.md CLAUDE.md openspec/
 
       - name: Check spelling (codespell)
-        run: uv run codespell src tests README.md CLAUDE.md docs/ openspec/
+        run: uv run codespell src tests README.md CLAUDE.md openspec/
 
       - name: Lint (ruff)
         run: |

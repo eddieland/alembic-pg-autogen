@@ -1,11 +1,10 @@
 # Makefile for easy development workflows.
-# See docs/development.md for docs.
 # Note GitHub Actions call uv directly, not this Makefile.
 
 .DEFAULT_GOAL := help
 
 SRC_PATHS := src tests
-DOC_PATHS := README.md CLAUDE.md docs/ openspec/
+DOC_PATHS := README.md CLAUDE.md openspec/
 
 ##@ Development
 

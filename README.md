@@ -28,8 +28,6 @@ PostgreSQL-specific changes.
 
 ## Development
 
-See [docs/development.md](docs/development.md) for full setup instructions.
-
 ```bash
 make install     # Install dependencies (uses uv)
 make lint        # Run codespell, ruff, basedpyright
