@@ -21,7 +21,7 @@ jobs:
         # Update this as needed:
         # Common platforms: ["ubuntu-latest", "macos-latest", "windows-latest"]
         os: ["ubuntu-latest"]
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     # Linux only by default. Use ${{ matrix.os }} for other OSes.
     runs-on: ${{ matrix.os }}
@@ -56,8 +56,19 @@ jobs:
       - name: Install all dependencies
         run: uv sync --all-extras
 
-      - name: Run linting
-        run: uv run python devtools/lint.py
+      - name: Check formatting (mdformat)
+        run: uv run mdformat --check README.md CLAUDE.md docs/ openspec/
+
+      - name: Check spelling (codespell)
+        run: uv run codespell src tests README.md CLAUDE.md docs/ openspec/
+
+      - name: Lint (ruff)
+        run: |
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+
+      - name: Type check (basedpyright)
+        run: uv run basedpyright --stats src tests
 
       - name: Run tests
         run: uv run pytest
