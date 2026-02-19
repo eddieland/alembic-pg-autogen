@@ -39,3 +39,14 @@ uv run pytest -k "test_name"
 ## Python Version
 
 Requires Python >=3.11, <4.0. CI tests against 3.11–3.14.
+
+## OpenSpec
+
+This project uses **OpenSpec** for spec-driven changes. When implementing code, check for active changes in `openspec/changes/` — these contain proposals, design docs, specs, and task lists that describe what to build and how.
+
+- `openspec/specs/` — Main specification files (source of truth for the project's design)
+- `openspec/changes/` — Active changes with artifacts (proposal, design, delta specs, tasks)
+- `openspec/changes/archive/` — Completed changes
+- `openspec/config.yaml` — OpenSpec configuration
+
+When working on an OpenSpec change, read all context files (proposal, design, specs, tasks) before implementing. Keep changes minimal and scoped to each task. Mark tasks complete (`- [ ]` → `- [x]`) as you finish them.
