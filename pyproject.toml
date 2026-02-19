@@ -50,9 +50,7 @@ dev = [
     "pytest-sugar>=1.1.1",
     "ruff>=0.15.1",
     "codespell>=2.4.1",
-    "rich>=14.3.2",
     "basedpyright>=1.38.0",
-    "funlog>=0.2.1",
 ]
 
 [project.scripts]
@@ -134,7 +132,7 @@ ignore = [
 # than mypy and with a good extension for VSCode/Cursor.
 # https://marketplace.visualstudio.com/items?itemName=detachhead.basedpyright
 # https://docs.basedpyright.com/latest/configuration/config-files/#sample-pyprojecttoml-file
-include = ["src", "tests", "devtools"]
+include = ["src", "tests"]
 # By default BasedPyright is very strict, so you almost certainly want to disable
 # some of the rules.
 # First, these turn off warnings about (yes) how you ignore warnings:
