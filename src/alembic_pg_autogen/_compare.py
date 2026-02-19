@@ -32,7 +32,29 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Extract ``(schema, name)`` from a ``CREATE [OR REPLACE] FUNCTION`` statement.
+#:
+#: **Why regex is acceptable here.** The canonicalization layer honours the project's
+#: "no SQL parsing" rule — it passes DDL verbatim to PostgreSQL and never inspects
+#: the strings.  However, ``canonicalize()`` intentionally returns the *full* catalog
+#: state for every schema it touches, not just the objects the user declared (see the
+#: canonicalization design doc for why snapshot-diff was rejected).  The comparator
+#: therefore needs a way to narrow that full catalog back to user-declared objects.
+#: Extracting object identities from the DDL is the only way to do that without
+#: burdening the public API with redundant ``(schema, name)`` declarations.
+#:
+#: The patterns are intentionally minimal — they match only the ``CREATE ... name``
+#: preamble and ignore the rest of the statement.  They will *not* handle every legal
+#: PostgreSQL DDL form (e.g. quoted identifiers, comments before the object name), but
+#: they cover the practical subset that this library's users are expected to provide.
+#: If robustness becomes an issue, the preferred fix is to push identity resolution
+#: into the database (e.g. parse inside a PL/pgSQL helper) rather than expanding
+#: the regex.
 _FUNCTION_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:(\w+)\.)?(\w+)", re.IGNORECASE)
+
+#: Extract ``(trigger_name, schema, table_name)`` from a ``CREATE [OR REPLACE] TRIGGER``
+#: statement.  See :data:`_FUNCTION_RE` for the rationale on why lightweight regex
+#: extraction is used here.
 _TRIGGER_RE = re.compile(
     r"CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+(\w+)\s+.*?ON\s+(?:(\w+)\.)?(\w+)", re.IGNORECASE | re.DOTALL
 )
