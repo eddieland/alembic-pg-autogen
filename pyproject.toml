@@ -24,7 +24,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "alembic",
+    "alembic>=1.18",
     "sqlalchemy>=2",
 ]
 
