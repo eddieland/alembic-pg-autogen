@@ -31,7 +31,7 @@ uv run pytest -k "test_name"
 
 ## Code Style & Tooling
 
-- **Ruff**: Line length 100. Enabled rule sets: E, F, UP, B, I. E501 (line-too-long) is ignored.
+- **Ruff**: Line length 120. Enabled rule sets: E, F, UP, B, I. E501 (line-too-long) is ignored.
 - **BasedPyright**: Type checker. Configured in pyproject.toml with several strict rules relaxed (reportAny, reportUnusedCallResult, etc.).
 - **Codespell**: Spell checking on src, tests, and README.md.
 - Lint auto-fixes on run (`--fix`, `--write-changes`); running `make lint` modifies files in place.

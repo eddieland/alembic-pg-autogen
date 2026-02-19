@@ -87,7 +87,7 @@ packages = ["src/alembic_pg_autogen"]
 
 [tool.ruff]
 # Set as desired, typically 88 (black standard) or 100 (wide).
-line-length = 100
+line-length = 120
 
 [tool.ruff.lint]
 select = [

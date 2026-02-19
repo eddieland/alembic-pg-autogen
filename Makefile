@@ -2,37 +2,53 @@
 # See docs/development.md for docs.
 # Note GitHub Actions call uv directly, not this Makefile.
 
-.DEFAULT_GOAL := default
+.DEFAULT_GOAL := help
 
 SRC_PATHS := src tests
 DOC_PATHS := README.md
 
-.PHONY: default install lint test upgrade build clean
+##@ Development
 
-default: install lint test
+default: install lint test ## Install, lint, and test (full check)
 
-install:
+install: ## Install dependencies
 	uv sync --all-extras
 
-lint:
+fmt: ## Run autoformatters and autofixers
 	uv run codespell --write-changes $(SRC_PATHS) $(DOC_PATHS)
 	uv run ruff check --fix $(SRC_PATHS)
 	uv run ruff format $(SRC_PATHS)
+
+lint: fmt ## Format, then type-check (basedpyright)
 	uv run basedpyright --stats $(SRC_PATHS)
 
-test:
+test: ## Run tests
 	uv run pytest
 
-upgrade:
-	uv sync --upgrade --all-extras --dev
+##@ Build & Release
 
-build:
+build: ## Build package
 	uv build
 
-clean:
+##@ Maintenance
+
+upgrade: ## Upgrade all dependencies
+	uv sync --upgrade --all-extras --dev
+
+clean: ## Remove build artifacts, caches, .venv
 	-rm -rf dist/
 	-rm -rf *.egg-info/
 	-rm -rf .pytest_cache/
 	-rm -rf .mypy_cache/
 	-rm -rf .venv/
 	-find . -type d -name "__pycache__" -exec rm -rf {} +
+
+##@ Help
+
+help: ## Show this help
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} \
+		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } \
+		/^[a-zA-Z_-]+:.*?## / { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@echo
+
+.PHONY: default install fmt lint test build upgrade clean help
