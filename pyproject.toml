@@ -65,6 +65,11 @@ packages = ["src/alembic_pg_autogen"]
 [tool.ruff]
 line-length = 120
 
+[tool.ruff.format]
+line-ending = "lf"
+docstring-code-format = true
+docstring-code-line-length = 88
+
 [tool.ruff.lint]
 select = [
     # See: https://docs.astral.sh/ruff/rules/
