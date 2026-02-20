@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/eddie-on-gh/alembic-pg-autogen"
+Repository = "https://github.com/eddieland/alembic-pg-autogen"
 
 [dependency-groups]
 dev = [
