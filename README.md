@@ -1,5 +1,10 @@
 # alembic-pg-autogen
 
+[![CI](https://github.com/eddie-on-gh/alembic-pg-autogen/actions/workflows/ci.yml/badge.svg)](https://github.com/eddie-on-gh/alembic-pg-autogen/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/alembic-pg-autogen)](https://pypi.org/project/alembic-pg-autogen/)
+[![Python](https://img.shields.io/pypi/pyversions/alembic-pg-autogen)](https://pypi.org/project/alembic-pg-autogen/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Alembic autogenerate extension for PostgreSQL. Extends Alembic's `--autogenerate` to detect and emit migrations for
 PostgreSQL functions and triggers that Alembic doesn't handle out of the box.
 
