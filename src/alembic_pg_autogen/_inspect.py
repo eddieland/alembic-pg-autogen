@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import text
@@ -10,6 +11,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from sqlalchemy import Connection
+
+log = logging.getLogger(__name__)
 
 
 class FunctionInfo(NamedTuple):
@@ -48,9 +51,11 @@ def inspect_functions(conn: Connection, schemas: Sequence[str] | None = None) ->
     schema_filter, params = _build_schema_filter(schemas)
     query = text(_FUNCTIONS_QUERY.format(schema_filter=schema_filter))
     rows = conn.execute(query, params)
-    return [
+    result = [
         FunctionInfo(schema=r.schema, name=r.name, identity_args=r.identity_args, definition=r.definition) for r in rows
     ]
+    log.debug("Inspected %d functions (schemas=%s)", len(result), schemas)
+    return result
 
 
 def inspect_triggers(conn: Connection, schemas: Sequence[str] | None = None) -> Sequence[TriggerInfo]:
@@ -70,10 +75,12 @@ def inspect_triggers(conn: Connection, schemas: Sequence[str] | None = None) -> 
     schema_filter, params = _build_schema_filter(schemas)
     query = text(_TRIGGERS_QUERY.format(schema_filter=schema_filter))
     rows = conn.execute(query, params)
-    return [
+    result = [
         TriggerInfo(schema=r.schema, table_name=r.table_name, trigger_name=r.trigger_name, definition=r.definition)
         for r in rows
     ]
+    log.debug("Inspected %d triggers (schemas=%s)", len(result), schemas)
+    return result
 
 
 _EXCLUDED_SCHEMAS = ("pg_catalog", "information_schema")

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 from sqlalchemy import text
 
 from alembic_pg_autogen._inspect import inspect_functions, inspect_triggers
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -54,6 +57,7 @@ def canonicalize(
     Raises:
         sqlalchemy.exc.DBAPIError: If any DDL statement is invalid.
     """
+    log.info("Canonicalizing %d function and %d trigger DDL statements", len(function_ddl), len(trigger_ddl))
     savepoint = conn.begin_nested()
     try:
         for ddl in function_ddl:
@@ -65,6 +69,12 @@ def canonicalize(
         triggers = inspect_triggers(conn, schemas)
     finally:
         savepoint.rollback()
+        log.debug("Canonicalization savepoint rolled back")
+
+    if function_ddl and not functions:
+        log.warning("Canonicalization produced no functions despite %d function DDL statements", len(function_ddl))
+    if trigger_ddl and not triggers:
+        log.warning("Canonicalization produced no triggers despite %d trigger DDL statements", len(trigger_ddl))
 
     return CanonicalState(functions=functions, triggers=triggers)
 

@@ -95,7 +95,7 @@ def _compare_pg_objects(
     current_functions = inspect_functions(conn, resolved_schemas)
     current_triggers = inspect_triggers(conn, resolved_schemas)
     current = CanonicalState(functions=current_functions, triggers=current_triggers)
-    log.debug("current: %d functions, %d triggers", len(current_functions), len(current_triggers))
+    log.info("Found %d functions and %d triggers in database", len(current_functions), len(current_triggers))
 
     canonical = canonicalize(conn, function_ddl=pg_functions, trigger_ddl=pg_triggers)
     canonical = _filter_to_schemas(canonical, resolved_schemas)
@@ -105,7 +105,7 @@ def _compare_pg_objects(
     result = diff(current, desired)
 
     ops = _order_ops(result.function_ops, result.trigger_ops)
-    log.debug("generated %d ops: %r", len(ops), [type(o).__name__ for o in ops])
+    log.info("Autogenerate produced %d migration ops: %r", len(ops), [type(o).__name__ for o in ops])
     upgrade_ops.ops.extend(ops)
 
     return PriorityDispatchResult.CONTINUE
@@ -125,10 +125,20 @@ def _filter_to_declared(
     fn_names = _parse_function_names(pg_functions, conn)
     trg_ids = _parse_trigger_identities(pg_triggers, conn)
 
-    return CanonicalState(
-        functions=[f for f in canonical.functions if (f.schema, f.name) in fn_names],
-        triggers=[t for t in canonical.triggers if (t.schema, t.table_name, t.trigger_name) in trg_ids],
-    )
+    functions = [f for f in canonical.functions if (f.schema, f.name) in fn_names]
+    triggers = [t for t in canonical.triggers if (t.schema, t.table_name, t.trigger_name) in trg_ids]
+
+    fn_dropped = len(canonical.functions) - len(functions)
+    trg_dropped = len(canonical.triggers) - len(triggers)
+    if fn_dropped or trg_dropped:
+        log.debug("Filtered out %d functions and %d triggers not in user DDL", fn_dropped, trg_dropped)
+
+    if pg_functions and not functions:
+        log.warning("No canonical functions matched user DDL — check schema qualifiers in pg_functions")
+    if pg_triggers and not triggers:
+        log.warning("No canonical triggers matched user DDL — check schema qualifiers in pg_triggers")
+
+    return CanonicalState(functions=functions, triggers=triggers)
 
 
 def _parse_function_names(ddl_list: Sequence[str], conn: object) -> set[tuple[str, str]]:

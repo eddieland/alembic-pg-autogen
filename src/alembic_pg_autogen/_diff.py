@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import logging
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 if TYPE_CHECKING:
@@ -10,6 +11,8 @@ if TYPE_CHECKING:
 
     from alembic_pg_autogen._canonicalize import CanonicalState
     from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo
+
+log = logging.getLogger(__name__)
 
 
 class Action(enum.Enum):
@@ -61,10 +64,12 @@ def diff(current: CanonicalState, desired: CanonicalState) -> DiffResult:
     Returns:
         A :class:`DiffResult` with sorted sequences of function and trigger ops.
     """
-    return DiffResult(
+    result = DiffResult(
         function_ops=_diff_items(current.functions, desired.functions, FunctionOp),
         trigger_ops=_diff_items(current.triggers, desired.triggers, TriggerOp),
     )
+    log.debug("Diff produced %d function ops and %d trigger ops", len(result.function_ops), len(result.trigger_ops))
+    return result
 
 
 def _diff_items(
