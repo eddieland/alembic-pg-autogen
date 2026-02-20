@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from alembic.runtime.plugins import Plugin
 from alembic.util import PriorityDispatchResult
-from sqlalchemy import text
+from sqlalchemy import Connection, text
 
 from alembic_pg_autogen._canonicalize import CanonicalState, canonicalize
 from alembic_pg_autogen._diff import Action, diff
@@ -23,7 +23,7 @@ from alembic_pg_autogen._ops import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from alembic.autogenerate.api import AutogenContext
     from alembic.operations.ops import MigrateOperation, UpgradeOps
@@ -115,7 +115,7 @@ def _filter_to_declared(
     canonical: CanonicalState,
     pg_functions: Sequence[str],
     pg_triggers: Sequence[str],
-    conn: object,
+    conn: Connection,
 ) -> CanonicalState:
     """Filter canonical state to only include objects declared in user DDL.
 
@@ -141,7 +141,7 @@ def _filter_to_declared(
     return CanonicalState(functions=functions, triggers=triggers)
 
 
-def _parse_function_names(ddl_list: Sequence[str], conn: object) -> set[tuple[str, str]]:
+def _parse_function_names(ddl_list: Sequence[str], conn: Connection) -> set[tuple[str, str]]:
     """Extract ``(schema, name)`` pairs from function DDL strings.
 
     Raises:
@@ -158,7 +158,7 @@ def _parse_function_names(ddl_list: Sequence[str], conn: object) -> set[tuple[st
     return names
 
 
-def _parse_trigger_identities(ddl_list: Sequence[str], conn: object) -> set[tuple[str, str, str]]:
+def _parse_trigger_identities(ddl_list: Sequence[str], conn: Connection) -> set[tuple[str, str, str]]:
     """Extract ``(schema, table_name, trigger_name)`` triples from trigger DDL strings.
 
     Raises:
@@ -188,17 +188,14 @@ def _dequote_ident(ident: str) -> str:
     return ident.lower()
 
 
-def _get_default_schema(conn: object) -> str:
+def _get_default_schema(conn: Connection) -> str:
     """Get the current schema for the connection."""
-    from sqlalchemy import Connection
-
-    assert isinstance(conn, Connection)
     row = conn.execute(text("SELECT current_schema()")).scalar()
-    assert row is not None
+    assert row is not None, "Failed to read current_schema()"
     return row
 
 
-def _resolve_schemas(conn: object, schemas: set[str | None]) -> list[str] | None:
+def _resolve_schemas(conn: object, schemas: Iterable[str | None]) -> list[str] | None:
     """Convert Alembic's schema set to a list suitable for inspect functions.
 
     Alembic passes ``{None}`` to mean "only the default schema".  This function resolves ``None`` to the connection's
@@ -217,7 +214,7 @@ def _resolve_schemas(conn: object, schemas: set[str | None]) -> list[str] | None
     return resolved
 
 
-def _filter_to_schemas(state: CanonicalState, schemas: list[str] | None) -> CanonicalState:
+def _filter_to_schemas(state: CanonicalState, schemas: Iterable[str] | None) -> CanonicalState:
     """Filter a CanonicalState to only include objects in the given schemas."""
     if schemas is None:
         return state
