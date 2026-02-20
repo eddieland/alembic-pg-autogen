@@ -8,7 +8,7 @@ DOC_PATHS := README.md CLAUDE.md openspec/
 
 ##@ Development
 
-default: install lint test ## Install, lint, and test (full check)
+all: install lint test ## Install, lint, and test (full check)
 
 install: ## Install dependencies
 	uv sync --all-extras
@@ -54,4 +54,4 @@ help: ## Show this help
 		/^[a-zA-Z_-]+:.*?## / { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: default install fmt lint test test-unit build upgrade clean help
+.PHONY: all install fmt lint test test-unit build upgrade clean help
