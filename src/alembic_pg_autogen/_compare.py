@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from alembic.runtime.plugins import Plugin
 from alembic.util import PriorityDispatchResult
@@ -31,6 +31,25 @@ if TYPE_CHECKING:
     from alembic_pg_autogen._diff import FunctionOp, TriggerOp
 
 log = logging.getLogger(__name__)
+
+
+class _HasText(Protocol):
+    """Protocol for objects with a ``.text`` string attribute (e.g. SQLAlchemy ``TextClause``)."""
+
+    @property
+    def text(self) -> str: ...
+
+
+class SQLCreatable(Protocol):
+    """Protocol for alembic-utils-style objects that produce DDL via ``to_sql_statement_create()``.
+
+    Any object implementing this method (e.g. ``PGFunction``, ``PGView``, ``PGTrigger`` from alembic-utils) can be
+    passed wherever this library expects DDL strings.  The DDL is extracted by calling
+    ``obj.to_sql_statement_create().text``.
+    """
+
+    def to_sql_statement_create(self) -> _HasText: ...
+
 
 #: Extract ``(schema, name)`` from a ``CREATE [OR REPLACE] FUNCTION`` statement.
 #:
@@ -83,8 +102,8 @@ def _compare_pg_objects(
         log.debug("Neither pg_functions nor pg_triggers in opts, skipping")
         return PriorityDispatchResult.CONTINUE
 
-    pg_functions: Sequence[str] = opts.get("pg_functions", ())
-    pg_triggers: Sequence[str] = opts.get("pg_triggers", ())
+    pg_functions = _resolve_ddl(opts.get("pg_functions", ()))
+    pg_triggers = _resolve_ddl(opts.get("pg_triggers", ()))
 
     conn = autogen_context.connection
     assert conn is not None  # guaranteed during online autogenerate
@@ -109,6 +128,15 @@ def _compare_pg_objects(
     upgrade_ops.ops.extend(ops)
 
     return PriorityDispatchResult.CONTINUE
+
+
+def _resolve_ddl(items: Sequence[str | SQLCreatable]) -> tuple[str, ...]:
+    """Convert a mixed sequence of DDL strings and ``SQLCreatable`` objects to plain DDL strings.
+
+    Strings are passed through unchanged.  ``SQLCreatable`` objects (e.g. alembic-utils entities) are converted by
+    calling ``obj.to_sql_statement_create().text``.
+    """
+    return tuple(item if isinstance(item, str) else item.to_sql_statement_create().text for item in items)
 
 
 def _filter_to_declared(

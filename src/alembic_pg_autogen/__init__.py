@@ -14,7 +14,7 @@ from alembic_pg_autogen._canonicalize import (
     canonicalize_functions,
     canonicalize_triggers,
 )
-from alembic_pg_autogen._compare import setup
+from alembic_pg_autogen._compare import SQLCreatable, setup
 from alembic_pg_autogen._diff import Action, DiffResult, FunctionOp, TriggerOp, diff
 from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo, inspect_functions, inspect_triggers
 from alembic_pg_autogen._ops import (
@@ -44,6 +44,7 @@ __all__: Final[Sequence[str]] = [
     "FunctionOp",
     "ReplaceFunctionOp",
     "ReplaceTriggerOp",
+    "SQLCreatable",
     "TriggerInfo",
     "TriggerOp",
     "canonicalize",
