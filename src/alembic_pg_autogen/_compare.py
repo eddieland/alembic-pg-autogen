@@ -195,7 +195,7 @@ def _get_default_schema(conn: Connection) -> str:
     return row
 
 
-def _resolve_schemas(conn: object, schemas: Iterable[str | None]) -> list[str] | None:
+def _resolve_schemas(conn: Connection, schemas: Iterable[str | None]) -> list[str] | None:
     """Convert Alembic's schema set to a list suitable for inspect functions.
 
     Alembic passes ``{None}`` to mean "only the default schema".  This function resolves ``None`` to the connection's
