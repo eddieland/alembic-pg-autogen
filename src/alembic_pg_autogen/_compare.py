@@ -132,28 +132,38 @@ def _filter_to_declared(
 
 
 def _parse_function_names(ddl_list: Sequence[str], conn: object) -> set[tuple[str, str]]:
-    """Extract ``(schema, name)`` pairs from function DDL strings."""
+    """Extract ``(schema, name)`` pairs from function DDL strings.
+
+    Raises:
+        ValueError: If any DDL string does not match the expected ``CREATE FUNCTION`` pattern.
+    """
     default_schema = _get_default_schema(conn)
     names: set[tuple[str, str]] = set()
     for ddl in ddl_list:
         m = _FUNCTION_RE.search(ddl)
-        if m:
-            schema = _dequote_ident(m.group(1)) if m.group(1) else default_schema
-            names.add((schema, _dequote_ident(m.group(2))))
+        if not m:
+            raise ValueError(f"Cannot parse function identity from pg_functions DDL: {ddl!r}")
+        schema = _dequote_ident(m.group(1)) if m.group(1) else default_schema
+        names.add((schema, _dequote_ident(m.group(2))))
     return names
 
 
 def _parse_trigger_identities(ddl_list: Sequence[str], conn: object) -> set[tuple[str, str, str]]:
-    """Extract ``(schema, table_name, trigger_name)`` triples from trigger DDL strings."""
+    """Extract ``(schema, table_name, trigger_name)`` triples from trigger DDL strings.
+
+    Raises:
+        ValueError: If any DDL string does not match the expected ``CREATE TRIGGER`` pattern.
+    """
     default_schema = _get_default_schema(conn)
     identities: set[tuple[str, str, str]] = set()
     for ddl in ddl_list:
         m = _TRIGGER_RE.search(ddl)
-        if m:
-            trigger_name = _dequote_ident(m.group(1))
-            schema = _dequote_ident(m.group(2)) if m.group(2) else default_schema
-            table_name = _dequote_ident(m.group(3))
-            identities.add((schema, table_name, trigger_name))
+        if not m:
+            raise ValueError(f"Cannot parse trigger identity from pg_triggers DDL: {ddl!r}")
+        trigger_name = _dequote_ident(m.group(1))
+        schema = _dequote_ident(m.group(2)) if m.group(2) else default_schema
+        table_name = _dequote_ident(m.group(3))
+        identities.add((schema, table_name, trigger_name))
     return identities
 
 

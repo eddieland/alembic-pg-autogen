@@ -207,3 +207,16 @@ class TestAutogenerateEmptyConfig:
         # Should produce a valid migration with pass in upgrade/downgrade
         assert "def upgrade()" in content
         assert "def downgrade()" in content
+
+
+@pytest.mark.integration
+class TestAutogenerateUnparseableDDL:
+    """Unparsable DDL in pg_functions or pg_triggers raises ValueError."""
+
+    def test_unparseable_function_ddl_raises(self, alembic_project: AlembicProject):
+        with pytest.raises(ValueError, match="Cannot parse function identity"):
+            _autogenerate(alembic_project, pg_functions=["SELECT 1"])
+
+    def test_unparseable_trigger_ddl_raises(self, alembic_project: AlembicProject):
+        with pytest.raises(ValueError, match="Cannot parse trigger identity"):
+            _autogenerate(alembic_project, pg_triggers=["SELECT 1"])
