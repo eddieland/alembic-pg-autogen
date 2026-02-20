@@ -29,7 +29,7 @@ Requires Python 3.10+ and SQLAlchemy 2.x. You provide your own PostgreSQL driver
 
 ## Usage
 
-In your `env.py`, import the extension and pass your DDL via `process_revision_directives` options:
+In your `env.py`, define your functions and triggers as DDL strings:
 
 ```python
 import alembic_pg_autogen  # noqa: F401  # registers the comparator plugin
@@ -56,16 +56,16 @@ PG_TRIGGERS = [
 ]
 ```
 
-Then in your `run_migrations_online()` function, pass them as context options:
+Then in your `run_migrations_online()` function, pass them as keyword arguments to `context.configure()` along with the
+`autogenerate_plugins` list:
 
 ```python
 context.configure(
     connection=connection,
     target_metadata=target_metadata,
-    opts={
-        "pg_functions": PG_FUNCTIONS,
-        "pg_triggers": PG_TRIGGERS,
-    },
+    autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+    pg_functions=PG_FUNCTIONS,
+    pg_triggers=PG_TRIGGERS,
 )
 ```
 
