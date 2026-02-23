@@ -7,6 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 alembic-pg-autogen is an early-stage Python package (currently placeholder). It uses **uv** as the package manager,
 **hatchling** as the build backend, and **uv-dynamic-versioning** for git-tag-based versioning.
 
+Always use Context7 MCP when I need library/API documentation, code generation, setup or configuration steps without me
+having to explicitly ask.
+
 ## Commands
 
 ```bash
