@@ -36,8 +36,9 @@ def _render_replace_function(_autogen_context: AutogenContext, op: ReplaceFuncti
 @renderers.dispatch_for(DropFunctionOp)
 def _render_drop_function(_autogen_context: AutogenContext, op: DropFunctionOp) -> str:
     """Render a DROP FUNCTION via op.execute()."""
-    info = op.current
-    return f'op.execute("DROP FUNCTION {info.schema}.{info.name}({info.identity_args})")'
+    import postgast
+
+    return _render_execute(postgast.to_drop(op.current.definition))
 
 
 @renderers.dispatch_for(CreateTriggerOp)
@@ -49,8 +50,9 @@ def _render_create_trigger(_autogen_context: AutogenContext, op: CreateTriggerOp
 @renderers.dispatch_for(ReplaceTriggerOp)
 def _render_replace_trigger(_autogen_context: AutogenContext, op: ReplaceTriggerOp) -> list[str]:
     """Render DROP TRIGGER + CREATE TRIGGER via two op.execute() calls."""
-    info = op.current
-    drop = f'op.execute("DROP TRIGGER {info.trigger_name} ON {info.schema}.{info.table_name}")'
+    import postgast
+
+    drop = _render_execute(postgast.to_drop(op.current.definition))
     create = _render_execute(op.desired.definition)
     return [drop, create]
 
@@ -58,8 +60,9 @@ def _render_replace_trigger(_autogen_context: AutogenContext, op: ReplaceTrigger
 @renderers.dispatch_for(DropTriggerOp)
 def _render_drop_trigger(_autogen_context: AutogenContext, op: DropTriggerOp) -> str:
     """Render a DROP TRIGGER via op.execute()."""
-    info = op.current
-    return f'op.execute("DROP TRIGGER {info.trigger_name} ON {info.schema}.{info.table_name}")'
+    import postgast
+
+    return _render_execute(postgast.to_drop(op.current.definition))
 
 
 def _render_execute(ddl: str) -> str:
