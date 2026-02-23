@@ -28,7 +28,16 @@ dependencies = [
     "sqlalchemy>=2",
 ]
 
+[project.optional-dependencies]
+docs = [
+    "sphinx>=8",
+    "furo>=2024.8",
+    "sphinx-copybutton>=0.5",
+    "sphinx-autodoc2>=0.5",
+]
+
 [project.urls]
+Documentation = "https://alembic-pg-autogen.readthedocs.io"
 Repository = "https://github.com/eddieland/alembic-pg-autogen"
 
 [dependency-groups]

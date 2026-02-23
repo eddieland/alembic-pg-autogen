@@ -28,6 +28,14 @@ test: ## Run tests (unit + integration, requires Docker)
 test-unit: ## Run unit tests only (no Docker required)
 	uv run pytest -m "not integration"
 
+##@ Documentation
+
+docs: ## Build HTML documentation
+	uv run --extra docs sphinx-build -b html docs docs/_build/html
+
+docs-live: ## Serve docs with live reload (requires sphinx-autobuild)
+	uv run --extra docs sphinx-autobuild docs docs/_build/html
+
 ##@ Build & Release
 
 build: ## Build package
@@ -44,6 +52,7 @@ clean: ## Remove build artifacts, caches, .venv
 	-rm -rf .pytest_cache/
 	-rm -rf .mypy_cache/
 	-rm -rf .venv/
+	-rm -rf docs/_build/
 	-find . -type d -name "__pycache__" -exec rm -rf {} +
 
 ##@ Help
@@ -54,4 +63,4 @@ help: ## Show this help
 		/^[a-zA-Z_-]+:.*?## / { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: all install fmt lint test test-unit build upgrade clean help
+.PHONY: all install fmt lint test test-unit docs docs-live build upgrade clean help
