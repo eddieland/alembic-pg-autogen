@@ -49,6 +49,7 @@ dev = [
     "mdformat-ruff>=0.1",
     "mdformat>=0.7.22",
     "psycopg[binary]",
+    "pytest-cov>=6.0",
     "pytest-sugar>=1.1.1",
     "pytest>=9.0.2",
     "ruff>=0.15.1",
@@ -169,6 +170,14 @@ end_of_line = "lf"
 # Add here as needed:
 # ignore-words-list = "foo,bar"
 # skip = "foo.py,bar.py"
+
+[tool.coverage.run]
+source = ["alembic_pg_autogen"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
 
 [tool.pytest.ini_options]
 python_files = ["*.py"]

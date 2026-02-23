@@ -25,6 +25,9 @@ lint: fmt ## Format, then type-check (basedpyright)
 test: ## Run tests (unit + integration, requires Docker)
 	uv run pytest
 
+test-cov: ## Run tests with coverage report
+	uv run pytest --cov --cov-report=term-missing
+
 test-unit: ## Run unit tests only (no Docker required)
 	uv run pytest -m "not integration"
 
@@ -51,6 +54,7 @@ clean: ## Remove build artifacts, caches, .venv
 	-rm -rf *.egg-info/
 	-rm -rf .pytest_cache/
 	-rm -rf .mypy_cache/
+	-rm -rf .coverage htmlcov/ coverage.xml
 	-rm -rf .venv/
 	-rm -rf docs/_build/
 	-find . -type d -name "__pycache__" -exec rm -rf {} +
@@ -63,4 +67,4 @@ help: ## Show this help
 		/^[a-zA-Z_-]+:.*?## / { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: all install fmt lint test test-unit docs docs-live build upgrade clean help
+.PHONY: all install fmt lint test test-cov test-unit docs docs-live build upgrade clean help
