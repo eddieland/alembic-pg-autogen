@@ -1,10 +1,12 @@
 # alembic-pg-autogen
 
-[![CI](https://github.com/eddie-on-gh/alembic-pg-autogen/actions/workflows/ci.yml/badge.svg)](https://github.com/eddie-on-gh/alembic-pg-autogen/actions/workflows/ci.yml)
-[![Docs](https://readthedocs.org/projects/alembic-pg-autogen/badge/?version=latest)](https://alembic-pg-autogen.readthedocs.io/en/latest/?badge=latest)
 [![PyPI](https://img.shields.io/pypi/v/alembic-pg-autogen)](https://pypi.org/project/alembic-pg-autogen/)
 [![Python](https://img.shields.io/pypi/pyversions/alembic-pg-autogen)](https://pypi.org/project/alembic-pg-autogen/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/eddieland/alembic-pg-autogen/ci.yml?label=CI)](https://github.com/eddieland/alembic-pg-autogen/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/eddieland/alembic-pg-autogen/graph/badge.svg)](https://codecov.io/gh/eddieland/alembic-pg-autogen)
+[![Docs](https://readthedocs.org/projects/alembic-pg-autogen/badge/?version=latest)](https://alembic-pg-autogen.readthedocs.io)
+[![Downloads](https://img.shields.io/pypi/dm/alembic-pg-autogen)](https://pypi.org/project/alembic-pg-autogen/)
 
 > **Status: Alpha** — the core pipeline works and is tested against real PostgreSQL, but the API may change before 1.0.
 
