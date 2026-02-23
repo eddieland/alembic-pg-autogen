@@ -44,7 +44,6 @@ docs = [
 Documentation = "https://alembic-pg-autogen.readthedocs.io"
 Repository = "https://github.com/eddieland/alembic-pg-autogen"
 Issues = "https://github.com/eddieland/alembic-pg-autogen/issues"
-Changelog = "https://github.com/eddieland/alembic-pg-autogen/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
