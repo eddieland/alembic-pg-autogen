@@ -6,14 +6,18 @@ authors = [
 ]
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dynamic = ["version"]
+keywords = ["alembic", "autogenerate", "database", "migration", "postgresql", "sqlalchemy"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -39,6 +43,7 @@ docs = [
 [project.urls]
 Documentation = "https://alembic-pg-autogen.readthedocs.io"
 Repository = "https://github.com/eddieland/alembic-pg-autogen"
+Issues = "https://github.com/eddieland/alembic-pg-autogen/issues"
 
 [dependency-groups]
 dev = [

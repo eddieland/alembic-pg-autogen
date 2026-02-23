@@ -55,7 +55,7 @@ uv run pytest -k "test_name"
 
 ## Python Version
 
-Requires Python >=3.11, \<4.0. CI tests against 3.11–3.14.
+Requires Python >=3.10, \<4.0. CI tests against 3.10–3.14.
 
 ## OpenSpec
 
