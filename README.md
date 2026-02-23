@@ -1,6 +1,7 @@
 # alembic-pg-autogen
 
 [![CI](https://github.com/eddie-on-gh/alembic-pg-autogen/actions/workflows/ci.yml/badge.svg)](https://github.com/eddie-on-gh/alembic-pg-autogen/actions/workflows/ci.yml)
+[![Docs](https://readthedocs.org/projects/alembic-pg-autogen/badge/?version=latest)](https://alembic-pg-autogen.readthedocs.io/en/latest/?badge=latest)
 [![PyPI](https://img.shields.io/pypi/v/alembic-pg-autogen)](https://pypi.org/project/alembic-pg-autogen/)
 [![Python](https://img.shields.io/pypi/pyversions/alembic-pg-autogen)](https://pypi.org/project/alembic-pg-autogen/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
