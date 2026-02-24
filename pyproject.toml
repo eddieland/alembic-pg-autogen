@@ -29,7 +29,7 @@ classifiers = [
 ]
 dependencies = [
     "alembic>=1.18",
-    "postgast>=0.0.1",
+    "postgast>=0.0.2",
     "sqlalchemy>=2",
 ]
 
