@@ -29,6 +29,7 @@ classifiers = [
 ]
 dependencies = [
     "alembic>=1.18",
+    "postgast>=0.0.2",
     "sqlalchemy>=2",
 ]
 
@@ -172,9 +173,7 @@ wrap = 120
 end_of_line = "lf"
 
 [tool.codespell]
-# Add here as needed:
-# ignore-words-list = "foo,bar"
-# skip = "foo.py,bar.py"
+skip = "uv.lock"
 
 [tool.coverage.run]
 source = ["alembic_pg_autogen"]

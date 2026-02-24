@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import TYPE_CHECKING, Protocol
 
 from alembic.runtime.plugins import Plugin
@@ -49,34 +48,6 @@ class SQLCreatable(Protocol):
     """
 
     def to_sql_statement_create(self) -> _HasText: ...
-
-
-#: Extract ``(schema, name)`` from a ``CREATE [OR REPLACE] FUNCTION`` statement.
-#:
-#: **Why regex is acceptable here.** The canonicalization layer honours the project's "no SQL parsing" rule — it passes
-#: DDL verbatim to PostgreSQL and never inspects the strings.  However, ``canonicalize()`` intentionally returns the
-#: *full* catalog state for every schema it touches, not just the objects the user declared (see the canonicalization
-#: design doc for why snapshot-diff was rejected).  The comparator therefore needs a way to narrow that full catalog
-#: back to user-declared objects.  Extracting object identities from the DDL is the only way to do that without
-#: burdening the public API with redundant ``(schema, name)`` declarations.
-#:
-#: The patterns are intentionally minimal — they match only the ``CREATE ... name`` preamble and ignore the rest of
-#: the statement.  They will *not* handle every legal PostgreSQL DDL form (e.g. comments before the object name), but
-#: they cover the practical subset that this library's users are expected to provide.  If robustness becomes an issue,
-#: the preferred fix is to push identity resolution into the database (e.g. parse inside a PL/pgSQL helper) rather
-#: than expanding the regex.
-
-#: A single PostgreSQL identifier — either ``"double-quoted"`` or a bare word.
-_IDENT = r'(?:"[^"]*"|\w+)'
-
-_FUNCTION_RE = re.compile(rf"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:({_IDENT})\.)?({_IDENT})", re.IGNORECASE)
-
-#: Extract ``(trigger_name, schema, table_name)`` from a ``CREATE [OR REPLACE] TRIGGER`` statement.  See
-#: :data:`_FUNCTION_RE` for the rationale on why lightweight regex extraction is used here.
-_TRIGGER_RE = re.compile(
-    rf"CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+({_IDENT})\s+.*?ON\s+(?:({_IDENT})\.)?({_IDENT})",
-    re.IGNORECASE | re.DOTALL,
-)
 
 
 def setup(plugin: Plugin) -> None:
@@ -170,50 +141,41 @@ def _filter_to_declared(
 
 
 def _parse_function_names(ddl_list: Sequence[str], conn: Connection) -> set[tuple[str, str]]:
-    """Extract ``(schema, name)`` pairs from function DDL strings.
+    """Extract ``(schema, name)`` pairs from function DDL strings via postgast.
 
     Raises:
-        ValueError: If any DDL string does not match the expected ``CREATE FUNCTION`` pattern.
+        ValueError: If any DDL string does not contain a valid ``CREATE FUNCTION`` statement.
     """
+    import postgast
+
     default_schema = _get_default_schema(conn)
     names: set[tuple[str, str]] = set()
     for ddl in ddl_list:
-        m = _FUNCTION_RE.search(ddl)
-        if not m:
+        identity = postgast.extract_function_identity(postgast.parse(ddl))
+        if identity is None:
             raise ValueError(f"Cannot parse function identity from pg_functions DDL: {ddl!r}")
-        schema = _dequote_ident(m.group(1)) if m.group(1) else default_schema
-        names.add((schema, _dequote_ident(m.group(2))))
+        schema = identity.schema if identity.schema is not None else default_schema
+        names.add((schema, identity.name))
     return names
 
 
 def _parse_trigger_identities(ddl_list: Sequence[str], conn: Connection) -> set[tuple[str, str, str]]:
-    """Extract ``(schema, table_name, trigger_name)`` triples from trigger DDL strings.
+    """Extract ``(schema, table_name, trigger_name)`` triples from trigger DDL strings via postgast.
 
     Raises:
-        ValueError: If any DDL string does not match the expected ``CREATE TRIGGER`` pattern.
+        ValueError: If any DDL string does not contain a valid ``CREATE TRIGGER`` statement.
     """
+    import postgast
+
     default_schema = _get_default_schema(conn)
     identities: set[tuple[str, str, str]] = set()
     for ddl in ddl_list:
-        m = _TRIGGER_RE.search(ddl)
-        if not m:
+        identity = postgast.extract_trigger_identity(postgast.parse(ddl))
+        if identity is None:
             raise ValueError(f"Cannot parse trigger identity from pg_triggers DDL: {ddl!r}")
-        trigger_name = _dequote_ident(m.group(1))
-        schema = _dequote_ident(m.group(2)) if m.group(2) else default_schema
-        table_name = _dequote_ident(m.group(3))
-        identities.add((schema, table_name, trigger_name))
+        schema = identity.schema if identity.schema is not None else default_schema
+        identities.add((schema, identity.table, identity.trigger))
     return identities
-
-
-def _dequote_ident(ident: str) -> str:
-    """Normalize a SQL identifier to its catalog form.
-
-    Quoted identifiers (``"Foo"``) have quotes stripped and case preserved.  Unquoted identifiers are folded to
-    lowercase, matching PostgreSQL's default behaviour.
-    """
-    if ident.startswith('"') and ident.endswith('"'):
-        return ident[1:-1].replace('""', '"')
-    return ident.lower()
 
 
 def _get_default_schema(conn: Connection) -> str:

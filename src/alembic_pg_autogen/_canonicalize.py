@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-import re
-from typing import TYPE_CHECKING, Final, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import text
 
@@ -18,10 +17,6 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
 
     from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo
-
-_CREATE_FUNCTION_RE: Final = re.compile(r"CREATE\s+FUNCTION\b", re.IGNORECASE)
-_CREATE_TRIGGER_RE: Final = re.compile(r"CREATE\s+TRIGGER\b", re.IGNORECASE)
-_CREATE_OR_REPLACE_RE: Final = re.compile(r"CREATE\s+OR\s+REPLACE\b", re.IGNORECASE)
 
 
 class CanonicalState(NamedTuple):
@@ -58,12 +53,14 @@ def canonicalize(
         sqlalchemy.exc.DBAPIError: If any DDL statement is invalid.
     """
     log.info("Canonicalizing %d function and %d trigger DDL statements", len(function_ddl), len(trigger_ddl))
+    import postgast
+
     savepoint = conn.begin_nested()
     try:
         for ddl in function_ddl:
-            conn.execute(text(_ensure_or_replace(ddl, _CREATE_FUNCTION_RE)))
+            conn.execute(text(postgast.ensure_or_replace(ddl)))
         for ddl in trigger_ddl:
-            conn.execute(text(_ensure_or_replace(ddl, _CREATE_TRIGGER_RE)))
+            conn.execute(text(postgast.ensure_or_replace(ddl)))
 
         functions = inspect_functions(conn, schemas)
         triggers = inspect_triggers(conn, schemas)
@@ -101,15 +98,3 @@ def canonicalize_triggers(
     Convenience wrapper around :func:`canonicalize` with only *trigger_ddl* populated.
     """
     return canonicalize(conn, trigger_ddl=ddl, schemas=schemas).triggers
-
-
-def _ensure_or_replace(ddl: str, pattern: re.Pattern[str]) -> str:
-    """Rewrite ``CREATE FUNCTION/TRIGGER`` to ``CREATE OR REPLACE`` if needed.
-
-    DDL executed during canonicalization may collide with objects already in the database.  Using ``OR REPLACE`` avoids
-    ``DuplicateFunction`` / ``DuplicateObject`` errors inside the savepoint.  Statements that already contain
-    ``OR REPLACE`` are returned unchanged.
-    """
-    if _CREATE_OR_REPLACE_RE.search(ddl):
-        return ddl
-    return pattern.sub(lambda m: m.group(0).replace("CREATE", "CREATE OR REPLACE", 1), ddl, count=1)

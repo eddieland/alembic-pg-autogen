@@ -24,6 +24,7 @@ repos:
     rev: v2.4.1
     hooks:
       - id: codespell
+        exclude: ^uv\.lock$
         additional_dependencies: []
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
