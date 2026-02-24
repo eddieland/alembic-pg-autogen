@@ -4,7 +4,10 @@
 
 The package SHALL declare `postgast` as a required runtime dependency in `pyproject.toml`, alongside `alembic` and
 `sqlalchemy>=2`. All DDL parsing, identity extraction, syntactic rewriting, and DROP generation SHALL be delegated to
-postgast rather than implemented via regex or string manipulation within this package.
+postgast rather than implemented via regex or string manipulation within this package. postgast has a binary dependency
+on [libpg_query](https://github.com/pganalyze/libpg_query) (PostgreSQL's actual parser extracted as a C library);
+libpg_query is vendored into all wheels published on PyPI, so no C compiler or PostgreSQL installation is needed at
+install time.
 
 #### Scenario: Package installs postgast transitively
 

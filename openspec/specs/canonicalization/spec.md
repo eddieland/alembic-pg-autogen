@@ -181,11 +181,14 @@ the savepoint and propagate the exception. The exception SHALL identify which DD
 
 ### Requirement: DDL strings use sqlalchemy.text()
 
-All DDL strings SHALL be executed using `conn.execute(text(ddl))`. The module SHALL NOT parse, transform, or template
-the DDL strings in any way — they are passed directly to PostgreSQL.
+All DDL strings SHALL be executed using `conn.execute(text(ddl))`.
 
-#### Scenario: DDL executed verbatim
+Before execution, DDL strings are transformed by `postgast.ensure_or_replace()` to inject `OR REPLACE` into `CREATE`
+statements (see [ddl-parsing spec](../ddl-parsing/spec.md)). This AST-level rewrite is the only transformation applied;
+the resulting SQL is then passed to PostgreSQL via `sqlalchemy.text()`.
+
+#### Scenario: DDL transformed and executed
 
 - **WHEN** a DDL string is provided to `canonicalize`
-- **THEN** it is wrapped in `sqlalchemy.text()` and executed without modification
-- **AND** no regex, template matching, or string manipulation is applied to the DDL
+- **THEN** it is first passed through `postgast.ensure_or_replace()` to ensure `OR REPLACE` is present
+- **AND** the result is wrapped in `sqlalchemy.text()` and executed

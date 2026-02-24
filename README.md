@@ -8,10 +8,10 @@
 [![Docs](https://readthedocs.org/projects/alembic-pg-autogen/badge/?version=latest)](https://alembic-pg-autogen.readthedocs.io)
 [![Downloads](https://img.shields.io/pypi/dm/alembic-pg-autogen)](https://pypi.org/project/alembic-pg-autogen/)
 
-> **Status: Alpha** — the core pipeline works and is tested against real PostgreSQL, but the API may change before 1.0.
+> **Status: Alpha** - the core pipeline works and is tested against real PostgreSQL, but the API may change before 1.0.
 
 Alembic autogenerate extension for PostgreSQL functions and triggers. If you've been manually writing `op.execute()`
-calls every time you add or change a PL/pgSQL function, this package automates that — declare your DDL strings and let
+calls every time you add or change a PL/pgSQL function, this package automates that. Declare your DDL strings and let
 `alembic revision --autogenerate` figure out the `CREATE`, `DROP`, and `CREATE OR REPLACE` for you.
 
 ## Background
@@ -37,6 +37,11 @@ pip install alembic-pg-autogen
 ```
 
 Requires Python 3.10+ and SQLAlchemy 2.x. Bring your own PostgreSQL driver (`psycopg`, `psycopg2`, `asyncpg`, etc.).
+
+This package depends on [postgast](https://pypi.org/project/postgast/) for AST-level DDL parsing (identity extraction,
+`OR REPLACE` injection, `DROP` generation). postgast has a binary dependency on
+[libpg_query](https://github.com/pganalyze/libpg_query). Pre-built wheels are published for all major platforms, so no C
+compiler or PostgreSQL installation is needed at install time.
 
 ## Quick start
 
@@ -92,7 +97,7 @@ alembic revision --autogenerate -m "add audit trigger"
 
 ### 4. Generated migration
 
-The migration file will contain `op.execute()` calls — no custom op imports needed:
+The migration file will contain `op.execute()` calls (no custom op imports needed):
 
 ```python
 def upgrade() -> None:
@@ -119,7 +124,7 @@ This means formatting will differ from what you wrote, but the semantics are ide
 
 ## Migrating from alembic_utils
 
-If you're coming from alembic_utils, you can pass your existing `PGFunction` / `PGTrigger` objects directly — any object
+If you're coming from alembic_utils, you can pass your existing `PGFunction` / `PGTrigger` objects directly. Any object
 with a `to_sql_statement_create()` method is accepted alongside plain DDL strings:
 
 ```python
@@ -128,8 +133,8 @@ from alembic_utils.pg_function import PGFunction
 my_func = PGFunction(schema="public", signature="my_func()", definition="...")
 
 PG_FUNCTIONS = [
-    my_func,  # alembic_utils object — works as-is
-    "CREATE FUNCTION new_func() ...",  # plain DDL string — also works
+    my_func,  # alembic_utils object, works as-is
+    "CREATE FUNCTION new_func() ...",  # plain DDL string, also works
 ]
 ```
 
