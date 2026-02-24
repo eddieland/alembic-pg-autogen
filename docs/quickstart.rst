@@ -67,7 +67,7 @@ Import the package (this registers the Alembic comparator plugin), then in your
 4. Generated migration
 ----------------------
 
-The migration file will contain ``op.execute()`` calls — no custom op imports needed:
+The migration file will contain ``op.execute()`` calls with no custom op imports needed:
 
 .. code-block:: python
 
