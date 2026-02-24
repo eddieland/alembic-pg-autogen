@@ -1,6 +1,6 @@
 # Best-effort local checks before push. Mirrors CI lint steps (minus basedpyright,
-# which is too slow for a pre-commit hook). Run `pre-commit install` to activate.
-# See https://pre-commit.com
+# which is too slow for a pre-commit hook). Run `prek install` to activate.
+# See https://prek.j178.dev
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
