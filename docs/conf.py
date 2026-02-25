@@ -8,6 +8,7 @@ extensions = [
     "autodoc2",
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
+    "sphinx_llms_txt",
 ]
 
 # -- autodoc2 ----------------------------------------------------------------
