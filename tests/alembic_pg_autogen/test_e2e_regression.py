@@ -708,6 +708,33 @@ RETURNS text LANGUAGE sql AS $$ SELECT 'Hello, ' || name $$"""
 
 
 @pytest.mark.integration
+class TestPlpgsqlRaiseExceptionTrigger:
+    """A plpgsql trigger function using RAISE EXCEPTION + RETURN OLD roundtrips cleanly.
+
+    Guards against false diffs caused by the multi-line plpgsql body with exception
+    handling and a RETURN OLD statement (as opposed to the more common RETURN NEW).
+    """
+
+    def test_raise_exception_trigger_no_false_diff(self, alembic_project: AlembicProject) -> None:
+        schema = alembic_project.schema
+        fn_ddl = f"""\
+CREATE OR REPLACE FUNCTION {schema}.fn_prevent_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'update not allowed';
+    RETURN OLD;
+END;
+$$"""
+
+        _run_migration(alembic_project, pg_functions=[fn_ddl])
+
+        # Second autogenerate must be a no-op
+        content = _autogenerate(alembic_project, pg_functions=[fn_ddl])
+        body = _upgrade_body(content)
+        assert "op.execute(" not in body
+
+
+@pytest.mark.integration
 class TestMultipleTriggersOnSameTable:
     """Multiple triggers on the same table are tracked independently."""
 

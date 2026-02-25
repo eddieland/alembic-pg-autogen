@@ -71,16 +71,22 @@ def _render_execute(ddl: str) -> str:
 
 
 def _quote_ddl(ddl: str) -> str:
-    """Quote a DDL string for inclusion in generated Python source.
+    r"""Quote a DDL string for inclusion in generated Python source.
 
-    Uses triple-quoting with a raw prefix when the DDL contains single quotes or backslashes, and simple repr quoting
-    otherwise.
+    Alembic's ``_indent()`` adds leading spaces to *every* line of the rendered op text
+    (``re.sub(r"^", "    ", text, flags=re.M)``).  Multi-line triple-quoted string literals
+    would absorb that indentation into the string value, silently corrupting the DDL.
+
+    To avoid this, multi-line DDL always uses ``repr()`` which escapes newlines as ``\n``,
+    producing a single-line literal that is immune to re-indentation.  Single-line DDL may
+    use triple-quoting for readability when it contains quotes or backslashes.
     """
+    # Multi-line DDL must use repr() to keep the literal on one line.
+    if "\n" in ddl:
+        return repr(ddl)
     if "'" not in ddl and "\\" not in ddl:
         return repr(ddl)
-    # Triple-quoted string avoids escaping single quotes.  Use a raw string
-    # (r-prefix) only when backslashes are present but no triple-quote
-    # sequences exist in the DDL itself.
+    # Single-line DDL with quotes: triple-quoting avoids backslash escapes.
     if "'''" not in ddl and '"""' not in ddl:
         if "\\" in ddl:
             return f"r'''{ddl}'''"
