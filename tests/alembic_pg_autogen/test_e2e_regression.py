@@ -717,14 +717,18 @@ class TestPlpgsqlRaiseExceptionTrigger:
 
     def test_raise_exception_trigger_no_false_diff(self, alembic_project: AlembicProject) -> None:
         schema = alembic_project.schema
+        # Use PostgreSQL's canonical form: $function$ quoting, separate lines for
+        # RETURNS / LANGUAGE / AS, and leading-space indentation on attribute lines.
         fn_ddl = f"""\
 CREATE OR REPLACE FUNCTION {schema}.fn_prevent_update()
-RETURNS trigger LANGUAGE plpgsql AS $$
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
 BEGIN
     RAISE EXCEPTION 'update not allowed';
     RETURN OLD;
 END;
-$$"""
+$function$"""
 
         _run_migration(alembic_project, pg_functions=[fn_ddl])
 
