@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from alembic_pg_autogen._inspect import inspect_functions, inspect_triggers
+from alembic_pg_autogen.inspect import inspect_functions, inspect_triggers
 
 if TYPE_CHECKING:
     from .alembic_helpers import AlembicProject

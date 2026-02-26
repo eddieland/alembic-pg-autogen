@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import text
 
-from alembic_pg_autogen._inspect import inspect_functions, inspect_triggers
+from alembic_pg_autogen.inspect import inspect_functions, inspect_triggers
 
 log = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Connection
 
-    from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo
+    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo
 
 
 class CanonicalState(NamedTuple):

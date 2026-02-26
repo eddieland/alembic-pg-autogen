@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from alembic.autogenerate.render import renderers
 
-from alembic_pg_autogen._ops import (
+from alembic_pg_autogen.ops import (
     CreateFunctionOp,
     CreateTriggerOp,
     DropFunctionOp,

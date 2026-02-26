@@ -6,18 +6,18 @@ from typing import TYPE_CHECKING
 
 from alembic.runtime.plugins import Plugin as _Plugin
 
-import alembic_pg_autogen._compare as _compare_mod  # noqa: F401  # pyright: ignore[reportUnusedImport]
-import alembic_pg_autogen._render as _render  # noqa: F401  # pyright: ignore[reportUnusedImport]
-from alembic_pg_autogen._canonicalize import (
+import alembic_pg_autogen.compare as _compare_mod  # noqa: F401  # pyright: ignore[reportUnusedImport]
+import alembic_pg_autogen.render as _render  # noqa: F401  # pyright: ignore[reportUnusedImport]
+from alembic_pg_autogen.canonicalize import (
     CanonicalState,
     canonicalize,
     canonicalize_functions,
     canonicalize_triggers,
 )
-from alembic_pg_autogen._compare import SQLCreatable, setup
-from alembic_pg_autogen._diff import Action, DiffResult, FunctionOp, TriggerOp, diff
-from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo, inspect_functions, inspect_triggers
-from alembic_pg_autogen._ops import (
+from alembic_pg_autogen.compare import SQLCreatable, setup
+from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, TriggerOp, diff
+from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, inspect_functions, inspect_triggers
+from alembic_pg_autogen.ops import (
     CreateFunctionOp,
     CreateTriggerOp,
     DropFunctionOp,
