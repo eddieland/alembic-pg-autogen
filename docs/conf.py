@@ -1,7 +1,7 @@
 """Sphinx configuration for alembic-pg-autogen documentation."""
 
 project = "alembic-pg-autogen"
-copyright = "2025, Edward Jones"  # noqa: A001
+copyright = "2026, eddie.land"  # noqa: A001
 author = "Edward Jones"
 
 extensions = [
