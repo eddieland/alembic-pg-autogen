@@ -65,7 +65,7 @@ pip install alembic-pg-autogen
 ```
 
 Requires Python 3.10+ and SQLAlchemy 2.x. Bring your own PostgreSQL driver (`psycopg`, `psycopg2`, `asyncpg`, etc.).
-This package depends on [postgast](https://pypi.org/project/postgast/) for DDL parsing, which requires
+This package depends on [postgast](https://github.com/eddieland/postgast) for DDL parsing, which requires
 `protobuf >= 5.27`.
 
 ## Documentation
