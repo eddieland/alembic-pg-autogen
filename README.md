@@ -37,7 +37,7 @@ import alembic_pg_autogen  # noqa: F401  # registers the comparator plugin
 
 PG_FUNCTIONS = [
     """
-    CREATE OR REPLACE FUNCTION audit_trigger_func()
+    CREATE OR REPLACE FUNCTION set_updated_at()
     RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
         NEW.updated_at = now();
@@ -49,9 +49,9 @@ PG_FUNCTIONS = [
 
 PG_TRIGGERS = [
     """
-    CREATE TRIGGER audit_trigger
+    CREATE TRIGGER set_updated_at_on_update
     BEFORE UPDATE ON my_table
-    FOR EACH ROW EXECUTE FUNCTION audit_trigger_func()
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at()
     """,
 ]
 
