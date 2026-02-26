@@ -13,6 +13,10 @@
 Alembic autogenerate extension for PostgreSQL functions and triggers. Declare your DDL strings and let
 `alembic revision --autogenerate` figure out the `CREATE`, `DROP`, and `CREATE OR REPLACE` for you.
 
+<p align="center">
+  <img src="docs/logo.png" width="350" alt="alembic-pg-autogen logo"/>
+</p>
+
 ## Background
 
 [alembic_utils](https://github.com/olirice/alembic_utils) pioneered autogenerate support for PostgreSQL objects and has
