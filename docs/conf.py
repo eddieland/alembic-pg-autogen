@@ -29,3 +29,8 @@ intersphinx_mapping = {
 # -- HTML output ---------------------------------------------------------------
 html_theme = "furo"
 html_title = "alembic-pg-autogen"
+html_theme_options = {
+    "source_repository": "https://github.com/eddieland/alembic-pg-autogen",
+    "source_branch": "main",
+    "source_directory": "docs/",
+}
