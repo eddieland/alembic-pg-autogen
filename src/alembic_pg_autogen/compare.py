@@ -9,10 +9,10 @@ from alembic.runtime.plugins import Plugin
 from alembic.util import PriorityDispatchResult
 from sqlalchemy import Connection, text
 
-from alembic_pg_autogen._canonicalize import CanonicalState, canonicalize
-from alembic_pg_autogen._diff import Action, diff
-from alembic_pg_autogen._inspect import inspect_functions, inspect_triggers
-from alembic_pg_autogen._ops import (
+from alembic_pg_autogen.canonicalize import CanonicalState, canonicalize
+from alembic_pg_autogen.diff import Action, diff
+from alembic_pg_autogen.inspect import inspect_functions, inspect_triggers
+from alembic_pg_autogen.ops import (
     CreateFunctionOp,
     CreateTriggerOp,
     DropFunctionOp,
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from alembic.autogenerate.api import AutogenContext
     from alembic.operations.ops import MigrateOperation, UpgradeOps
 
-    from alembic_pg_autogen._diff import FunctionOp, TriggerOp
+    from alembic_pg_autogen.diff import FunctionOp, TriggerOp
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,8 @@ class SQLCreatable(Protocol):
     ``obj.to_sql_statement_create().text``.
     """
 
-    def to_sql_statement_create(self) -> _HasText: ...
+    def to_sql_statement_create(self) -> _HasText:  # noqa: D102
+        ...
 
 
 def setup(plugin: Plugin) -> None:

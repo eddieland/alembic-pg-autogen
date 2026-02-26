@@ -3,8 +3,8 @@ from __future__ import annotations
 # pyright: reportPrivateUsage=false
 from unittest.mock import MagicMock
 
-from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo
-from alembic_pg_autogen._ops import (
+from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo
+from alembic_pg_autogen.ops import (
     CreateFunctionOp,
     CreateTriggerOp,
     DropFunctionOp,
@@ -12,7 +12,7 @@ from alembic_pg_autogen._ops import (
     ReplaceFunctionOp,
     ReplaceTriggerOp,
 )
-from alembic_pg_autogen._render import (
+from alembic_pg_autogen.render import (
     _render_create_function,
     _render_create_trigger,
     _render_drop_function,

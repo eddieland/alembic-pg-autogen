@@ -5,10 +5,10 @@ def test_package_importable():
 
 
 def test_extension_modules_importable():
-    import alembic_pg_autogen._compare
-    import alembic_pg_autogen._ops
-    import alembic_pg_autogen._render
+    import alembic_pg_autogen.compare
+    import alembic_pg_autogen.ops
+    import alembic_pg_autogen.render
 
-    assert alembic_pg_autogen._compare is not None
-    assert alembic_pg_autogen._ops is not None
-    assert alembic_pg_autogen._render is not None
+    assert alembic_pg_autogen.compare is not None
+    assert alembic_pg_autogen.ops is not None
+    assert alembic_pg_autogen.render is not None

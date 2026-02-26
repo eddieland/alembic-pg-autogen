@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from alembic_pg_autogen._canonicalize import CanonicalState
-    from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo
+    from alembic_pg_autogen.canonicalize import CanonicalState
+    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo
 
 log = logging.getLogger(__name__)
 

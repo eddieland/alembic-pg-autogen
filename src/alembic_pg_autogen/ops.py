@@ -1,5 +1,7 @@
 """Custom MigrateOperation subclasses for PostgreSQL objects."""
 
+# ruff: noqa: D107  # __init__ signatures are self-documenting; class docstrings suffice.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -8,7 +10,7 @@ from alembic.operations.ops import MigrateOperation
 from typing_extensions import override
 
 if TYPE_CHECKING:
-    from alembic_pg_autogen._inspect import FunctionInfo, TriggerInfo
+    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo
 
 
 class CreateFunctionOp(MigrateOperation):
