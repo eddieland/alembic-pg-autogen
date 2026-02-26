@@ -15,7 +15,7 @@ Alembic autogenerate extension for PostgreSQL functions and triggers. Declare yo
 `alembic revision --autogenerate` figure out the `CREATE`, `DROP`, and `CREATE OR REPLACE` for you.
 
 <p align="center">
-  <img src="docs/logo.png" width="350" alt="alembic-pg-autogen logo"/>
+  <img src="https://raw.githubusercontent.com/eddieland/alembic-pg-autogen/main/docs/logo.png" width="350" alt="alembic-pg-autogen logo"/>
 </p>
 
 ## Background
