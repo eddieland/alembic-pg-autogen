@@ -1,23 +1,10 @@
 alembic-pg-autogen
 ==================
 
-.. image:: https://img.shields.io/pypi/v/alembic-pg-autogen
-   :target: https://pypi.org/project/alembic-pg-autogen/
-   :alt: PyPI version
-
-.. image:: https://img.shields.io/pypi/pyversions/alembic-pg-autogen
-   :target: https://pypi.org/project/alembic-pg-autogen/
-   :alt: Python versions
-
-.. image:: https://img.shields.io/github/stars/eddieland/alembic-pg-autogen?style=flat
-   :target: https://github.com/eddieland/alembic-pg-autogen
-   :alt: GitHub stars
-
-.. image:: https://img.shields.io/github/license/eddieland/alembic-pg-autogen
-   :target: https://github.com/eddieland/alembic-pg-autogen/blob/main/LICENSE
-   :alt: License
-
 Alembic autogenerate extension for PostgreSQL functions and triggers.
+
+`GitHub <https://github.com/eddieland/alembic-pg-autogen>`_ |
+`PyPI <https://pypi.org/project/alembic-pg-autogen/>`_
 
 If you've been manually writing ``op.execute()`` calls every time you add or change a PL/pgSQL function,
 this package automates that: declare your DDL strings and let ``alembic revision --autogenerate`` figure
