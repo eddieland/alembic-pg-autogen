@@ -9,7 +9,11 @@ extensions = [
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
     "sphinx_llms_txt",
+    "sphinxext.opengraph",
 ]
+
+# -- Open Graph ----------------------------------------------------------------
+ogp_site_url = "https://alembic-pg-autogen.readthedocs.io/"
 
 # -- autodoc2 ----------------------------------------------------------------
 autodoc2_packages = ["../src/alembic_pg_autogen"]

@@ -40,6 +40,7 @@ docs = [
     "sphinx-copybutton>=0.5",
     "sphinx-autodoc2>=0.5",
     "sphinx-llms-txt>=0.7",
+    "sphinxext-opengraph>=0.9",
 ]
 
 [project.urls]
