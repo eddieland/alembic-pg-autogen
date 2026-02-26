@@ -8,7 +8,8 @@
 [![Docs](https://readthedocs.org/projects/alembic-pg-autogen/badge/?version=latest)](https://alembic-pg-autogen.readthedocs.io)
 [![Downloads](https://img.shields.io/pypi/dm/alembic-pg-autogen)](https://pypi.org/project/alembic-pg-autogen/)
 
-> **Status: Alpha** - the core pipeline works and is tested against real PostgreSQL, but the API may change before 1.0.
+> **Status: Beta** — the core pipeline is stable and tested against real PostgreSQL. The API may still evolve before
+> 1.0, but the library is suitable for production use.
 
 Alembic autogenerate extension for PostgreSQL functions and triggers. Declare your DDL strings and let
 `alembic revision --autogenerate` figure out the `CREATE`, `DROP`, and `CREATE OR REPLACE` for you.
@@ -46,16 +47,25 @@ PG_FUNCTIONS = [
     """,
 ]
 
+PG_TRIGGERS = [
+    """
+    CREATE TRIGGER audit_trigger
+    BEFORE UPDATE ON my_table
+    FOR EACH ROW EXECUTE FUNCTION audit_trigger_func()
+    """,
+]
+
 # in run_migrations_online():
 context.configure(
     connection=connection,
     target_metadata=target_metadata,
     pg_functions=PG_FUNCTIONS,
+    pg_triggers=PG_TRIGGERS,
 )
 ```
 
 ```bash
-alembic revision --autogenerate -m "add audit function"
+alembic revision --autogenerate -m "add audit function and trigger"
 ```
 
 ## Installation
