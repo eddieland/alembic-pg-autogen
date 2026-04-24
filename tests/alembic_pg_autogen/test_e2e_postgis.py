@@ -30,6 +30,7 @@ def postgis_engine(request: pytest.FixtureRequest) -> Generator[Engine]:
         engine.dispose()
 
 
+@pytest.mark.integration
 @pytest.mark.postgis
 class TestExtensionFunctionsExcluded:
     """Extension-owned functions are excluded while user functions are retained."""
@@ -70,6 +71,7 @@ class TestExtensionFunctionsExcluded:
         assert ext_func_name not in names, f"{ext_func_name} should be excluded from inspect_functions"
 
 
+@pytest.mark.integration
 @pytest.mark.postgis
 class TestExtensionTriggersExcluded:
     """User triggers are retained when an extension is present in the same schema."""
