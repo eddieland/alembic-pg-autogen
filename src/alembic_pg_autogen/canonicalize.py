@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import text
 
-from alembic_pg_autogen.inspect import inspect_functions, inspect_triggers
+from alembic_pg_autogen.inspect import inspect_functions, inspect_triggers, inspect_views
 
 log = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Connection
 
-    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo
+    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
 
 
 class CanonicalState(NamedTuple):
@@ -24,25 +24,29 @@ class CanonicalState(NamedTuple):
 
     functions: Sequence[FunctionInfo]
     triggers: Sequence[TriggerInfo]
+    views: Sequence[ViewInfo] = ()
 
 
 def canonicalize(
     conn: Connection,
     *,
     function_ddl: Sequence[str] = (),
+    view_ddl: Sequence[str] = (),
     trigger_ddl: Sequence[str] = (),
     schemas: Sequence[str] | None = None,
 ) -> CanonicalState:
     """Canonicalize user-provided DDL by round-tripping through PostgreSQL.
 
     Executes the given DDL statements inside a savepoint, reads back canonical forms via ``inspect_functions`` /
-    ``inspect_triggers``, then rolls back the savepoint — leaving the database unchanged.
+    ``inspect_views`` / ``inspect_triggers``, then rolls back the savepoint — leaving the database unchanged.
 
-    Function DDL is executed before trigger DDL so that triggers may reference functions declared in the same batch.
+    DDL executes in dependency order: functions first (standalone), then views (may reference functions), then triggers
+    (may reference functions and INSTEAD OF triggers may be on views).
 
     Args:
         conn: An open SQLAlchemy connection (may have an active transaction).
         function_ddl: ``CREATE FUNCTION`` / ``CREATE PROCEDURE`` statements.
+        view_ddl: ``CREATE VIEW`` statements.
         trigger_ddl: ``CREATE TRIGGER`` statements.
         schemas: Optional schema list passed to the inspect helpers.  When *None*, all user schemas are included.
 
@@ -52,17 +56,25 @@ def canonicalize(
     Raises:
         sqlalchemy.exc.DBAPIError: If any DDL statement is invalid.
     """
-    log.info("Canonicalizing %d function and %d trigger DDL statements", len(function_ddl), len(trigger_ddl))
+    log.info(
+        "Canonicalizing %d function, %d view, and %d trigger DDL statements",
+        len(function_ddl),
+        len(view_ddl),
+        len(trigger_ddl),
+    )
     import postgast
 
     savepoint = conn.begin_nested()
     try:
         for ddl in function_ddl:
             conn.execute(text(postgast.ensure_or_replace(ddl)))
+        for ddl in view_ddl:
+            conn.execute(text(postgast.ensure_or_replace(ddl)))
         for ddl in trigger_ddl:
             conn.execute(text(postgast.ensure_or_replace(ddl)))
 
         functions = inspect_functions(conn, schemas)
+        views = inspect_views(conn, schemas)
         triggers = inspect_triggers(conn, schemas)
     finally:
         savepoint.rollback()
@@ -70,10 +82,12 @@ def canonicalize(
 
     if function_ddl and not functions:
         log.warning("Canonicalization produced no functions despite %d function DDL statements", len(function_ddl))
+    if view_ddl and not views:
+        log.warning("Canonicalization produced no views despite %d view DDL statements", len(view_ddl))
     if trigger_ddl and not triggers:
         log.warning("Canonicalization produced no triggers despite %d trigger DDL statements", len(trigger_ddl))
 
-    return CanonicalState(functions=functions, triggers=triggers)
+    return CanonicalState(functions=functions, triggers=triggers, views=views)
 
 
 def canonicalize_functions(
@@ -98,3 +112,15 @@ def canonicalize_triggers(
     Convenience wrapper around :func:`canonicalize` with only *trigger_ddl* populated.
     """
     return canonicalize(conn, trigger_ddl=ddl, schemas=schemas).triggers
+
+
+def canonicalize_views(
+    conn: Connection,
+    ddl: Sequence[str],
+    schemas: Sequence[str] | None = None,
+) -> Sequence[ViewInfo]:
+    """Canonicalize view DDL and return the resulting ``ViewInfo`` list.
+
+    Convenience wrapper around :func:`canonicalize` with only *view_ddl* populated.
+    """
+    return canonicalize(conn, view_ddl=ddl, schemas=schemas).views

@@ -1,4 +1,4 @@
-"""Catalog inspection for PostgreSQL functions and triggers."""
+"""Catalog inspection for PostgreSQL functions, triggers, and views."""
 
 from __future__ import annotations
 
@@ -30,6 +30,17 @@ class TriggerInfo(NamedTuple):
     schema: str
     table_name: str
     trigger_name: str
+    definition: str
+
+
+class ViewInfo(NamedTuple):
+    """A PostgreSQL view as loaded from the system catalog.
+
+    Identity is ``(schema, name)``; ``definition`` is the last field by convention.
+    """
+
+    schema: str
+    name: str
     definition: str
 
 
@@ -83,7 +94,43 @@ def inspect_triggers(conn: Connection, schemas: Sequence[str] | None = None) -> 
     return result
 
 
+def inspect_views(conn: Connection, schemas: Sequence[str] | None = None) -> Sequence[ViewInfo]:
+    """Bulk-load view definitions from PostgreSQL system catalogs.
+
+    Queries ``pg_class`` joined with ``pg_namespace`` to retrieve all user-defined regular views (``relkind = 'v'``).
+    Reconstructs the full ``CREATE OR REPLACE VIEW schema.name AS`` DDL by combining ``quote_ident()`` and
+    ``pg_get_viewdef(oid, true)`` in the SQL query so that ``ViewInfo.definition`` contains complete DDL.
+
+    Args:
+        conn: An open SQLAlchemy connection.
+        schemas: Optional list of schema names to inspect.  When *None*, all schemas except ``pg_catalog`` and
+            ``information_schema`` are included.
+
+    Returns:
+        A sequence of :class:`ViewInfo` instances, one per view.
+    """
+    schema_filter, params = _build_schema_filter(schemas)
+    query = text(_VIEWS_QUERY.format(schema_filter=schema_filter))
+    rows = conn.execute(query, params)
+    result = [ViewInfo(schema=r.schema, name=r.name, definition=r.definition) for r in rows]
+    log.debug("Inspected %d views (schemas=%s)", len(result), schemas)
+    return result
+
+
 _EXCLUDED_SCHEMAS = ("pg_catalog", "information_schema")
+
+_VIEWS_QUERY = """\
+SELECT
+    n.nspname AS schema,
+    c.relname AS name,
+    'CREATE OR REPLACE VIEW ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+        || ' AS' || chr(10) || pg_get_viewdef(c.oid, true) AS definition
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'v'
+  AND ({schema_filter})
+ORDER BY n.nspname, c.relname
+"""
 
 _FUNCTIONS_QUERY = """\
 SELECT

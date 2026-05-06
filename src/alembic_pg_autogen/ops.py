@@ -10,7 +10,7 @@ from alembic.operations.ops import MigrateOperation
 from typing_extensions import override
 
 if TYPE_CHECKING:
-    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo
+    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
 
 
 class CreateFunctionOp(MigrateOperation):
@@ -129,3 +129,62 @@ class DropTriggerOp(MigrateOperation):
     def to_diff_tuple(self) -> tuple[str, str, str, str]:
         """Return a hashable tuple for debugging and comparison."""
         return ("drop_trigger", self.current.schema, self.current.table_name, self.current.trigger_name)
+
+
+class CreateViewOp(MigrateOperation):
+    """Create a new PostgreSQL view."""
+
+    desired: ViewInfo
+
+    def __init__(self, desired: ViewInfo) -> None:
+        self.desired = desired
+
+    @override
+    def reverse(self) -> DropViewOp:
+        """Reverse is dropping the newly created view."""
+        return DropViewOp(self.desired)
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, str, str]:
+        """Return a hashable tuple for debugging and comparison."""
+        return ("create_view", self.desired.schema, self.desired.name)
+
+
+class ReplaceViewOp(MigrateOperation):
+    """Replace an existing PostgreSQL view with a new definition."""
+
+    current: ViewInfo
+    desired: ViewInfo
+
+    def __init__(self, current: ViewInfo, desired: ViewInfo) -> None:
+        self.current = current
+        self.desired = desired
+
+    @override
+    def reverse(self) -> ReplaceViewOp:
+        """Reverse is replacing with the old definition."""
+        return ReplaceViewOp(self.desired, self.current)
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, str, str]:
+        """Return a hashable tuple for debugging and comparison."""
+        return ("replace_view", self.desired.schema, self.desired.name)
+
+
+class DropViewOp(MigrateOperation):
+    """Drop an existing PostgreSQL view."""
+
+    current: ViewInfo
+
+    def __init__(self, current: ViewInfo) -> None:
+        self.current = current
+
+    @override
+    def reverse(self) -> CreateViewOp:
+        """Reverse is recreating the dropped view."""
+        return CreateViewOp(self.current)
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, str, str]:
+        """Return a hashable tuple for debugging and comparison."""
+        return ("drop_view", self.current.schema, self.current.name)

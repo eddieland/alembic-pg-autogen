@@ -97,6 +97,7 @@ connection = config.attributes["connection"]
 target_metadata = config.attributes.get("target_metadata") or MetaData()
 pg_functions = config.attributes.get("pg_functions", ())
 pg_triggers = config.attributes.get("pg_triggers", ())
+pg_views = config.attributes.get("pg_views", ())
 
 
 def run_migrations_online() -> None:
@@ -107,6 +108,7 @@ def run_migrations_online() -> None:
             autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
             pg_functions=pg_functions,
             pg_triggers=pg_triggers,
+            pg_views=pg_views,
         )
         with context.begin_transaction():
             context.run_migrations()

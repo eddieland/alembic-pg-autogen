@@ -5,18 +5,24 @@ from alembic.operations.ops import MigrateOperation
 from alembic_pg_autogen import (
     CreateFunctionOp,
     CreateTriggerOp,
+    CreateViewOp,
     DropFunctionOp,
     DropTriggerOp,
+    DropViewOp,
     FunctionInfo,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
+    ReplaceViewOp,
     TriggerInfo,
+    ViewInfo,
 )
 
 FN_A = FunctionInfo("public", "my_fn", "integer", "CREATE FUNCTION …")
 FN_B = FunctionInfo("audit", "log_change", "", "CREATE FUNCTION … v2")
 TRG_A = TriggerInfo("public", "orders", "audit_trg", "CREATE TRIGGER …")
 TRG_B = TriggerInfo("public", "events", "notify_trg", "CREATE TRIGGER … v2")
+VIEW_A = ViewInfo("public", "active_users", "CREATE OR REPLACE VIEW public.active_users AS SELECT 1")
+VIEW_B = ViewInfo("reporting", "monthly_summary", "CREATE OR REPLACE VIEW reporting.monthly_summary AS SELECT 2")
 
 
 class TestCreateFunctionOp:
@@ -137,6 +143,65 @@ class TestDropTriggerOp:
         assert issubclass(DropTriggerOp, MigrateOperation)
 
 
+class TestCreateViewOp:
+    def test_stores_desired(self):
+        op = CreateViewOp(VIEW_A)
+        assert op.desired is VIEW_A
+
+    def test_reverse_is_drop(self):
+        op = CreateViewOp(VIEW_A)
+        rev = op.reverse()
+        assert isinstance(rev, DropViewOp)
+        assert rev.current is VIEW_A
+
+    def test_to_diff_tuple(self):
+        op = CreateViewOp(VIEW_A)
+        assert op.to_diff_tuple() == ("create_view", "public", "active_users")
+
+    def test_extends_migrate_operation(self):
+        assert issubclass(CreateViewOp, MigrateOperation)
+
+
+class TestReplaceViewOp:
+    def test_stores_current_and_desired(self):
+        op = ReplaceViewOp(VIEW_A, VIEW_B)
+        assert op.current is VIEW_A
+        assert op.desired is VIEW_B
+
+    def test_reverse_swaps(self):
+        op = ReplaceViewOp(VIEW_A, VIEW_B)
+        rev = op.reverse()
+        assert isinstance(rev, ReplaceViewOp)
+        assert rev.current is VIEW_B
+        assert rev.desired is VIEW_A
+
+    def test_to_diff_tuple(self):
+        op = ReplaceViewOp(VIEW_A, VIEW_B)
+        assert op.to_diff_tuple() == ("replace_view", "reporting", "monthly_summary")
+
+    def test_extends_migrate_operation(self):
+        assert issubclass(ReplaceViewOp, MigrateOperation)
+
+
+class TestDropViewOp:
+    def test_stores_current(self):
+        op = DropViewOp(VIEW_A)
+        assert op.current is VIEW_A
+
+    def test_reverse_is_create(self):
+        op = DropViewOp(VIEW_A)
+        rev = op.reverse()
+        assert isinstance(rev, CreateViewOp)
+        assert rev.desired is VIEW_A
+
+    def test_to_diff_tuple(self):
+        op = DropViewOp(ViewInfo("public", "old_view", "…"))
+        assert op.to_diff_tuple() == ("drop_view", "public", "old_view")
+
+    def test_extends_migrate_operation(self):
+        assert issubclass(DropViewOp, MigrateOperation)
+
+
 class TestReverseRoundtrip:
     """Verify that reverse().reverse() produces an equivalent op."""
 
@@ -178,6 +243,25 @@ class TestReverseRoundtrip:
         assert isinstance(roundtripped, DropTriggerOp)
         assert roundtripped.current is TRG_A
 
+    def test_create_view_roundtrip(self):
+        op = CreateViewOp(VIEW_A)
+        roundtripped = op.reverse().reverse()
+        assert isinstance(roundtripped, CreateViewOp)
+        assert roundtripped.desired is VIEW_A
+
+    def test_replace_view_roundtrip(self):
+        op = ReplaceViewOp(VIEW_A, VIEW_B)
+        roundtripped = op.reverse().reverse()
+        assert isinstance(roundtripped, ReplaceViewOp)
+        assert roundtripped.current is VIEW_A
+        assert roundtripped.desired is VIEW_B
+
+    def test_drop_view_roundtrip(self):
+        op = DropViewOp(VIEW_A)
+        roundtripped = op.reverse().reverse()
+        assert isinstance(roundtripped, DropViewOp)
+        assert roundtripped.current is VIEW_A
+
 
 class TestNoOperationRegistration:
     """Importing _ops should NOT register op.* methods on Operations."""
@@ -191,3 +275,8 @@ class TestNoOperationRegistration:
         from alembic.operations.base import Operations
 
         assert not hasattr(Operations, "drop_trigger")
+
+    def test_no_create_view_method(self):
+        from alembic.operations.base import Operations
+
+        assert not hasattr(Operations, "create_view")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Protocol
 
 from alembic.runtime.plugins import Plugin
@@ -11,14 +12,17 @@ from sqlalchemy import Connection, text
 
 from alembic_pg_autogen.canonicalize import CanonicalState, canonicalize
 from alembic_pg_autogen.diff import Action, diff
-from alembic_pg_autogen.inspect import inspect_functions, inspect_triggers
+from alembic_pg_autogen.inspect import inspect_functions, inspect_triggers, inspect_views
 from alembic_pg_autogen.ops import (
     CreateFunctionOp,
     CreateTriggerOp,
+    CreateViewOp,
     DropFunctionOp,
     DropTriggerOp,
+    DropViewOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
+    ReplaceViewOp,
 )
 
 if TYPE_CHECKING:
@@ -27,9 +31,11 @@ if TYPE_CHECKING:
     from alembic.autogenerate.api import AutogenContext
     from alembic.operations.ops import MigrateOperation, UpgradeOps
 
-    from alembic_pg_autogen.diff import FunctionOp, TriggerOp
+    from alembic_pg_autogen.diff import FunctionOp, TriggerOp, ViewOp
 
 log = logging.getLogger(__name__)
+
+_VIEW_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(?:(\w+)\.)?(\w+)", re.IGNORECASE)
 
 
 class _HasText(Protocol):
@@ -62,20 +68,22 @@ def _compare_pg_objects(
     upgrade_ops: UpgradeOps,
     schemas: set[str | None],
 ) -> PriorityDispatchResult:
-    """Compare current database state against desired functions/triggers."""
+    """Compare current database state against desired functions/triggers/views."""
     opts = autogen_context.opts  # pyright: ignore[reportAttributeAccessIssue]
     log.debug(
-        "_compare_pg_objects called, schemas=%r, pg_functions in opts=%r, pg_triggers in opts=%r",
+        "_compare_pg_objects called, schemas=%r, pg_functions in opts=%r, pg_triggers in opts=%r, pg_views in opts=%r",
         schemas,
         "pg_functions" in opts,
         "pg_triggers" in opts,
+        "pg_views" in opts,
     )
-    if "pg_functions" not in opts and "pg_triggers" not in opts:
-        log.debug("Neither pg_functions nor pg_triggers in opts, skipping")
+    if "pg_functions" not in opts and "pg_triggers" not in opts and "pg_views" not in opts:
+        log.debug("No pg_functions, pg_triggers, or pg_views in opts, skipping")
         return PriorityDispatchResult.CONTINUE
 
     pg_functions = _resolve_ddl(opts.get("pg_functions", ()))
     pg_triggers = _resolve_ddl(opts.get("pg_triggers", ()))
+    pg_views = _resolve_ddl(opts.get("pg_views", ()))
 
     conn = autogen_context.connection
     assert conn is not None  # guaranteed during online autogenerate
@@ -85,17 +93,28 @@ def _compare_pg_objects(
 
     current_functions = inspect_functions(conn, resolved_schemas)
     current_triggers = inspect_triggers(conn, resolved_schemas)
-    current = CanonicalState(functions=current_functions, triggers=current_triggers)
-    log.info("Found %d functions and %d triggers in database", len(current_functions), len(current_triggers))
+    current_views = inspect_views(conn, resolved_schemas)
+    current = CanonicalState(functions=current_functions, triggers=current_triggers, views=current_views)
+    log.info(
+        "Found %d functions, %d triggers, and %d views in database",
+        len(current_functions),
+        len(current_triggers),
+        len(current_views),
+    )
 
-    canonical = canonicalize(conn, function_ddl=pg_functions, trigger_ddl=pg_triggers)
+    canonical = canonicalize(conn, function_ddl=pg_functions, view_ddl=pg_views, trigger_ddl=pg_triggers)
     canonical = _filter_to_schemas(canonical, resolved_schemas)
-    desired = _filter_to_declared(canonical, pg_functions, pg_triggers, conn)
-    log.debug("desired: %d functions, %d triggers", len(desired.functions), len(desired.triggers))
+    desired = _filter_to_declared(canonical, pg_functions, pg_triggers, pg_views, conn)
+    log.debug(
+        "desired: %d functions, %d triggers, %d views",
+        len(desired.functions),
+        len(desired.triggers),
+        len(desired.views),
+    )
 
     result = diff(current, desired)
 
-    ops = _order_ops(result.function_ops, result.trigger_ops)
+    ops = _order_ops(result.function_ops, result.trigger_ops, result.view_ops)
     log.info("Autogenerate produced %d migration ops: %r", len(ops), [type(o).__name__ for o in ops])
     upgrade_ops.ops.extend(ops)
 
@@ -115,6 +134,7 @@ def _filter_to_declared(
     canonical: CanonicalState,
     pg_functions: Sequence[str],
     pg_triggers: Sequence[str],
+    pg_views: Sequence[str],
     conn: Connection,
 ) -> CanonicalState:
     """Filter canonical state to only include objects declared in user DDL.
@@ -124,21 +144,31 @@ def _filter_to_declared(
     """
     fn_names = _parse_function_names(pg_functions, conn)
     trg_ids = _parse_trigger_identities(pg_triggers, conn)
+    view_names = _parse_view_names(pg_views, conn)
 
     functions = [f for f in canonical.functions if (f.schema, f.name) in fn_names]
     triggers = [t for t in canonical.triggers if (t.schema, t.table_name, t.trigger_name) in trg_ids]
+    views = [v for v in canonical.views if (v.schema, v.name) in view_names]
 
     fn_dropped = len(canonical.functions) - len(functions)
     trg_dropped = len(canonical.triggers) - len(triggers)
-    if fn_dropped or trg_dropped:
-        log.debug("Filtered out %d functions and %d triggers not in user DDL", fn_dropped, trg_dropped)
+    view_dropped = len(canonical.views) - len(views)
+    if fn_dropped or trg_dropped or view_dropped:
+        log.debug(
+            "Filtered out %d functions, %d triggers, and %d views not in user DDL",
+            fn_dropped,
+            trg_dropped,
+            view_dropped,
+        )
 
     if pg_functions and not functions:
         log.warning("No canonical functions matched user DDL — check schema qualifiers in pg_functions")
     if pg_triggers and not triggers:
         log.warning("No canonical triggers matched user DDL — check schema qualifiers in pg_triggers")
+    if pg_views and not views:
+        log.warning("No canonical views matched user DDL — check schema qualifiers in pg_views")
 
-    return CanonicalState(functions=functions, triggers=triggers)
+    return CanonicalState(functions=functions, triggers=triggers, views=views)
 
 
 def _parse_function_names(ddl_list: Sequence[str], conn: Connection) -> set[tuple[str, str]]:
@@ -179,6 +209,23 @@ def _parse_trigger_identities(ddl_list: Sequence[str], conn: Connection) -> set[
     return identities
 
 
+def _parse_view_names(ddl_list: Sequence[str], conn: Connection) -> set[tuple[str, str]]:
+    """Extract ``(schema, name)`` pairs from view DDL strings via regex.
+
+    Raises:
+        ValueError: If any DDL string does not contain a valid ``CREATE VIEW`` statement.
+    """
+    default_schema = _get_default_schema(conn)
+    names: set[tuple[str, str]] = set()
+    for ddl in ddl_list:
+        m = _VIEW_RE.search(ddl)
+        if m is None:
+            raise ValueError(f"Cannot parse view identity from pg_views DDL: {ddl!r}")
+        schema = m.group(1) if m.group(1) is not None else default_schema
+        names.add((schema, m.group(2)))
+    return names
+
+
 def _get_default_schema(conn: Connection) -> str:
     """Get the current schema for the connection."""
     row = conn.execute(text("SELECT current_schema()")).scalar()
@@ -213,32 +260,41 @@ def _filter_to_schemas(state: CanonicalState, schemas: Iterable[str] | None) -> 
     return CanonicalState(
         functions=[f for f in state.functions if f.schema in schema_set],
         triggers=[t for t in state.triggers if t.schema in schema_set],
+        views=[v for v in state.views if v.schema in schema_set],
     )
 
 
 def _order_ops(
     function_ops: Sequence[FunctionOp],
     trigger_ops: Sequence[TriggerOp],
+    view_ops: Sequence[ViewOp],
 ) -> list[MigrateOperation]:
     """Convert diff ops to MigrateOperation instances in dependency-safe order.
 
-    Order: drop triggers, drop functions, create/replace functions, create/replace triggers.
+    Order: drop triggers, drop views, drop functions, create/replace functions, create/replace views,
+    create/replace triggers.
     """
     result: list[MigrateOperation] = []
 
-    # 1. Drop triggers first (frees functions for removal)
+    # 1. Drop triggers first (frees views and functions for removal)
     for op in trigger_ops:
         if op.action is Action.DROP:
             assert op.current is not None
             result.append(DropTriggerOp(op.current))
 
-    # 2. Drop functions
+    # 2. Drop views (frees functions for removal)
+    for op in view_ops:
+        if op.action is Action.DROP:
+            assert op.current is not None
+            result.append(DropViewOp(op.current))
+
+    # 3. Drop functions
     for op in function_ops:
         if op.action is Action.DROP:
             assert op.current is not None
             result.append(DropFunctionOp(op.current))
 
-    # 3. Create/replace functions (must exist before triggers reference them)
+    # 4. Create/replace functions (must exist before views reference them)
     for op in function_ops:
         if op.action is Action.CREATE:
             assert op.desired is not None
@@ -247,7 +303,16 @@ def _order_ops(
             assert op.current is not None and op.desired is not None
             result.append(ReplaceFunctionOp(op.current, op.desired))
 
-    # 4. Create/replace triggers
+    # 5. Create/replace views (must exist before INSTEAD OF triggers reference them)
+    for op in view_ops:
+        if op.action is Action.CREATE:
+            assert op.desired is not None
+            result.append(CreateViewOp(op.desired))
+        elif op.action is Action.REPLACE:
+            assert op.current is not None and op.desired is not None
+            result.append(ReplaceViewOp(op.current, op.desired))
+
+    # 6. Create/replace triggers
     for op in trigger_ops:
         if op.action is Action.CREATE:
             assert op.desired is not None

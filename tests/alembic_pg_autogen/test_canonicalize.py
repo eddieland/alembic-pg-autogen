@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import Connection, text
 from sqlalchemy.engine import Engine
 
-from alembic_pg_autogen import CanonicalState, canonicalize, canonicalize_functions
+from alembic_pg_autogen import CanonicalState, canonicalize, canonicalize_functions, canonicalize_views
 
 
 class TestCanonicalStateUnit:
@@ -16,6 +16,17 @@ class TestCanonicalStateUnit:
         state = CanonicalState(functions=[], triggers=[])
         assert state.functions == []
         assert state.triggers == []
+
+    def test_views_default_empty(self):
+        state = CanonicalState(functions=[], triggers=[])
+        assert state.views == ()
+
+    def test_views_explicit(self):
+        from alembic_pg_autogen import ViewInfo
+
+        v = ViewInfo("public", "v", "def")
+        state = CanonicalState(functions=[], triggers=[], views=[v])
+        assert len(state.views) == 1
 
     def test_is_tuple(self):
         state = CanonicalState(functions=[], triggers=[])
@@ -154,3 +165,60 @@ class TestCanonicalizeIntegration:
         funcs = [f for f in result.functions if f.name == "test_canon_replace"]
         assert len(funcs) == 1
         assert "999" in funcs[0].definition
+
+
+@pytest.mark.integration
+class TestCanonicalizeViewsIntegration:
+    """View canonicalization tests."""
+
+    def test_view_round_trip(self, pg_conn: Connection):
+        ddl = ["CREATE VIEW public.test_cv_view AS SELECT 1 AS val"]
+        results = canonicalize_views(pg_conn, ddl)
+
+        views = [v for v in results if v.name == "test_cv_view"]
+        assert len(views) == 1
+        v = views[0]
+        assert v.schema == "public"
+        assert "CREATE OR REPLACE VIEW" in v.definition
+        assert "test_cv_view" in v.definition
+
+    def test_view_database_unchanged(self, pg_conn: Connection):
+        canonicalize(
+            pg_conn,
+            view_ddl=["CREATE VIEW public.test_cv_ephemeral AS SELECT 42 AS x"],
+        )
+
+        row = pg_conn.execute(
+            text(
+                "SELECT count(*) FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relname = 'test_cv_ephemeral' AND n.nspname = 'public' AND c.relkind = 'v'"
+            )
+        ).scalar()
+        assert row == 0
+
+    def test_view_referencing_function(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE FUNCTION public.test_cv_fn() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$"))
+
+        result = canonicalize(
+            pg_conn,
+            view_ddl=["CREATE VIEW public.test_cv_fn_view AS SELECT public.test_cv_fn() AS result"],
+            schemas=["public"],
+        )
+
+        views = [v for v in result.views if v.name == "test_cv_fn_view"]
+        assert len(views) == 1
+        assert "test_cv_fn" in views[0].definition
+
+    def test_create_or_replace_view(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE VIEW public.test_cv_replace AS SELECT 1 AS val"))
+
+        result = canonicalize(
+            pg_conn,
+            view_ddl=["CREATE OR REPLACE VIEW public.test_cv_replace AS SELECT 999 AS val"],
+            schemas=["public"],
+        )
+
+        views = [v for v in result.views if v.name == "test_cv_replace"]
+        assert len(views) == 1
+        assert "999" in views[0].definition

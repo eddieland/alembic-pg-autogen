@@ -11,10 +11,13 @@ from alembic.autogenerate.render import renderers
 from alembic_pg_autogen.ops import (
     CreateFunctionOp,
     CreateTriggerOp,
+    CreateViewOp,
     DropFunctionOp,
     DropTriggerOp,
+    DropViewOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
+    ReplaceViewOp,
 )
 
 if TYPE_CHECKING:
@@ -63,6 +66,24 @@ def _render_drop_trigger(_autogen_context: AutogenContext, op: DropTriggerOp) ->
     import postgast
 
     return _render_execute(postgast.to_drop(op.current.definition))
+
+
+@renderers.dispatch_for(CreateViewOp)
+def _render_create_view(_autogen_context: AutogenContext, op: CreateViewOp) -> str:
+    """Render a CREATE OR REPLACE VIEW via op.execute()."""
+    return _render_execute(op.desired.definition)
+
+
+@renderers.dispatch_for(ReplaceViewOp)
+def _render_replace_view(_autogen_context: AutogenContext, op: ReplaceViewOp) -> str:
+    """Render a CREATE OR REPLACE VIEW (replace) via op.execute()."""
+    return _render_execute(op.desired.definition)
+
+
+@renderers.dispatch_for(DropViewOp)
+def _render_drop_view(_autogen_context: AutogenContext, op: DropViewOp) -> str:
+    """Render a DROP VIEW via op.execute()."""
+    return _render_execute(f"DROP VIEW {op.current.schema}.{op.current.name}")
 
 
 def _render_execute(ddl: str) -> str:

@@ -8,6 +8,8 @@ from alembic_pg_autogen import (
     FunctionOp,
     TriggerInfo,
     TriggerOp,
+    ViewInfo,
+    ViewOp,
     diff,
 )
 
@@ -76,6 +78,32 @@ class TestTriggerOp:
         assert op.desired is None
 
 
+class TestViewOp:
+    """ViewOp construction and field access."""
+
+    def test_create(self):
+        desired = ViewInfo("public", "my_view", "CREATE OR REPLACE VIEW …")
+        op = ViewOp(action=Action.CREATE, current=None, desired=desired)
+        assert op.action is Action.CREATE
+        assert op.current is None
+        assert op.desired is desired
+
+    def test_replace(self):
+        cur = ViewInfo("public", "my_view", "old def")
+        des = ViewInfo("public", "my_view", "new def")
+        op = ViewOp(action=Action.REPLACE, current=cur, desired=des)
+        assert op.action is Action.REPLACE
+        assert op.current is cur
+        assert op.desired is des
+
+    def test_drop(self):
+        cur = ViewInfo("public", "my_view", "CREATE OR REPLACE VIEW …")
+        op = ViewOp(action=Action.DROP, current=cur, desired=None)
+        assert op.action is Action.DROP
+        assert op.current is cur
+        assert op.desired is None
+
+
 class TestDiffResult:
     """3.3 — DiffResult construction and field access."""
 
@@ -89,6 +117,15 @@ class TestDiffResult:
         assert isinstance(result, tuple)
         assert result[0] == []
         assert result[1] == []
+
+    def test_view_ops_default_empty(self):
+        result = DiffResult(function_ops=[], trigger_ops=[])
+        assert result.view_ops == ()
+
+    def test_view_ops_explicit(self):
+        vop = ViewOp(Action.CREATE, None, ViewInfo("public", "v", "def"))
+        result = DiffResult(function_ops=[], trigger_ops=[], view_ops=[vop])
+        assert len(result.view_ops) == 1
 
 
 class TestDiffFunction:
@@ -268,3 +305,83 @@ class TestDiffFunction:
         result = diff(current, desired)
         assert len(result.function_ops) == 1
         assert result.function_ops[0].action is Action.REPLACE
+
+
+class TestDiffViews:
+    """View-specific diff behavior."""
+
+    def test_create_view(self):
+        v = ViewInfo("public", "new_view", "CREATE OR REPLACE VIEW …")
+        current = CanonicalState(functions=[], triggers=[], views=[])
+        desired = CanonicalState(functions=[], triggers=[], views=[v])
+        result = diff(current, desired)
+        assert len(result.view_ops) == 1
+        op = result.view_ops[0]
+        assert op.action is Action.CREATE
+        assert op.current is None
+        assert op.desired is v
+
+    def test_drop_view(self):
+        v = ViewInfo("public", "old_view", "CREATE OR REPLACE VIEW …")
+        current = CanonicalState(functions=[], triggers=[], views=[v])
+        desired = CanonicalState(functions=[], triggers=[], views=[])
+        result = diff(current, desired)
+        assert len(result.view_ops) == 1
+        op = result.view_ops[0]
+        assert op.action is Action.DROP
+        assert op.current is v
+        assert op.desired is None
+
+    def test_replace_view(self):
+        cur = ViewInfo("public", "my_view", "old definition")
+        des = ViewInfo("public", "my_view", "new definition")
+        current = CanonicalState(functions=[], triggers=[], views=[cur])
+        desired = CanonicalState(functions=[], triggers=[], views=[des])
+        result = diff(current, desired)
+        assert len(result.view_ops) == 1
+        op = result.view_ops[0]
+        assert op.action is Action.REPLACE
+        assert op.current is cur
+        assert op.desired is des
+
+    def test_identical_views_produce_no_ops(self):
+        v = ViewInfo("public", "stable_view", "SELECT 1")
+        current = CanonicalState(functions=[], triggers=[], views=[v])
+        desired = CanonicalState(functions=[], triggers=[], views=[v])
+        result = diff(current, desired)
+        assert result.view_ops == []
+
+    def test_identity_by_schema_and_name(self):
+        v_pub = ViewInfo("public", "shared_name", "def pub")
+        v_aud = ViewInfo("audit", "shared_name", "def aud")
+        current = CanonicalState(functions=[], triggers=[], views=[v_pub, v_aud])
+        desired = CanonicalState(functions=[], triggers=[], views=[v_pub])
+        result = diff(current, desired)
+        assert len(result.view_ops) == 1
+        assert result.view_ops[0].action is Action.DROP
+        assert result.view_ops[0].current is v_aud
+
+    def test_view_ops_sorted(self):
+        v_z = ViewInfo("public", "z_view", "def z")
+        v_a = ViewInfo("public", "a_view", "def a")
+        current = CanonicalState(functions=[], triggers=[], views=[])
+        desired = CanonicalState(functions=[], triggers=[], views=[v_z, v_a])
+        result = diff(current, desired)
+        assert len(result.view_ops) == 2
+        names = [op.desired.name for op in result.view_ops if op.desired is not None]  # pyright: ignore[reportOptionalMemberAccess]
+        assert names == sorted(names)
+
+    def test_mixed_view_ops(self):
+        v_keep = ViewInfo("public", "keep_view", "same def")
+        v_old = ViewInfo("public", "old_view", "old def")
+        v_replace_cur = ViewInfo("public", "replace_view", "old ver")
+        v_replace_des = ViewInfo("public", "replace_view", "new ver")
+        v_new = ViewInfo("public", "new_view", "new def")
+
+        current = CanonicalState(functions=[], triggers=[], views=[v_keep, v_old, v_replace_cur])
+        desired = CanonicalState(functions=[], triggers=[], views=[v_keep, v_replace_des, v_new])
+        result = diff(current, desired)
+
+        assert len(result.view_ops) == 3
+        actions = {op.action for op in result.view_ops}
+        assert actions == {Action.DROP, Action.REPLACE, Action.CREATE}

@@ -13,17 +13,28 @@ from alembic_pg_autogen.canonicalize import (
     canonicalize,
     canonicalize_functions,
     canonicalize_triggers,
+    canonicalize_views,
 )
 from alembic_pg_autogen.compare import SQLCreatable, setup
-from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, TriggerOp, diff
-from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, inspect_functions, inspect_triggers
+from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, TriggerOp, ViewOp, diff
+from alembic_pg_autogen.inspect import (
+    FunctionInfo,
+    TriggerInfo,
+    ViewInfo,
+    inspect_functions,
+    inspect_triggers,
+    inspect_views,
+)
 from alembic_pg_autogen.ops import (
     CreateFunctionOp,
     CreateTriggerOp,
+    CreateViewOp,
     DropFunctionOp,
     DropTriggerOp,
+    DropViewOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
+    ReplaceViewOp,
 )
 
 _Plugin.setup_plugin_from_module(_compare_mod, "alembic_pg_autogen.compare")
@@ -37,21 +48,28 @@ __all__: Final[Sequence[str]] = [
     "CanonicalState",
     "CreateFunctionOp",
     "CreateTriggerOp",
+    "CreateViewOp",
     "DiffResult",
     "DropFunctionOp",
     "DropTriggerOp",
+    "DropViewOp",
     "FunctionInfo",
     "FunctionOp",
     "ReplaceFunctionOp",
     "ReplaceTriggerOp",
+    "ReplaceViewOp",
     "SQLCreatable",
     "TriggerInfo",
     "TriggerOp",
+    "ViewInfo",
+    "ViewOp",
     "canonicalize",
     "canonicalize_functions",
     "canonicalize_triggers",
+    "canonicalize_views",
     "diff",
     "inspect_functions",
     "inspect_triggers",
+    "inspect_views",
     "setup",
 ]

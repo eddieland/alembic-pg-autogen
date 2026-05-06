@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import Connection, text
 from sqlalchemy.engine import Engine
 
-from alembic_pg_autogen import FunctionInfo, TriggerInfo, inspect_functions, inspect_triggers
+from alembic_pg_autogen import FunctionInfo, TriggerInfo, ViewInfo, inspect_functions, inspect_triggers, inspect_views
 
 
 class TestFunctionInfoUnit:
@@ -39,6 +39,25 @@ class TestTriggerInfoUnit:
         info = TriggerInfo("s", "t", "n", "d")
         assert isinstance(info, tuple)
         assert info[0] == "s"
+
+
+class TestViewInfoUnit:
+    def test_construction_and_fields(self):
+        info = ViewInfo(
+            schema="public", name="active_users", definition="CREATE OR REPLACE VIEW public.active_users AS\n SELECT 1"
+        )
+        assert info.schema == "public"
+        assert info.name == "active_users"
+        assert "CREATE OR REPLACE VIEW" in info.definition
+
+    def test_is_tuple(self):
+        info = ViewInfo("s", "n", "d")
+        assert isinstance(info, tuple)
+        assert info[0] == "s"
+
+    def test_identity_is_schema_and_name(self):
+        info = ViewInfo("myschema", "myview", "definition text")
+        assert info[:-1] == ("myschema", "myview")
 
 
 @pytest.fixture
@@ -206,3 +225,61 @@ class TestInspectTriggersIntegration:
 
         assert all(t.schema == "public" for t in results)
         assert any(t.trigger_name == "test_trg_schema" for t in results)
+
+
+@pytest.mark.integration
+class TestInspectViewsIntegration:
+    def test_simple_view(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE VIEW public.test_view_simple AS SELECT 1 AS val"))
+
+        results = inspect_views(pg_conn)
+
+        views = [v for v in results if v.name == "test_view_simple"]
+        assert len(views) == 1
+        v = views[0]
+        assert v.schema == "public"
+        assert v.name == "test_view_simple"
+        assert "CREATE OR REPLACE VIEW" in v.definition
+        assert "test_view_simple" in v.definition
+        assert "SELECT" in v.definition
+
+    def test_definition_includes_full_ddl(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE VIEW public.test_view_ddl AS SELECT 42 AS answer"))
+
+        results = inspect_views(pg_conn)
+
+        views = [v for v in results if v.name == "test_view_ddl"]
+        assert len(views) == 1
+        defn = views[0].definition
+        assert defn.startswith("CREATE OR REPLACE VIEW public.test_view_ddl AS")
+
+    def test_no_views_returns_empty(self, pg_conn: Connection):
+        results = inspect_views(pg_conn, schemas=["nonexistent"])
+        assert len(results) == 0
+
+    def test_schema_filtering(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE VIEW public.test_view_schema AS SELECT 1 AS x"))
+
+        results = inspect_views(pg_conn, schemas=["public"])
+
+        assert all(v.schema == "public" for v in results)
+        assert any(v.name == "test_view_schema" for v in results)
+
+    def test_materialized_views_excluded(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE MATERIALIZED VIEW public.test_matview AS SELECT 1 AS val"))
+
+        results = inspect_views(pg_conn)
+
+        # Materialized views should not appear in inspect_views output
+        mat_views = [v for v in results if v.name == "test_matview"]
+        assert len(mat_views) == 0
+
+    def test_view_referencing_function(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE FUNCTION public.test_view_fn() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$"))
+        pg_conn.execute(text("CREATE VIEW public.test_view_fn_ref AS SELECT public.test_view_fn() AS result"))
+
+        results = inspect_views(pg_conn)
+
+        views = [v for v in results if v.name == "test_view_fn_ref"]
+        assert len(views) == 1
+        assert "test_view_fn" in views[0].definition

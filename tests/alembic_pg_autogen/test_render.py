@@ -3,22 +3,28 @@ from __future__ import annotations
 # pyright: reportPrivateUsage=false
 from unittest.mock import MagicMock
 
-from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo
+from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
 from alembic_pg_autogen.ops import (
     CreateFunctionOp,
     CreateTriggerOp,
+    CreateViewOp,
     DropFunctionOp,
     DropTriggerOp,
+    DropViewOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
+    ReplaceViewOp,
 )
 from alembic_pg_autogen.render import (
     _render_create_function,
     _render_create_trigger,
+    _render_create_view,
     _render_drop_function,
     _render_drop_trigger,
+    _render_drop_view,
     _render_replace_function,
     _render_replace_trigger,
+    _render_replace_view,
 )
 
 
@@ -117,6 +123,52 @@ class TestRenderDropTrigger:
         assert result == "op.execute('DROP TRIGGER notify_trg ON public.events')"
 
 
+class TestRenderCreateView:
+    def test_simple_ddl(self):
+        ddl = "CREATE OR REPLACE VIEW public.active_users AS\n SELECT id FROM users WHERE active"
+        op = CreateViewOp(ViewInfo("public", "active_users", ddl))
+        result = _render_create_view(_ctx(), op)
+        assert result.startswith("op.execute(")
+        assert "CREATE OR REPLACE VIEW public.active_users AS" in result
+
+    def test_ddl_with_single_quotes(self):
+        ddl = "CREATE OR REPLACE VIEW public.v AS\n SELECT id FROM t WHERE status = 'active'"
+        op = CreateViewOp(ViewInfo("public", "v", ddl))
+        result = _render_create_view(_ctx(), op)
+        assert "op.execute(" in result
+        assert "'active'" in result
+        compiled = compile(result, "<test>", "eval")
+        assert compiled is not None
+
+
+class TestRenderReplaceView:
+    def test_uses_desired_definition(self):
+        current = ViewInfo("public", "v", "old definition")
+        desired = ViewInfo("public", "v", "CREATE OR REPLACE VIEW public.v AS\n SELECT 2 AS new_val")
+        op = ReplaceViewOp(current, desired)
+        result = _render_replace_view(_ctx(), op)
+        assert "new_val" in result
+        assert "old definition" not in result
+
+    def test_identical_to_create(self):
+        ddl = "CREATE OR REPLACE VIEW public.v AS\n SELECT 1"
+        op_create = CreateViewOp(ViewInfo("public", "v", ddl))
+        op_replace = ReplaceViewOp(ViewInfo("public", "v", "old"), ViewInfo("public", "v", ddl))
+        assert _render_create_view(_ctx(), op_create) == _render_replace_view(_ctx(), op_replace)
+
+
+class TestRenderDropView:
+    def test_drop_view(self):
+        op = DropViewOp(ViewInfo("public", "old_view", "CREATE OR REPLACE VIEW …"))
+        result = _render_drop_view(_ctx(), op)
+        assert result == "op.execute('DROP VIEW public.old_view')"
+
+    def test_drop_view_non_default_schema(self):
+        op = DropViewOp(ViewInfo("reporting", "monthly_summary", "CREATE OR REPLACE VIEW …"))
+        result = _render_drop_view(_ctx(), op)
+        assert result == "op.execute('DROP VIEW reporting.monthly_summary')"
+
+
 class TestNoImportsInjected:
     def test_create_function_no_imports(self):
         ctx = _ctx()
@@ -129,4 +181,16 @@ class TestNoImportsInjected:
         ddl = "CREATE TRIGGER trg AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION fn()"
         op = DropTriggerOp(TriggerInfo("public", "t", "trg", ddl))
         _render_drop_trigger(ctx, op)
+        assert len(ctx.imports) == 0
+
+    def test_create_view_no_imports(self):
+        ctx = _ctx()
+        op = CreateViewOp(ViewInfo("public", "v", "CREATE OR REPLACE VIEW …"))
+        _render_create_view(ctx, op)
+        assert len(ctx.imports) == 0
+
+    def test_drop_view_no_imports(self):
+        ctx = _ctx()
+        op = DropViewOp(ViewInfo("public", "v", "CREATE OR REPLACE VIEW …"))
+        _render_drop_view(ctx, op)
         assert len(ctx.imports) == 0
