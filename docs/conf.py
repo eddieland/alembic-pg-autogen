@@ -1,5 +1,7 @@
 """Sphinx configuration for alembic-pg-autogen documentation."""
 
+import os
+
 project = "alembic-pg-autogen"
 copyright = "2026, eddie.land"  # noqa: A001
 author = "Edward Jones"
@@ -35,3 +37,9 @@ html_theme_options = {
     "source_branch": "main",
     "source_directory": "docs/",
 }
+
+# Read the Docs serves docs at /<lang>/<version>/, so absolute links generated
+# by sphinx_llms_txt (which prepend html_baseurl, defaulting to "/") would
+# point at the domain root and 404. Use the canonical URL provided by RTD so
+# llms.txt links resolve correctly across versions.
+html_baseurl = os.environ.get("READTHEDOCS_CANONICAL_URL", "")
