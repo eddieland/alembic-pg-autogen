@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING
 
 from alembic.runtime.plugins import Plugin as _Plugin
 
-import alembic_pg_autogen.compare as _compare_mod  # noqa: F401  # pyright: ignore[reportUnusedImport]
-import alembic_pg_autogen.render as _render  # noqa: F401  # pyright: ignore[reportUnusedImport]
+import alembic_pg_autogen.compare as _compare_mod
 from alembic_pg_autogen.canonicalize import (
     CanonicalState,
     canonicalize,
