@@ -93,3 +93,17 @@ def test_importing_package_registers_renderers():
             assert renderers.dispatch(op) is not None, type(op).__name__
     """)
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_ignored_exports_present():
+    import alembic_pg_autogen
+
+    assert "IGNORED" in alembic_pg_autogen.__all__
+    assert "Ignored" in alembic_pg_autogen.__all__
+
+
+def test_ignored_exports_importable():
+    from alembic_pg_autogen import IGNORED, Ignored
+
+    assert IGNORED is not None
+    assert Ignored is not None

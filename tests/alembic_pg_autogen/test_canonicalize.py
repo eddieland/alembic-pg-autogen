@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import Connection, text
 from sqlalchemy.engine import Engine
 
-from alembic_pg_autogen import CanonicalState, canonicalize, canonicalize_functions, canonicalize_views
+from alembic_pg_autogen import IGNORED, CanonicalState, canonicalize, canonicalize_functions, canonicalize_views
 
 
 class TestCanonicalStateUnit:
@@ -222,3 +222,30 @@ class TestCanonicalizeViewsIntegration:
         views = [v for v in result.views if v.name == "test_cv_replace"]
         assert len(views) == 1
         assert "999" in views[0].definition
+
+
+@pytest.mark.integration
+class TestCanonicalizeIgnoredIntegration:
+    """``IGNORED`` skips both DDL execution and catalog readback for an object type."""
+
+    def test_ignored_types_are_not_read_back(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE VIEW public.test_ci_existing AS SELECT 1 AS val"))
+
+        result = canonicalize(
+            pg_conn,
+            function_ddl=["CREATE FUNCTION public.test_ci_fn() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$"],
+            view_ddl=IGNORED,
+            trigger_ddl=IGNORED,
+            schemas=["public"],
+        )
+
+        assert any(f.name == "test_ci_fn" for f in result.functions)
+        assert list(result.views) == []
+        assert list(result.triggers) == []
+
+    def test_empty_sequence_still_reads_back(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE VIEW public.test_ci_seen AS SELECT 1 AS val"))
+
+        result = canonicalize(pg_conn, view_ddl=(), schemas=["public"])
+
+        assert any(v.name == "test_ci_seen" for v in result.views)

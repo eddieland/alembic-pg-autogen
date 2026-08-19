@@ -24,6 +24,7 @@ from alembic_pg_autogen.ops import (
     ReplaceTriggerOp,
     ReplaceViewOp,
 )
+from alembic_pg_autogen.sentinels import IGNORED
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
     from alembic.operations.ops import MigrateOperation, UpgradeOps
 
     from alembic_pg_autogen.diff import FunctionOp, TriggerOp, ViewOp
+    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
+    from alembic_pg_autogen.sentinels import Ignored
 
 log = logging.getLogger(__name__)
 
@@ -85,15 +88,32 @@ def _compare_pg_objects(
     pg_triggers = _resolve_ddl(opts.get("pg_triggers", ()))
     pg_views = _resolve_ddl(opts.get("pg_views", ()))
 
+    ignored = [
+        label
+        for label, declared in (("functions", pg_functions), ("triggers", pg_triggers), ("views", pg_views))
+        if declared is IGNORED
+    ]
+    if len(ignored) == 3:
+        log.debug("All object types marked IGNORED, skipping")
+        return PriorityDispatchResult.CONTINUE
+    if ignored:
+        log.info("Ignoring PostgreSQL object types (left unmanaged): %s", ", ".join(ignored))
+
     conn = autogen_context.connection
     assert conn is not None  # guaranteed during online autogenerate
 
     resolved_schemas = _resolve_schemas(conn, schemas)
     log.debug("resolved_schemas=%r", resolved_schemas)
 
-    current_functions = inspect_functions(conn, resolved_schemas)
-    current_triggers = inspect_triggers(conn, resolved_schemas)
-    current_views = inspect_views(conn, resolved_schemas)
+    current_functions: Sequence[FunctionInfo] = ()
+    current_triggers: Sequence[TriggerInfo] = ()
+    current_views: Sequence[ViewInfo] = ()
+    if pg_functions is not IGNORED:
+        current_functions = inspect_functions(conn, resolved_schemas)
+    if pg_triggers is not IGNORED:
+        current_triggers = inspect_triggers(conn, resolved_schemas)
+    if pg_views is not IGNORED:
+        current_views = inspect_views(conn, resolved_schemas)
     current = CanonicalState(functions=current_functions, triggers=current_triggers, views=current_views)
     log.info(
         "Found %d functions, %d triggers, and %d views in database",
@@ -121,34 +141,50 @@ def _compare_pg_objects(
     return PriorityDispatchResult.CONTINUE
 
 
-def _resolve_ddl(items: Sequence[str | SQLCreatable]) -> tuple[str, ...]:
+def _resolve_ddl(items: Sequence[str | SQLCreatable] | Ignored) -> tuple[str, ...] | Ignored:
     """Convert a mixed sequence of DDL strings and ``SQLCreatable`` objects to plain DDL strings.
 
     Strings are passed through unchanged.  ``SQLCreatable`` objects (e.g. alembic-utils entities) are converted by
-    calling ``obj.to_sql_statement_create().text``.
+    calling ``obj.to_sql_statement_create().text``.  :data:`~alembic_pg_autogen.IGNORED` is passed through unchanged.
     """
+    if items is IGNORED:
+        return IGNORED
     return tuple(item if isinstance(item, str) else item.to_sql_statement_create().text for item in items)
 
 
 def _filter_to_declared(
     canonical: CanonicalState,
-    pg_functions: Sequence[str],
-    pg_triggers: Sequence[str],
-    pg_views: Sequence[str],
+    pg_functions: Sequence[str] | Ignored,
+    pg_triggers: Sequence[str] | Ignored,
+    pg_views: Sequence[str] | Ignored,
     conn: Connection,
 ) -> CanonicalState:
     """Filter canonical state to only include objects declared in user DDL.
 
     ``canonicalize()`` returns a full catalog snapshot after executing DDL, which includes pre-existing objects.  This
-    function parses identity info from the raw DDL strings and keeps only those canonical entries that match.
+    function parses identity info from the raw DDL strings and keeps only those canonical entries that match.  Object
+    types marked :data:`~alembic_pg_autogen.IGNORED` yield an empty desired set without parsing any DDL.
     """
-    fn_names = _parse_function_names(pg_functions, conn)
-    trg_ids = _parse_trigger_identities(pg_triggers, conn)
-    view_names = _parse_view_names(pg_views, conn)
+    functions: Sequence[FunctionInfo] = ()
+    if pg_functions is not IGNORED:
+        fn_names = _parse_function_names(pg_functions, conn)
+        functions = [f for f in canonical.functions if (f.schema, f.name) in fn_names]
+        if pg_functions and not functions:
+            log.warning("No canonical functions matched user DDL — check schema qualifiers in pg_functions")
 
-    functions = [f for f in canonical.functions if (f.schema, f.name) in fn_names]
-    triggers = [t for t in canonical.triggers if (t.schema, t.table_name, t.trigger_name) in trg_ids]
-    views = [v for v in canonical.views if (v.schema, v.name) in view_names]
+    triggers: Sequence[TriggerInfo] = ()
+    if pg_triggers is not IGNORED:
+        trg_ids = _parse_trigger_identities(pg_triggers, conn)
+        triggers = [t for t in canonical.triggers if (t.schema, t.table_name, t.trigger_name) in trg_ids]
+        if pg_triggers and not triggers:
+            log.warning("No canonical triggers matched user DDL — check schema qualifiers in pg_triggers")
+
+    views: Sequence[ViewInfo] = ()
+    if pg_views is not IGNORED:
+        view_names = _parse_view_names(pg_views, conn)
+        views = [v for v in canonical.views if (v.schema, v.name) in view_names]
+        if pg_views and not views:
+            log.warning("No canonical views matched user DDL — check schema qualifiers in pg_views")
 
     fn_dropped = len(canonical.functions) - len(functions)
     trg_dropped = len(canonical.triggers) - len(triggers)
@@ -160,13 +196,6 @@ def _filter_to_declared(
             trg_dropped,
             view_dropped,
         )
-
-    if pg_functions and not functions:
-        log.warning("No canonical functions matched user DDL — check schema qualifiers in pg_functions")
-    if pg_triggers and not triggers:
-        log.warning("No canonical triggers matched user DDL — check schema qualifiers in pg_triggers")
-    if pg_views and not views:
-        log.warning("No canonical views matched user DDL — check schema qualifiers in pg_views")
 
     return CanonicalState(functions=functions, triggers=triggers, views=views)
 

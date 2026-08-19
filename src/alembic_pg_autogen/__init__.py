@@ -40,6 +40,7 @@ from alembic_pg_autogen.ops import (
     ReplaceTriggerOp,
     ReplaceViewOp,
 )
+from alembic_pg_autogen.sentinels import IGNORED, Ignored
 
 _Plugin.setup_plugin_from_module(_compare_mod, "alembic_pg_autogen.compare")
 
@@ -59,6 +60,8 @@ __all__: Final[Sequence[str]] = [
     "DropViewOp",
     "FunctionInfo",
     "FunctionOp",
+    "IGNORED",
+    "Ignored",
     "ReplaceFunctionOp",
     "ReplaceTriggerOp",
     "ReplaceViewOp",
