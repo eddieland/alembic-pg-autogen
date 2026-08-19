@@ -44,3 +44,52 @@ def test_view_exports_importable():
     assert DropViewOp is not None
     assert inspect_views is not None
     assert canonicalize_views is not None
+
+
+def test_importing_package_registers_renderers():
+    """Importing the package must register renderers for every op it emits.
+
+    Regression test: the render module was never imported, so ``renderers.dispatch()`` raised
+    ``ValueError: no dispatch function for object`` when Alembic wrote the migration script.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent("""
+        import alembic_pg_autogen
+        from alembic.autogenerate.render import renderers
+        from alembic_pg_autogen import (
+            CreateFunctionOp,
+            CreateTriggerOp,
+            CreateViewOp,
+            DropFunctionOp,
+            DropTriggerOp,
+            DropViewOp,
+            FunctionInfo,
+            ReplaceFunctionOp,
+            ReplaceTriggerOp,
+            ReplaceViewOp,
+            TriggerInfo,
+            ViewInfo,
+        )
+
+        fn = FunctionInfo("public", "fn", "", "CREATE FUNCTION public.fn() RETURNS void LANGUAGE sql AS $$ $$")
+        trg = TriggerInfo("public", "t", "trg", "CREATE TRIGGER trg BEFORE INSERT ON public.t EXECUTE FUNCTION f()")
+        view = ViewInfo("public", "v", "CREATE OR REPLACE VIEW public.v AS SELECT 1")
+
+        ops = [
+            CreateFunctionOp(fn),
+            ReplaceFunctionOp(fn, fn),
+            DropFunctionOp(fn),
+            CreateTriggerOp(trg),
+            ReplaceTriggerOp(trg, trg),
+            DropTriggerOp(trg),
+            CreateViewOp(view),
+            ReplaceViewOp(view, view),
+            DropViewOp(view),
+        ]
+        for op in ops:
+            assert renderers.dispatch(op) is not None, type(op).__name__
+    """)
+    subprocess.run([sys.executable, "-c", code], check=True)
