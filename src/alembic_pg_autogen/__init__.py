@@ -7,6 +7,11 @@ from typing import TYPE_CHECKING
 from alembic.runtime.plugins import Plugin as _Plugin
 
 import alembic_pg_autogen.compare as _compare_mod
+
+# Imported for its side effect: the module body registers the ``renderers.dispatch_for`` handlers for every op in
+# ``alembic_pg_autogen.ops``.  Without it Alembic raises "no dispatch function for object" while rendering the
+# migration script.
+import alembic_pg_autogen.render  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from alembic_pg_autogen.canonicalize import (
     CanonicalState,
     canonicalize,
