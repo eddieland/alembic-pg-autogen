@@ -68,10 +68,17 @@ context.configure(
 alembic revision --autogenerate -m "add audit function and trigger"
 ```
 
-## Ignoring an object type
+## What gets managed
 
-Every object type is managed by default, which means objects found in the inspected schemas that you did not declare get
-dropped. Pass the `IGNORED` sentinel to leave a type alone entirely — nothing is inspected, diffed, or emitted for it:
+An object type becomes *managed* when you declare it. Within a managed type the declared set is the whole truth, so
+objects found in the inspected schemas that you did not declare are dropped — that is what makes the tool declarative.
+
+A key you never pass leaves that object type alone entirely: nothing is inspected, diffed, or emitted for it. The
+example above declares functions and triggers, so views are untouched, and adopting the library one object type at a
+time is safe.
+
+To record the opt-out at the configuration site — or to set it conditionally — pass the `IGNORED` sentinel, which means
+exactly what omitting the key means:
 
 ```python
 from alembic_pg_autogen import IGNORED
@@ -85,8 +92,12 @@ context.configure(
 )
 ```
 
-`IGNORED` is not the same as an empty list: `pg_views=[]` declares "there should be no views" and drops every existing
-one, while `pg_views=IGNORED` declares "views are not managed here".
+An empty list is a different thing again: `pg_views=[]` declares "there should be no views" and drops every existing
+one, while `pg_views=IGNORED` declares "views are not managed here". Watch for this if you build the list dynamically —
+`collect_view_ddl() or IGNORED` keeps an empty result from clearing your schema.
+
+Because an unrecognized key leaves its type unmanaged, a misspelled one (`pg_view` for `pg_views`) would quietly manage
+nothing; those are reported as a warning naming the key you meant.
 
 ## Check constraints
 

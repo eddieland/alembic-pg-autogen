@@ -38,7 +38,10 @@ Pass this instead of a DDL sequence to ``pg_functions``, ``pg_views``, or ``pg_t
 entirely alone: nothing is inspected, nothing is diffed, and no operations are emitted for it — in particular, existing
 objects of that type are **not** dropped.
 
-This differs from passing an empty sequence, which declares "there should be no objects of this type" and therefore
+Omitting the key entirely means the same thing; the sentinel is for recording the opt-out at the configuration site, and
+for assigning it conditionally.
+
+Either differs from passing an empty sequence, which declares "there should be no objects of this type" and therefore
 drops every existing one::
 
     context.configure(

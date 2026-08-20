@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from typing import TYPE_CHECKING, Protocol
@@ -27,7 +28,8 @@ from alembic_pg_autogen.ops import (
 from alembic_pg_autogen.sentinels import IGNORED
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
+    from typing import Final
 
     from alembic.autogenerate.api import AutogenContext
     from alembic.operations.ops import MigrateOperation, UpgradeOps
@@ -39,6 +41,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _VIEW_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(?:(\w+)\.)?(\w+)", re.IGNORECASE)
+
+_DESIRED_STATE_KEYS: Final = ("pg_functions", "pg_triggers", "pg_views")
+"""Configuration keys this comparator reads from ``autogen_context.opts``."""
+
+_TYPO_CUTOFF: Final = 0.8
+"""Similarity above which an unrecognized ``pg_*`` option is reported as a probable misspelling."""
 
 
 class _HasText(Protocol):
@@ -80,24 +88,22 @@ def _compare_pg_objects(
         "pg_triggers" in opts,
         "pg_views" in opts,
     )
-    if "pg_functions" not in opts and "pg_triggers" not in opts and "pg_views" not in opts:
-        log.debug("No pg_functions, pg_triggers, or pg_views in opts, skipping")
-        return PriorityDispatchResult.CONTINUE
+    _warn_unrecognized_options(opts)
 
-    pg_functions = _resolve_ddl(opts.get("pg_functions", ()))
-    pg_triggers = _resolve_ddl(opts.get("pg_triggers", ()))
-    pg_views = _resolve_ddl(opts.get("pg_views", ()))
+    pg_functions = _resolve_ddl(opts.get("pg_functions", IGNORED))
+    pg_triggers = _resolve_ddl(opts.get("pg_triggers", IGNORED))
+    pg_views = _resolve_ddl(opts.get("pg_views", IGNORED))
 
-    ignored = [
+    unmanaged = [
         label
         for label, declared in (("functions", pg_functions), ("triggers", pg_triggers), ("views", pg_views))
         if declared is IGNORED
     ]
-    if len(ignored) == 3:
-        log.debug("All object types marked IGNORED, skipping")
+    if len(unmanaged) == 3:
+        log.debug("No object types are managed, skipping")
         return PriorityDispatchResult.CONTINUE
-    if ignored:
-        log.info("Ignoring PostgreSQL object types (left unmanaged): %s", ", ".join(ignored))
+    if unmanaged:
+        log.info("PostgreSQL object types left unmanaged: %s", ", ".join(unmanaged))
 
     conn = autogen_context.connection
     assert conn is not None  # guaranteed during online autogenerate
@@ -139,6 +145,21 @@ def _compare_pg_objects(
     upgrade_ops.ops.extend(ops)
 
     return PriorityDispatchResult.CONTINUE
+
+
+def _warn_unrecognized_options(opts: Mapping[str, object]) -> None:
+    """Warn about ``pg_*`` options that look like a misspelled desired-state key.
+
+    An absent key leaves its object type unmanaged, so a misspelling such as ``pg_view`` would otherwise silently
+    disable management of that type.  Only close matches are reported: a ``pg_*`` option belonging to another plugin is
+    not a typo and is left alone.
+    """
+    for key in opts:
+        if key in _DESIRED_STATE_KEYS or not key.startswith("pg_"):
+            continue
+        matches = difflib.get_close_matches(key, _DESIRED_STATE_KEYS, n=1, cutoff=_TYPO_CUTOFF)
+        if matches:
+            log.warning("Unrecognized autogenerate option %r — did you mean %r?", key, matches[0])
 
 
 def _resolve_ddl(items: Sequence[str | SQLCreatable] | Ignored) -> tuple[str, ...] | Ignored:
