@@ -61,7 +61,7 @@ Import the package (this registers the Alembic comparator plugin), then in your
 
    Both wildcards belong in ``autogenerate_plugins``. The option *replaces* Alembic's default of
    ``["alembic.autogenerate.*"]`` rather than adding to it, so listing only ``"alembic_pg_autogen.*"`` excludes every
-   comparator Alembic ships — including ``_produce_net_changes`` in ``alembic.autogenerate.schemas``, which drives the
+   comparator Alembic ships, including ``_produce_net_changes`` in ``alembic.autogenerate.schemas``, which drives the
    whole diff. Autogenerate then produces an empty migration for *everything*, this package included, without raising
    an error.
 
@@ -75,7 +75,7 @@ Import the package (this registers the Alembic comparator plugin), then in your
       logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)
 
    Each included plugin logs one ``setting up autogenerate plugin ...`` line. A correct configuration shows lines from
-   **both** namespaces — several ``alembic.autogenerate.*`` entries, among them ``schemas`` and ``tables``, which drive
+   **both** namespaces: several ``alembic.autogenerate.*`` entries, among them ``schemas`` and ``tables``, which drive
    the diff, alongside ``alembic_pg_autogen.compare`` and ``alembic_pg_autogen.checkconstraints``. Lines from only one
    namespace mean the corresponding wildcard is missing from the list.
 
@@ -208,8 +208,8 @@ Alembic's comparator matches by name and, for a name present on both sides, alwa
 undecided case is exactly and only what this package claims; it ignores names that exist on one side alone.
 
 Because the two sets are disjoint, no operation is ever emitted twice, so there is nothing to be gained by disabling
-Alembic's comparator and a great deal to lose — added and removed constraints would stop being detected entirely,
-with nothing from this package to replace them.
+Alembic's comparator and a great deal to lose: added and removed constraints would stop being detected entirely, with
+nothing from this package to replace them.
 
 The practical consequence: a schema whose only drift is constraints you forgot to declare and ones you no longer want
 will see **nothing at all** from this package, and every operation in the migration will have come from Alembic. That

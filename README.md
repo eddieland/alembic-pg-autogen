@@ -80,15 +80,15 @@ Getting the list wrong fails silently in one of two directions, and neither rais
 - **Omitting `alembic_pg_autogen.*`** (or not setting the option at all) leaves the default in force. Importing the
   package registers the plugins but does not opt them in, so functions, triggers, views, and check constraint
   expressions are simply never compared.
-- **Omitting `alembic.autogenerate.*`** turns autogenerate into a total no-op — not just for Alembic's features but for
-  ours too. The comparator that drives the entire diff belongs to `alembic.autogenerate.schemas`, so with it excluded
-  nothing dispatches and every migration comes out empty.
+- **Omitting `alembic.autogenerate.*`** turns autogenerate into a total no-op, and not just for Alembic's features but
+  for ours too. The comparator that drives the entire diff belongs to `alembic.autogenerate.schemas`, so with it
+  excluded nothing dispatches and every migration comes out empty.
 
 To confirm what a run actually loaded, set `logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)`. Each
 included plugin logs one `setting up autogenerate plugin ...` line, and a correct configuration shows lines from
-**both** namespaces — several `alembic.autogenerate.*` entries (`schemas` and `tables` above all, since those drive the
-diff) alongside `alembic_pg_autogen.compare` and `alembic_pg_autogen.checkconstraints`. Lines from only one namespace
-mean the corresponding wildcard is missing from the list.
+**both** namespaces: several `alembic.autogenerate.*` entries, chiefly `schemas` and `tables`, which drive the diff,
+alongside `alembic_pg_autogen.compare` and `alembic_pg_autogen.checkconstraints`. Lines from only one namespace mean the
+corresponding wildcard is missing from the list.
 
 ## What gets managed
 
@@ -128,7 +128,7 @@ Alembic detects when a named `CHECK` constraint is added to or removed from your
 a name are always presumed equivalent — normalizing SQL expressions across backends is not something Alembic can do. So
 tightening `amount >= 0` to `amount > 0` in a model generates nothing, and the schema drifts.
 
-This package closes that gap for PostgreSQL — and **closing the gap is all it does**. Our comparator augments Alembic's
+This package closes that gap for PostgreSQL, and **closing the gap is all it does**. Our comparator augments Alembic's
 rather than superseding it, so `alembic.autogenerate.checkconstraint_byname` stays enabled and keeps its job:
 
 | Situation                                           | Who handles it                                | Result                          |
@@ -140,8 +140,8 @@ rather than superseding it, so `alembic.autogenerate.checkconstraint_byname` sta
 The two sets are disjoint by construction, so no operation is ever emitted twice, and there is no duplication to be
 avoided by turning Alembic's comparator off. Disabling it is a pure loss: added and removed constraints stop being
 detected at all, while ours contributes nothing in their place. Alembic's own expression check is a guaranteed "equal"
-on PostgreSQL — `DefaultImpl.compare_check_constraint` returns `Equal()` and the PostgreSQL dialect does not override it
-— which is precisely the gap ours fills and the reason the two never collide.
+on PostgreSQL: `DefaultImpl.compare_check_constraint` returns `Equal()` and the PostgreSQL dialect does not override it.
+That is precisely the gap ours fills, and the reason the two never collide.
 
 One consequence is worth internalizing: if the only drift in your schema is constraints you forgot to declare and ones
 you no longer want, **this package will report nothing**, and every operation in the migration will have come from
