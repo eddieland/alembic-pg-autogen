@@ -95,9 +95,9 @@ from sqlalchemy import MetaData
 config = context.config
 connection = config.attributes["connection"]
 target_metadata = config.attributes.get("target_metadata") or MetaData()
-pg_functions = config.attributes.get("pg_functions", ())
-pg_triggers = config.attributes.get("pg_triggers", ())
-pg_views = config.attributes.get("pg_views", ())
+# Forward only the pg_* attributes the test actually set, so a test can express a genuinely
+# absent key (and a misspelled one) rather than always passing all three.
+pg_opts = {k: v for k, v in config.attributes.items() if k.startswith("pg_")}
 
 
 def run_migrations_online() -> None:
@@ -106,9 +106,7 @@ def run_migrations_online() -> None:
             connection=conn,
             target_metadata=target_metadata,
             autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
-            pg_functions=pg_functions,
-            pg_triggers=pg_triggers,
-            pg_views=pg_views,
+            **pg_opts,
         )
         with context.begin_transaction():
             context.run_migrations()

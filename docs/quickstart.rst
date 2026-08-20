@@ -93,12 +93,18 @@ Note that the ``upgrade`` DDL is the **canonical** form read back from PostgreSQ
 not a copy of your input. This means formatting will differ from what you wrote, but the
 semantics are identical.
 
-5. Ignoring an object type
---------------------------
+5. What gets managed
+--------------------
 
-By default every object type the comparator knows about is *managed*: anything found in the inspected schemas
-that you did not declare is dropped. If you are not ready to manage views (or functions, or triggers) with
-migrations yet, pass the ``IGNORED`` sentinel for that key:
+An object type becomes *managed* when you declare it, and within a managed type the declared set is the whole
+truth: anything found in the inspected schemas that you did not declare is dropped.
+
+A key you never pass leaves that object type unmanaged — its catalog is never queried, nothing is diffed, and no
+``CREATE``/``REPLACE``/``DROP`` operations are emitted for it. The configuration above declares functions and
+triggers, so existing views are left untouched, and you can adopt the library one object type at a time.
+
+To record that opt-out at the configuration site, or to set it conditionally, pass the ``IGNORED`` sentinel. It
+means exactly what omitting the key means:
 
 .. code-block:: python
 
@@ -113,10 +119,7 @@ migrations yet, pass the ``IGNORED`` sentinel for that key:
        pg_views=IGNORED,  # leave views alone for now
    )
 
-An ignored object type is skipped end to end: its catalog is never queried, nothing is diffed, and no
-``CREATE``/``REPLACE``/``DROP`` operations are emitted for it — existing objects of that type are left untouched.
-
-This is not the same as passing an empty sequence. ``pg_views=[]`` declares "there should be no views", so every
+Neither is the same as passing an empty sequence. ``pg_views=[]`` declares "there should be no views", so every
 existing view is dropped; ``pg_views=IGNORED`` declares "views are none of my business". Watch out for this if you
 build the DDL list dynamically:
 
@@ -124,7 +127,9 @@ build the DDL list dynamically:
 
    pg_views = collect_view_ddl() or IGNORED
 
-Passing ``IGNORED`` for every object type disables the comparator entirely.
+With no object type declared the comparator does nothing at all. Since an absent key is what leaves a type
+unmanaged, a misspelled key would silently manage nothing; unrecognized ``pg_*`` options that look like a
+recognized one are logged as a warning naming the key you meant.
 
 6. Check constraints
 --------------------
