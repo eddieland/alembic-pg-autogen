@@ -123,7 +123,7 @@ views (INSTEAD OF triggers).
 
 #### Scenario: Individual DDL execution
 
-- **WHEN** multiple DDL strings are provided in `view_ddl`
+- **WHEN** multiple DDL strings are provided in any of `function_ddl`, `view_ddl`, or `trigger_ddl`
 - **THEN** each DDL string is executed as a separate `conn.execute(text(ddl))` call (not batched into a single
   multi-statement string)
 

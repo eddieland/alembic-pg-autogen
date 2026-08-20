@@ -186,11 +186,6 @@ type.
 - **THEN** only view operations are emitted
 - **AND** the existing functions and triggers are left in place
 
-#### Scenario: Empty sequence still drops
-
-- **WHEN** `context.configure()` is called with `pg_views=[]` and the inspected schemas contain views
-- **THEN** `DropViewOp` instances are emitted for those views, unchanged from before the sentinel existed
-
 #### Scenario: All object types ignored
 
 - **WHEN** `pg_functions`, `pg_triggers`, and `pg_views` are all `IGNORED`
