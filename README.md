@@ -59,6 +59,7 @@ PG_TRIGGERS = [
 context.configure(
     connection=connection,
     target_metadata=target_metadata,
+    autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
     pg_functions=PG_FUNCTIONS,
     pg_triggers=PG_TRIGGERS,
 )
@@ -67,6 +68,25 @@ context.configure(
 ```bash
 alembic revision --autogenerate -m "add audit function and trigger"
 ```
+
+### Both wildcards are required
+
+`autogenerate_plugins` *replaces* Alembic's default of `["alembic.autogenerate.*"]` rather than adding to it, so the
+built-in wildcard has to stay in the list next to ours. This package only ever adds comparators; it never substitutes
+for Alembic's own, which still do all the table, column, index, and constraint work.
+
+Getting the list wrong fails silently in one of two directions, and neither raises an error:
+
+- **Omitting `alembic_pg_autogen.*`** (or not setting the option at all) leaves the default in force. Importing the
+  package registers the plugins but does not opt them in, so functions, triggers, views, and check constraint
+  expressions are simply never compared.
+- **Omitting `alembic.autogenerate.*`** turns autogenerate into a total no-op — not just for Alembic's features but for
+  ours too. The comparator that drives the entire diff belongs to `alembic.autogenerate.schemas`, so with it excluded
+  nothing dispatches and every migration comes out empty.
+
+To confirm what a run actually loaded, set `logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)`. A
+correct configuration logs nine `setting up autogenerate plugin ...` lines: Alembic's seven, plus
+`alembic_pg_autogen.compare` and `alembic_pg_autogen.checkconstraints`.
 
 ## What gets managed
 
@@ -86,6 +106,7 @@ from alembic_pg_autogen import IGNORED
 context.configure(
     connection=connection,
     target_metadata=target_metadata,
+    autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
     pg_functions=PG_FUNCTIONS,
     pg_triggers=PG_TRIGGERS,
     pg_views=IGNORED,  # not ready to manage views yet — don't drop them
@@ -125,9 +146,16 @@ def upgrade() -> None:
     op.create_check_constraint("ck_orders_amount", "orders", "amount > 0")
 ```
 
-There is nothing to configure. Each expression is round-tripped through PostgreSQL — added to the table as a throwaway
-`NOT VALID` constraint inside a savepoint that is rolled back — so `amount >= 0` and the catalog's
-`amount >= 0::numeric` are recognized as the same constraint, and a real change is recognized as a real change.
+Beyond the plugin list above there is nothing to configure. Each expression is round-tripped through PostgreSQL — added
+to the table as a throwaway `NOT VALID` constraint inside a savepoint that is rolled back — so `amount >= 0` and the
+catalog's `amount >= 0::numeric` are recognized as the same constraint, and a real change is recognized as a real
+change.
+
+The two comparators split the work and both are needed. Alembic's `alembic.autogenerate.checkconstraint_byname` owns
+constraints whose name appears on only one side — the ones you added to or removed from your models. Ours looks only at
+names present in *both* your metadata and the catalog, which is the case Alembic cannot decide, and skips everything
+else so the two never emit the same operation twice. A schema whose only drift is added and removed constraints will
+therefore see nothing from this package, and that is correct.
 
 ## Installation
 

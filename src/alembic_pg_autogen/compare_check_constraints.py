@@ -6,6 +6,11 @@ in a backend-agnostic way.  This module closes that gap for PostgreSQL by asking
 expression is round-tripped through the server and compared against the catalog's own deparsed form, so a changed
 ``CHECK`` expression produces a ``DROP CONSTRAINT`` / ``ADD CONSTRAINT`` pair instead of silently drifting.
 
+This comparator complements Alembic's ``alembic.autogenerate.checkconstraint_byname`` rather than replacing it, and
+both are needed: that plugin owns names present on only one side (added and removed constraints), while this one owns
+names present on both, which is the case it cannot decide.  The two sets are disjoint, so no operation is emitted
+twice.
+
 It is registered as its own plugin (``alembic_pg_autogen.checkconstraints``) so it can be disabled independently of
 the function/trigger/view comparator, and only fires for the ``postgresql`` dialect.
 """

@@ -57,6 +57,26 @@ Import the package (this registers the Alembic comparator plugin), then in your
        pg_triggers=PG_TRIGGERS,
    )
 
+.. important::
+
+   Both wildcards belong in ``autogenerate_plugins``. The option *replaces* Alembic's default of
+   ``["alembic.autogenerate.*"]`` rather than adding to it, so listing only ``"alembic_pg_autogen.*"`` excludes every
+   comparator Alembic ships — including ``_produce_net_changes`` in ``alembic.autogenerate.schemas``, which drives the
+   whole diff. Autogenerate then produces an empty migration for *everything*, this package included, without raising
+   an error.
+
+   The mirror-image mistake is leaving the option unset. Importing ``alembic_pg_autogen`` registers the plugins but
+   does not opt them in, so the default stays in force and none of this package's comparators ever run.
+
+   To see what a run actually loaded, raise the plugin logger to ``INFO``:
+
+   .. code-block:: python
+
+      logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)
+
+   A correct configuration logs nine ``setting up autogenerate plugin ...`` lines — Alembic's seven, plus
+   ``alembic_pg_autogen.compare`` and ``alembic_pg_autogen.checkconstraints``.
+
 3. Autogenerate as usual
 ------------------------
 
@@ -162,6 +182,24 @@ throwaway name inside a savepoint that is rolled back, and PostgreSQL's own depa
 catalog. That is why ``amount >= 0`` in your model and ``amount >= 0::numeric`` in the catalog are not reported as a
 difference, while ``amount > 0`` is.
 
+Which comparator handles what
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Check constraints are the one area where this package and Alembic both have a comparator running, and the split
+between them is strict:
+
+- ``alembic.autogenerate.checkconstraint_byname`` (Alembic's own) owns constraints whose name appears on only one
+  side — added to your models, or dropped from them. For a name present on both sides it always reports the two as
+  equal, because ``DefaultImpl.compare_check_constraint`` returns ``Equal()`` and the PostgreSQL dialect does not
+  override it.
+- ``alembic_pg_autogen.checkconstraints`` (this package) owns exactly that undecided case: a name present in both your
+  metadata and the catalog, where the expression may have changed. It ignores names that exist on only one side.
+
+Because the two sets are disjoint, no operation is ever emitted twice, and **Alembic's plugin must stay enabled** —
+disabling it would lose add and remove detection entirely. The practical consequence is that a schema whose only drift
+is forgotten or extra constraints will see nothing at all from this package, which is the intended behavior rather
+than a failure.
+
 A few details worth knowing:
 
 - Only **named** constraints on tables present in ``target_metadata`` are compared. Unnamed constraints cannot be
@@ -186,5 +224,9 @@ support:
            "~alembic_pg_autogen.checkconstraints",
        ],
    )
+
+Note that the exclusion applies to *this* package's plugin. Leave ``alembic.autogenerate.checkconstraint_byname``
+enabled either way: excluding it stops added and removed constraints from being detected at all, and there is no
+duplication to avoid by turning it off.
 
 Requires Alembic 1.19 or newer, the release that made check constraints part of default autogenerate.
