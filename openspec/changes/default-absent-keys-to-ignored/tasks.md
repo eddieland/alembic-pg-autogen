@@ -3,16 +3,15 @@
 - [x] 1.1 Default `pg_functions` / `pg_triggers` / `pg_views` to `IGNORED` in `_compare_pg_objects()`
   (`src/alembic_pg_autogen/compare.py`) and delete the now-redundant "no keys in opts" fast path
 - [x] 1.2 Reword the unmanaged-types `INFO` log so it reads correctly for types left unmanaged by omission
-- [x] 1.3 Add `tests/alembic_pg_autogen/test_compare_options.py` — empty `opts` and unrelated-only `opts`
-  short-circuit without touching the connection
+- [x] 1.3 Add `tests/alembic_pg_autogen/test_compare_options.py` — empty `opts` and unrelated-only `opts` short-circuit
+  without touching the connection
 
 ## 2. Typo Detection
 
 - [x] 2.1 Add a `_warn_unrecognized_options()` helper to `src/alembic_pg_autogen/compare.py` using
   `difflib.get_close_matches` against the three recognized keys, called before the short-circuit
-- [x] 2.2 Add unit tests to `tests/alembic_pg_autogen/test_compare_options.py` — near miss warns and names the
-  intended key; unrelated `pg_*`, recognized, and non-`pg_` keys are silent; a typo warns even when the comparator
-  short-circuits
+- [x] 2.2 Add unit tests to `tests/alembic_pg_autogen/test_compare_options.py` — near miss warns and names the intended
+  key; unrelated `pg_*`, recognized, and non-`pg_` keys are silent; a typo warns even when the comparator short-circuits
 
 ## 3. Test Harness
 
@@ -22,8 +21,8 @@
 
 ## 4. Integration Tests
 
-- [x] 4.1 Add `TestAutogenerateAbsentObjectTypes` to `tests/alembic_pg_autogen/test_autogenerate.py` — an omitted `pg_views`
-  alongside a declared `pg_functions` emits no `DROP VIEW`, and the same for omitted functions and triggers
+- [x] 4.1 Add `TestAutogenerateAbsentObjectTypes` to `tests/alembic_pg_autogen/test_autogenerate.py` — an omitted
+  `pg_views` alongside a declared `pg_functions` emits no `DROP VIEW`, and the same for omitted functions and triggers
 - [x] 4.2 Add a regression test that `pg_views=[]` still drops, guarding the empty-sequence/absent distinction
 - [x] 4.3 Add an integration test that a misspelled key warns and leaves that type unmanaged
 
