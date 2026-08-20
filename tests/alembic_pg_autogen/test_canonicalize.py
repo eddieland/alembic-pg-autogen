@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from typing import cast
 
 import pytest
 from sqlalchemy import Connection, text
 from sqlalchemy.engine import Engine
 
-from alembic_pg_autogen import CanonicalState, canonicalize, canonicalize_functions, canonicalize_views
+from alembic_pg_autogen import (
+    CanonicalState,
+    canonicalize,
+    canonicalize_check_constraints,
+    canonicalize_functions,
+    canonicalize_views,
+    inspect_check_constraints,
+)
 
 
 class TestCanonicalStateUnit:
@@ -222,3 +230,108 @@ class TestCanonicalizeViewsIntegration:
         views = [v for v in result.views if v.name == "test_cv_replace"]
         assert len(views) == 1
         assert "999" in views[0].definition
+
+
+class TestCanonicalizeCheckConstraintsUnit:
+    def test_empty_mapping_never_touches_the_connection(self):
+        # No expressions means no savepoint and no SQL, so an object that raises on any use is safe to pass.
+        unusable = cast("Connection", object())
+
+        assert canonicalize_check_constraints(unusable, schema="public", table_name="orders", expressions={}) == {}
+
+
+@pytest.mark.integration
+class TestCanonicalizeCheckConstraintsIntegration:
+    def test_round_trip_matches_the_catalog(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cck_orders (amount numeric)"))
+        pg_conn.execute(text("ALTER TABLE public.test_cck_orders ADD CONSTRAINT ck_test_cck CHECK (amount >= 0)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cck_orders", expressions={"ck_test_cck": "amount >= 0"}
+        )
+
+        current = inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_cck_orders"])
+        assert normalized["ck_test_cck"] == current[0].expression
+
+    def test_redundant_parentheses_normalize_to_the_catalog_form(self, pg_conn: Connection):
+        """``(amount) >= (0)`` and ``amount >= 0`` are one constraint; only PostgreSQL can say so."""
+        pg_conn.execute(text("CREATE TABLE public.test_cck_parens (amount numeric)"))
+        pg_conn.execute(
+            text("ALTER TABLE public.test_cck_parens ADD CONSTRAINT ck_test_parens CHECK ( (amount)  >=  (0) )")
+        )
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cck_parens", expressions={"ck_test_parens": "amount >= 0"}
+        )
+
+        current = inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_cck_parens"])
+        assert normalized["ck_test_parens"] == current[0].expression
+
+    def test_in_list_rewrite_matches_the_catalog_form(self, pg_conn: Connection):
+        """PostgreSQL stores ``IN (...)`` as ``= ANY (ARRAY[...])`` with the column's own literal types."""
+        pg_conn.execute(text("CREATE TABLE public.test_cck_status (status varchar(16))"))
+        pg_conn.execute(
+            text("ALTER TABLE public.test_cck_status ADD CONSTRAINT ck_test_status CHECK (status IN ('new','done'))")
+        )
+
+        normalized = canonicalize_check_constraints(
+            pg_conn,
+            schema="public",
+            table_name="test_cck_status",
+            expressions={"ck_test_status": "status in ( 'new' , 'done' )"},
+        )
+
+        current = inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_cck_status"])
+        assert "ANY" in current[0].expression
+        assert normalized["ck_test_status"] == current[0].expression
+
+    def test_changed_expression_differs_from_catalog(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cck_changed (amount numeric)"))
+        pg_conn.execute(text("ALTER TABLE public.test_cck_changed ADD CONSTRAINT ck_test_changed CHECK (amount >= 0)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cck_changed", expressions={"ck_test_changed": "amount > 0"}
+        )
+
+        current = inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_cck_changed"])
+        assert normalized["ck_test_changed"] != current[0].expression
+
+    def test_existing_rows_do_not_block_canonicalization(self, pg_conn: Connection):
+        """NOT VALID means a constraint the current data violates still normalizes instead of raising."""
+        pg_conn.execute(text("CREATE TABLE public.test_cck_rows (amount numeric)"))
+        pg_conn.execute(text("INSERT INTO public.test_cck_rows VALUES (-5)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cck_rows", expressions={"ck_test_rows": "amount >= 0"}
+        )
+
+        assert "ck_test_rows" in normalized
+
+    def test_unusable_expression_is_omitted_rather_than_raised(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cck_bad (amount numeric)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cck_bad", expressions={"ck_test_bad": "no_such_column > 0"}
+        )
+
+        assert normalized == {}
+
+    def test_leaves_the_database_unchanged(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cck_clean (amount numeric)"))
+
+        canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cck_clean", expressions={"ck_test_clean": "amount >= 0"}
+        )
+
+        assert inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_cck_clean"]) == []
+
+    def test_resolves_unqualified_table_through_search_path(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE SCHEMA test_cck_path"))
+        pg_conn.execute(text("CREATE TABLE test_cck_path.orders (amount numeric)"))
+        pg_conn.execute(text("SET search_path TO test_cck_path"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema=None, table_name="orders", expressions={"ck_test_path": "amount >= 0"}
+        )
+
+        assert "ck_test_path" in normalized

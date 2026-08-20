@@ -6,12 +6,46 @@ def test_package_importable():
 
 def test_extension_modules_importable():
     import alembic_pg_autogen.compare
+    import alembic_pg_autogen.compare_check_constraints
     import alembic_pg_autogen.ops
     import alembic_pg_autogen.render
 
     assert alembic_pg_autogen.compare is not None
+    assert alembic_pg_autogen.compare_check_constraints is not None
     assert alembic_pg_autogen.ops is not None
     assert alembic_pg_autogen.render is not None
+
+
+def test_check_constraint_exports_present():
+    import alembic_pg_autogen
+
+    assert "CheckConstraintInfo" in alembic_pg_autogen.__all__
+    assert "inspect_check_constraints" in alembic_pg_autogen.__all__
+    assert "canonicalize_check_constraints" in alembic_pg_autogen.__all__
+    assert "current_schema" in alembic_pg_autogen.__all__
+
+
+def test_check_constraint_exports_importable():
+    from alembic_pg_autogen import (
+        CheckConstraintInfo,
+        canonicalize_check_constraints,
+        current_schema,
+        inspect_check_constraints,
+    )
+
+    assert CheckConstraintInfo is not None
+    assert inspect_check_constraints is not None
+    assert canonicalize_check_constraints is not None
+    assert current_schema is not None
+
+
+def test_check_constraint_plugin_registered():
+    from alembic.runtime.plugins import _all_plugins  # pyright: ignore[reportPrivateUsage]
+
+    import alembic_pg_autogen
+
+    assert alembic_pg_autogen.__all__  # importing the package is what registers the plugins
+    assert "alembic_pg_autogen.checkconstraints" in _all_plugins
 
 
 def test_view_exports_present():

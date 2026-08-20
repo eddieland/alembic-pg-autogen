@@ -1,4 +1,4 @@
-"""Catalog inspection for PostgreSQL functions, triggers, and views."""
+"""Catalog inspection for PostgreSQL functions, triggers, views, and check constraints."""
 
 from __future__ import annotations
 
@@ -42,6 +42,21 @@ class ViewInfo(NamedTuple):
     schema: str
     name: str
     definition: str
+
+
+class CheckConstraintInfo(NamedTuple):
+    """A PostgreSQL ``CHECK`` constraint as loaded from the system catalog.
+
+    Identity is ``(schema, table_name, name)``.  Unlike the other catalog types, the trailing payload field is
+    ``expression`` rather than ``definition``: check constraints are rendered by Alembic's own
+    ``op.create_check_constraint()`` / ``op.drop_constraint()`` operations, so what matters here is the normalized
+    expression text that PostgreSQL deparses from the stored parse tree, not an executable ``ALTER TABLE`` statement.
+    """
+
+    schema: str
+    table_name: str
+    name: str
+    expression: str
 
 
 def inspect_functions(conn: Connection, schemas: Sequence[str] | None = None) -> Sequence[FunctionInfo]:
@@ -117,6 +132,53 @@ def inspect_views(conn: Connection, schemas: Sequence[str] | None = None) -> Seq
     return result
 
 
+def inspect_check_constraints(
+    conn: Connection,
+    schemas: Sequence[str] | None = None,
+    table_names: Sequence[str] | None = None,
+) -> Sequence[CheckConstraintInfo]:
+    """Bulk-load ``CHECK`` constraint expressions from PostgreSQL system catalogs.
+
+    Queries ``pg_constraint`` joined with ``pg_class`` and ``pg_namespace`` for table-level check constraints
+    (``contype = 'c'``).  Uses ``pg_get_expr(conbin, conrelid, true)`` to deparse the stored expression tree, which is
+    the normalized form PostgreSQL itself produces — the same form :func:`canonicalize_check_constraints
+    <alembic_pg_autogen.canonicalize.canonicalize_check_constraints>` reads back for desired-state expressions, so the
+    two are directly comparable as strings.
+
+    Constraints owned by an extension are excluded, as are domain constraints (they have no ``conrelid``) and — on
+    PostgreSQL 18+ — ``NOT NULL`` constraints, which use ``contype = 'n'``.
+
+    Args:
+        conn: An open SQLAlchemy connection.
+        schemas: Schemas to inspect.  When *None*, every schema except ``pg_catalog`` and ``information_schema``.
+        table_names: Tables to restrict the query to.  When *None*, all tables are included.
+
+    Returns:
+        A sequence of :class:`CheckConstraintInfo` instances, one per check constraint.
+    """
+    schema_filter, params = _build_schema_filter(schemas)
+    if table_names is not None:
+        table_filter = "c.relname = ANY(:table_names)"
+        params["table_names"] = list(table_names)
+    else:
+        table_filter = "true"
+    query = text(_CHECK_CONSTRAINTS_QUERY.format(schema_filter=schema_filter, table_filter=table_filter))
+    rows = conn.execute(query, params)
+    result = [
+        CheckConstraintInfo(schema=r.schema, table_name=r.table_name, name=r.name, expression=r.expression)
+        for r in rows
+    ]
+    log.debug("Inspected %d check constraints (schemas=%s, tables=%s)", len(result), schemas, table_names)
+    return result
+
+
+def current_schema(conn: Connection) -> str:
+    """Return the connection's current schema, i.e. the first entry of its ``search_path``."""
+    schema = conn.execute(text("SELECT current_schema()")).scalar()
+    assert schema is not None, "Failed to read current_schema()"
+    return schema
+
+
 _EXCLUDED_SCHEMAS = ("pg_catalog", "information_schema")
 
 _VIEWS_QUERY = """\
@@ -130,6 +192,27 @@ JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind = 'v'
   AND ({schema_filter})
 ORDER BY n.nspname, c.relname
+"""
+
+_CHECK_CONSTRAINTS_QUERY = """\
+SELECT
+    n.nspname AS schema,
+    c.relname AS table_name,
+    con.conname AS name,
+    pg_catalog.pg_get_expr(con.conbin, con.conrelid, true) AS expression
+FROM pg_catalog.pg_constraint con
+JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE con.contype = 'c'
+  AND ({schema_filter})
+  AND ({table_filter})
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_depend d
+      WHERE d.classid = 'pg_catalog.pg_constraint'::regclass
+        AND d.objid = con.oid
+        AND d.deptype = 'e'
+  )
+ORDER BY n.nspname, c.relname, con.conname
 """
 
 _FUNCTIONS_QUERY = """\

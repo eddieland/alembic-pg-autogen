@@ -6,7 +6,17 @@ import pytest
 from sqlalchemy import Connection, text
 from sqlalchemy.engine import Engine
 
-from alembic_pg_autogen import FunctionInfo, TriggerInfo, ViewInfo, inspect_functions, inspect_triggers, inspect_views
+from alembic_pg_autogen import (
+    CheckConstraintInfo,
+    FunctionInfo,
+    TriggerInfo,
+    ViewInfo,
+    current_schema,
+    inspect_check_constraints,
+    inspect_functions,
+    inspect_triggers,
+    inspect_views,
+)
 
 
 class TestFunctionInfoUnit:
@@ -58,6 +68,26 @@ class TestViewInfoUnit:
     def test_identity_is_schema_and_name(self):
         info = ViewInfo("myschema", "myview", "definition text")
         assert info[:-1] == ("myschema", "myview")
+
+
+class TestCheckConstraintInfoUnit:
+    def test_construction_and_fields(self):
+        info = CheckConstraintInfo(
+            schema="public", table_name="orders", name="ck_orders_amount", expression="(amount >= (0)::numeric)"
+        )
+        assert info.schema == "public"
+        assert info.table_name == "orders"
+        assert info.name == "ck_orders_amount"
+        assert info.expression == "(amount >= (0)::numeric)"
+
+    def test_is_tuple(self):
+        info = CheckConstraintInfo("s", "t", "n", "e")
+        assert isinstance(info, tuple)
+        assert info[0] == "s"
+
+    def test_identity_is_schema_table_and_name(self):
+        info = CheckConstraintInfo("myschema", "orders", "ck_orders_amount", "expression text")
+        assert info[:-1] == ("myschema", "orders", "ck_orders_amount")
 
 
 @pytest.fixture
@@ -283,3 +313,77 @@ class TestInspectViewsIntegration:
         views = [v for v in results if v.name == "test_view_fn_ref"]
         assert len(views) == 1
         assert "test_view_fn" in views[0].definition
+
+
+@pytest.mark.integration
+class TestInspectCheckConstraintsIntegration:
+    def test_named_constraint(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ck_orders (id integer, amount numeric)"))
+        pg_conn.execute(text("ALTER TABLE public.test_ck_orders ADD CONSTRAINT ck_test_amount CHECK (amount >= 0)"))
+
+        results = inspect_check_constraints(pg_conn)
+
+        found = [c for c in results if c.name == "ck_test_amount"]
+        assert len(found) == 1
+        assert found[0].schema == "public"
+        assert found[0].table_name == "test_ck_orders"
+        assert "amount" in found[0].expression
+
+    def test_expression_is_the_catalogs_normalized_form(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ck_norm (status varchar(16))"))
+        pg_conn.execute(
+            text("ALTER TABLE public.test_ck_norm ADD CONSTRAINT ck_test_status CHECK (status IN ('new', 'done'))")
+        )
+
+        results = inspect_check_constraints(pg_conn, table_names=["test_ck_norm"])
+
+        assert len(results) == 1
+        # PostgreSQL rewrites IN (...) as = ANY (ARRAY[...]) — that rewrite is exactly what makes text comparison
+        # of check constraints unreliable, and why the expression is read back from the catalog.
+        assert "ANY" in results[0].expression
+
+    def test_table_filtering(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ck_a (x integer CONSTRAINT ck_test_a CHECK (x > 0))"))
+        pg_conn.execute(text("CREATE TABLE public.test_ck_b (y integer CONSTRAINT ck_test_b CHECK (y > 0))"))
+
+        results = inspect_check_constraints(pg_conn, table_names=["test_ck_a"])
+
+        assert [c.name for c in results] == ["ck_test_a"]
+
+    def test_schema_filtering(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE SCHEMA test_ck_schema"))
+        pg_conn.execute(text("CREATE TABLE test_ck_schema.t (x integer CONSTRAINT ck_test_scoped CHECK (x > 0))"))
+
+        results = inspect_check_constraints(pg_conn, schemas=["test_ck_schema"])
+
+        assert [c.name for c in results] == ["ck_test_scoped"]
+        assert results[0].schema == "test_ck_schema"
+
+    def test_not_null_and_primary_key_excluded(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ck_nn (id integer PRIMARY KEY, name text NOT NULL)"))
+
+        results = inspect_check_constraints(pg_conn, table_names=["test_ck_nn"])
+
+        assert results == []
+
+    def test_domain_constraints_excluded(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE DOMAIN public.test_ck_domain AS integer CHECK (VALUE > 0)"))
+
+        results = inspect_check_constraints(pg_conn, schemas=["public"])
+
+        assert all(c.table_name != "test_ck_domain" for c in results)
+
+    def test_no_constraints_returns_empty(self, pg_conn: Connection):
+        assert inspect_check_constraints(pg_conn, schemas=["nonexistent"]) == []
+
+
+@pytest.mark.integration
+class TestCurrentSchemaIntegration:
+    def test_returns_search_path_head(self, pg_conn: Connection):
+        assert current_schema(pg_conn) == "public"
+
+    def test_follows_search_path(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE SCHEMA test_current_schema"))
+        pg_conn.execute(text("SET search_path TO test_current_schema"))
+
+        assert current_schema(pg_conn) == "test_current_schema"
