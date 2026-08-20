@@ -9,9 +9,12 @@ import pytest
 from alembic.operations.ops import ModifyTableOps
 from alembic.runtime.plugins import Plugin
 from alembic.util import PriorityDispatchResult
-from sqlalchemy import CheckConstraint, Column, Enum, Integer, MetaData, Numeric, String, Table, text
+from sqlalchemy import CheckConstraint, Column, Enum, Integer, MetaData, Numeric, String, Table, bindparam, text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects.postgresql import JSONB
 
+from alembic_pg_autogen import CheckConstraintInfo
+from alembic_pg_autogen import compare_check_constraints as module
 from alembic_pg_autogen.compare_check_constraints import (
     _compare_check_constraint_expressions,
     _compile_check_expression,
@@ -24,6 +27,7 @@ from .test_autogenerate import _autogenerate
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Dialect
+    from sqlalchemy.sql.elements import ColumnElement
 
     from .alembic_helpers import AlembicProject
 
@@ -41,21 +45,31 @@ def _orders_table(*constraints: CheckConstraint, metadata: MetaData | None = Non
     )
 
 
+def _jsonb_comparison() -> ColumnElement[bool]:
+    """Return an expression PostgreSQL can run but SQLAlchemy cannot render with literal binds."""
+    table = Table("payloads", MetaData(), Column("payload", JSONB()))
+    return table.c.payload == bindparam("value", value={"a": 1}, type_=JSONB())
+
+
 class _StubAutogenContext:
     """Minimal stand-in for ``AutogenContext`` exposing only what the comparator touches."""
 
     connection: object | None
     dialect: Dialect
+    name_filter_result: bool
+    object_filter_result: bool
 
     def __init__(self, connection: object | None = None) -> None:
         self.connection = connection
         self.dialect = PG_DIALECT
+        self.name_filter_result = True
+        self.object_filter_result = True
 
     def run_name_filters(self, *_args: Any, **_kw: Any) -> bool:
-        return True
+        return self.name_filter_result
 
     def run_object_filters(self, *_args: Any, **_kw: Any) -> bool:
-        return True
+        return self.object_filter_result
 
 
 def _stub_context(connection: object | None = None) -> Any:
@@ -134,6 +148,107 @@ class TestSameSql:
     )
     def test_whitespace_insensitive_comparison(self, left: str, right: str, expected: bool):
         assert _same_sql(left, right) is expected
+
+
+class TestCompileCheckExpressionFailure:
+    def test_expression_without_a_literal_renderer_returns_none(self):
+        constraint = CheckConstraint(_jsonb_comparison(), name="ck_orders_payload")
+
+        assert _compile_check_expression(constraint, PG_DIALECT) is None
+
+
+class TestComparatorSkips:
+    """Everything the comparator declines to act on, short of emitting operations."""
+
+    @pytest.fixture
+    def catalog(self, monkeypatch: pytest.MonkeyPatch):
+        """Stub the catalog and canonicalization calls so the comparator can run without a database."""
+
+        def install(current: dict[str, str], normalized: dict[str, str]) -> list[str]:
+            canonicalized: list[str] = []
+
+            def fake_inspect(_conn: object, **_kw: Any) -> list[CheckConstraintInfo]:
+                return [
+                    CheckConstraintInfo("public", "orders", name, expression) for name, expression in current.items()
+                ]
+
+            def fake_canonicalize(_conn: object, **kwargs: Any) -> dict[str, str]:
+                canonicalized.extend(kwargs["expressions"])
+                return normalized
+
+            monkeypatch.setattr(module, "inspect_check_constraints", fake_inspect)
+            monkeypatch.setattr(module, "canonicalize_check_constraints", fake_canonicalize)
+            return canonicalized
+
+        return install
+
+    def _run(self, table: Table, context: Any = None) -> ModifyTableOps:
+        modify_table_ops = ModifyTableOps("orders", [])
+        result = _compare_check_constraint_expressions(
+            context if context is not None else _stub_context(connection=object()),
+            modify_table_ops,
+            "public",
+            "orders",
+            table,
+            table,
+        )
+        assert result is PriorityDispatchResult.CONTINUE
+        return modify_table_ops
+
+    def test_constraint_missing_from_the_catalog_is_alembics_job(self, catalog: Any):
+        probed = catalog({"ck_other": "other > 0"}, {})
+        table = _orders_table(CheckConstraint("amount > 0", name="ck_orders_amount"))
+
+        assert self._run(table).is_empty()
+        assert probed == []
+
+    def test_text_already_matching_the_catalog_skips_the_round_trip(self, catalog: Any):
+        probed = catalog({"ck_orders_amount": "amount  >  0"}, {})
+        table = _orders_table(CheckConstraint("amount > 0", name="ck_orders_amount"))
+
+        assert self._run(table).is_empty()
+        assert probed == []
+
+    def test_uncompilable_expression_is_treated_as_unchanged(self, catalog: Any):
+        probed = catalog({"ck_orders_amount": "amount > 0::numeric"}, {})
+        table = _orders_table(CheckConstraint(_jsonb_comparison(), name="ck_orders_amount"))
+
+        assert self._run(table).is_empty()
+        assert probed == []
+
+    def test_expression_that_could_not_be_canonicalized_is_treated_as_unchanged(self, catalog: Any):
+        probed = catalog({"ck_orders_amount": "amount > 0::numeric"}, {})
+        table = _orders_table(CheckConstraint("amount >= 0", name="ck_orders_amount"))
+
+        assert self._run(table).is_empty()
+        assert probed == ["ck_orders_amount"]
+
+    def test_object_filter_can_veto_the_change(self, catalog: Any):
+        catalog({"ck_orders_amount": "amount > 0::numeric"}, {"ck_orders_amount": "amount >= 0::numeric"})
+        table = _orders_table(CheckConstraint("amount >= 0", name="ck_orders_amount"))
+
+        context = _stub_context(connection=object())
+        context.object_filter_result = False
+
+        assert self._run(table, context).is_empty()
+
+    def test_name_filter_can_veto_the_change(self, catalog: Any):
+        probed = catalog({"ck_orders_amount": "amount > 0::numeric"}, {})
+        table = _orders_table(CheckConstraint("amount >= 0", name="ck_orders_amount"))
+
+        context = _stub_context(connection=object())
+        context.name_filter_result = False
+
+        assert self._run(table, context).is_empty()
+        assert probed == []
+
+    def test_differing_expression_emits_drop_then_add(self, catalog: Any):
+        catalog({"ck_orders_amount": "amount > 0::numeric"}, {"ck_orders_amount": "amount >= 0::numeric"})
+        table = _orders_table(CheckConstraint("amount >= 0", name="ck_orders_amount"))
+
+        ops = self._run(table).ops
+
+        assert [type(op).__name__ for op in ops] == ["DropConstraintOp", "CreateCheckConstraintOp"]
 
 
 class TestComparatorShortCircuits:
