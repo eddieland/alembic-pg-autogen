@@ -44,6 +44,12 @@ uv run pytest -k "test_name"
 - **mdformat**: Markdown formatter (wrap 120, LF line endings). Plugins: mdformat-gfm (GitHub Flavored Markdown),
   mdformat-pyproject (config from pyproject.toml), mdformat-ruff (formats Python code blocks). Runs on `make fmt` and as
   a prek hook.
+- **Always run mdformat after changing any markdown file** — `README.md`, `CLAUDE.md`, and anything under `openspec/` or
+  `docs/`. Run `make fmt` (or `uv run mdformat README.md CLAUDE.md openspec/`) and confirm with
+  `uv run mdformat --check README.md CLAUDE.md openspec/`, which is what CI gates on: a bullet wrapped short of 120
+  characters is enough to fail the build. The `PostToolUse` hook in `.claude/settings.json` formats markdown
+  automatically, but only for files written with the Edit/Write tools — markdown written through the shell (heredocs,
+  `sed`, scripts) bypasses it. Re-run the check after any late edit; ticking off a task list counts.
 - **Codespell**: Spell checking on src, tests, docs, and markdown files.
 - Lint auto-fixes on run (`--fix`, `--write-changes`); running `make lint` modifies files in place.
 - **Module ordering**: Public API functions first, `_private` helpers after, generally in order of usefulness to someone
