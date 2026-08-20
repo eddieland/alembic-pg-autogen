@@ -68,6 +68,26 @@ context.configure(
 alembic revision --autogenerate -m "add audit function and trigger"
 ```
 
+## Ignoring an object type
+
+Every object type is managed by default, which means objects found in the inspected schemas that you did not declare get
+dropped. Pass the `IGNORED` sentinel to leave a type alone entirely — nothing is inspected, diffed, or emitted for it:
+
+```python
+from alembic_pg_autogen import IGNORED
+
+context.configure(
+    connection=connection,
+    target_metadata=target_metadata,
+    pg_functions=PG_FUNCTIONS,
+    pg_triggers=PG_TRIGGERS,
+    pg_views=IGNORED,  # not ready to manage views yet — don't drop them
+)
+```
+
+`IGNORED` is not the same as an empty list: `pg_views=[]` declares "there should be no views" and drops every existing
+one, while `pg_views=IGNORED` declares "views are not managed here".
+
 ## Check constraints
 
 Alembic detects when a named `CHECK` constraint is added to or removed from your models, but two constraints that share

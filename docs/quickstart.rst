@@ -93,7 +93,40 @@ Note that the ``upgrade`` DDL is the **canonical** form read back from PostgreSQ
 not a copy of your input. This means formatting will differ from what you wrote, but the
 semantics are identical.
 
-5. Check constraints
+5. Ignoring an object type
+--------------------------
+
+By default every object type the comparator knows about is *managed*: anything found in the inspected schemas
+that you did not declare is dropped. If you are not ready to manage views (or functions, or triggers) with
+migrations yet, pass the ``IGNORED`` sentinel for that key:
+
+.. code-block:: python
+
+   from alembic_pg_autogen import IGNORED
+
+   context.configure(
+       connection=connection,
+       target_metadata=target_metadata,
+       autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+       pg_functions=PG_FUNCTIONS,
+       pg_triggers=PG_TRIGGERS,
+       pg_views=IGNORED,  # leave views alone for now
+   )
+
+An ignored object type is skipped end to end: its catalog is never queried, nothing is diffed, and no
+``CREATE``/``REPLACE``/``DROP`` operations are emitted for it — existing objects of that type are left untouched.
+
+This is not the same as passing an empty sequence. ``pg_views=[]`` declares "there should be no views", so every
+existing view is dropped; ``pg_views=IGNORED`` declares "views are none of my business". Watch out for this if you
+build the DDL list dynamically:
+
+.. code-block:: python
+
+   pg_views = collect_view_ddl() or IGNORED
+
+Passing ``IGNORED`` for every object type disables the comparator entirely.
+
+6. Check constraints
 --------------------
 
 Check constraints need no declaration of their own: they stay in your SQLAlchemy metadata, where Alembic already
