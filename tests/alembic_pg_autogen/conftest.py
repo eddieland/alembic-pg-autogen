@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,10 @@ from .alembic_helpers import AlembicProject
 
 PG_VERSION_DEFAULT = "14"
 
+#: Set this to a PostgreSQL URL (e.g. ``postgresql+psycopg://user:pw@localhost/db``) to run the integration tests
+#: against an existing server instead of a throwaway Docker container.
+PG_URL_ENV_VAR = "ALEMBIC_PG_AUTOGEN_TEST_URL"
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add ``--pg-version`` CLI option for selecting the PostgreSQL Docker image tag."""
@@ -25,6 +30,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 @pytest.fixture(scope="session")
 def pg_engine(request: pytest.FixtureRequest) -> Generator[Engine]:
+    url = os.environ.get(PG_URL_ENV_VAR)
+    if url:
+        engine = create_engine(url)
+        event.listen(engine, "checkout", _reset_search_path)
+        yield engine
+        engine.dispose()
+        return
+
     pg_version: str = request.config.getoption("--pg-version")
     with PostgresContainer(f"postgres:{pg_version}", driver="psycopg") as pg:
         engine = create_engine(pg.get_connection_url())

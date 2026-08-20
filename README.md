@@ -88,6 +88,36 @@ context.configure(
 `IGNORED` is not the same as an empty list: `pg_views=[]` declares "there should be no views" and drops every existing
 one, while `pg_views=IGNORED` declares "views are not managed here".
 
+## Check constraints
+
+Alembic detects when a named `CHECK` constraint is added to or removed from your models, but two constraints that share
+a name are always presumed equivalent — normalizing SQL expressions across backends is not something Alembic can do. So
+tightening `amount >= 0` to `amount > 0` in a model generates nothing, and the schema drifts.
+
+This package closes that gap for PostgreSQL. Keep declaring constraints in SQLAlchemy metadata as usual:
+
+```python
+class Order(Base):
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    amount: Mapped[Decimal]
+
+    __table_args__ = (CheckConstraint("amount > 0", name="ck_orders_amount"),)
+```
+
+and a changed expression now produces a migration:
+
+```python
+def upgrade() -> None:
+    op.drop_constraint("ck_orders_amount", "orders", type_="check")
+    op.create_check_constraint("ck_orders_amount", "orders", "amount > 0")
+```
+
+There is nothing to configure. Each expression is round-tripped through PostgreSQL — added to the table as a throwaway
+`NOT VALID` constraint inside a savepoint that is rolled back — so `amount >= 0` and the catalog's
+`amount >= 0::numeric` are recognized as the same constraint, and a real change is recognized as a real change.
+
 ## Installation
 
 ```bash

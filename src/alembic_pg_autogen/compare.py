@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from alembic.runtime.plugins import Plugin
 from alembic.util import PriorityDispatchResult
-from sqlalchemy import Connection, text
+from sqlalchemy import Connection
 
 from alembic_pg_autogen.canonicalize import CanonicalState, canonicalize
 from alembic_pg_autogen.diff import Action, diff
-from alembic_pg_autogen.inspect import inspect_functions, inspect_triggers, inspect_views
+from alembic_pg_autogen.inspect import current_schema, inspect_functions, inspect_triggers, inspect_views
 from alembic_pg_autogen.ops import (
     CreateFunctionOp,
     CreateTriggerOp,
@@ -208,7 +208,7 @@ def _parse_function_names(ddl_list: Sequence[str], conn: Connection) -> set[tupl
     """
     import postgast
 
-    default_schema = _get_default_schema(conn)
+    default_schema = current_schema(conn)
     names: set[tuple[str, str]] = set()
     for ddl in ddl_list:
         identity = postgast.extract_function_identity(postgast.parse(ddl))
@@ -227,7 +227,7 @@ def _parse_trigger_identities(ddl_list: Sequence[str], conn: Connection) -> set[
     """
     import postgast
 
-    default_schema = _get_default_schema(conn)
+    default_schema = current_schema(conn)
     identities: set[tuple[str, str, str]] = set()
     for ddl in ddl_list:
         identity = postgast.extract_trigger_identity(postgast.parse(ddl))
@@ -244,7 +244,7 @@ def _parse_view_names(ddl_list: Sequence[str], conn: Connection) -> set[tuple[st
     Raises:
         ValueError: If any DDL string does not contain a valid ``CREATE VIEW`` statement.
     """
-    default_schema = _get_default_schema(conn)
+    default_schema = current_schema(conn)
     names: set[tuple[str, str]] = set()
     for ddl in ddl_list:
         m = _VIEW_RE.search(ddl)
@@ -253,13 +253,6 @@ def _parse_view_names(ddl_list: Sequence[str], conn: Connection) -> set[tuple[st
         schema = m.group(1) if m.group(1) is not None else default_schema
         names.add((schema, m.group(2)))
     return names
-
-
-def _get_default_schema(conn: Connection) -> str:
-    """Get the current schema for the connection."""
-    row = conn.execute(text("SELECT current_schema()")).scalar()
-    assert row is not None, "Failed to read current_schema()"
-    return row
 
 
 def _resolve_schemas(conn: Connection, schemas: Iterable[str | None]) -> list[str] | None:
@@ -275,7 +268,7 @@ def _resolve_schemas(conn: Connection, schemas: Iterable[str | None]) -> list[st
     resolved: list[str] = []
     for s in schemas:
         if s is None:
-            resolved.append(_get_default_schema(conn))
+            resolved.append(current_schema(conn))
         else:
             resolved.append(s)
     return resolved
