@@ -483,3 +483,37 @@ RETURNS text LANGUAGE sql AS $$ SELECT 'hi'::text $$"""
         assert "pg_views" in caplog.text
         assert "DROP VIEW" not in content
         assert "wanted_view" not in content
+
+
+@pytest.mark.integration
+class TestAutogenerateAllTypesDeclared:
+    """Declaring every object type leaves nothing unmanaged."""
+
+    def test_functions_triggers_and_views_together(
+        self,
+        alembic_project: AlembicProject,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        schema = alembic_project.schema
+        alembic_project.execute(f"CREATE TABLE {schema}.orders (id int)")
+
+        fn_ddl = f"""\
+CREATE OR REPLACE FUNCTION {schema}.touch_order() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$"""
+        trg_ddl = f"""\
+CREATE TRIGGER touch_order_trg BEFORE INSERT ON {schema}.orders
+FOR EACH ROW EXECUTE FUNCTION {schema}.touch_order()"""
+        view_ddl = f"CREATE OR REPLACE VIEW {schema}.order_ids AS SELECT id FROM {schema}.orders"
+
+        with caplog.at_level(logging.INFO, logger="alembic_pg_autogen.compare"):
+            content = _autogenerate(
+                alembic_project,
+                pg_functions=[fn_ddl],
+                pg_triggers=[trg_ddl],
+                pg_views=[view_ddl],
+            )
+
+        assert "touch_order" in content
+        assert "touch_order_trg" in content
+        assert "order_ids" in content
+        assert "left unmanaged" not in caplog.text
