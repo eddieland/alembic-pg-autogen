@@ -109,6 +109,12 @@ class TestMetadataCheckConstraints:
         # The constraint the Enum generates is Alembic's to manage, not ours.
         assert _metadata_check_constraints(table, PG_DIALECT) == {}
 
+    def test_blank_name_skipped(self):
+        """A name that compiles to the empty string cannot be matched against the catalog, so it is not ours."""
+        table = _orders_table(CheckConstraint("amount >= 0", name=""))
+
+        assert _metadata_check_constraints(table, PG_DIALECT) == {}
+
     def test_column_level_constraint_collected(self):
         table = Table(
             "orders",

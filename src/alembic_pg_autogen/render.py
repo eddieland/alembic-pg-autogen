@@ -107,8 +107,10 @@ def _quote_ddl(ddl: str) -> str:
         return repr(ddl)
     if "'" not in ddl and "\\" not in ddl:
         return repr(ddl)
-    # Single-line DDL with quotes: triple-quoting avoids backslash escapes.
-    if "'''" not in ddl and '"""' not in ddl:
+    # Single-line DDL with quotes: triple-quoting avoids backslash escapes.  DDL that ends with
+    # a quote or backslash would run into the closing delimiter — ``'''SELECT 'hi''''`` is not a
+    # valid literal — so it falls through to repr() instead.
+    if "'''" not in ddl and '"""' not in ddl and not ddl.endswith(("'", "\\")):
         if "\\" in ddl:
             return f"r'''{ddl}'''"
         return f"'''{ddl}'''"
