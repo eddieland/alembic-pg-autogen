@@ -162,3 +162,158 @@ reflection APIs for catalog access.
 - **WHEN** `inspect_triggers` is called
 - **THEN** it executes exactly one SQL query that both retrieves trigger definitions and excludes extension-owned
   triggers
+
+### Requirement: ViewInfo dataclass
+
+The module SHALL provide a `ViewInfo` NamedTuple representing a single PostgreSQL view as loaded from the catalog.
+
+#### Scenario: ViewInfo fields
+
+- **WHEN** a `ViewInfo` instance is created
+- **THEN** it has the following fields:
+  - `schema` (`str`): the view's namespace name from `pg_namespace.nspname`
+  - `name` (`str`): the view name from `pg_class.relname`
+  - `definition` (`str`): the complete reconstructed DDL in the form
+    `CREATE OR REPLACE VIEW <schema>.<name> AS\n<pg_get_viewdef()>`
+
+#### Scenario: ViewInfo identity
+
+- **WHEN** two `ViewInfo` instances have the same `schema` and `name`
+- **THEN** they represent the same database view
+
+#### Scenario: ViewInfo definition includes full DDL
+
+- **WHEN** a view `public.active_users` is inspected
+- **THEN** its `definition` field contains `CREATE OR REPLACE VIEW public.active_users AS\n SELECT ...` (the complete
+  DDL, not just the query body)
+
+### Requirement: Bulk-load view definitions from PostgreSQL catalog
+
+The module SHALL provide an `inspect_views` function that queries `pg_class` joined with `pg_namespace` to retrieve all
+user-defined views. It SHALL use `pg_get_viewdef(oid, true)` for the canonical query body and reconstruct the full DDL
+using `quote_ident()` for the schema and view name. It SHALL return a sequence of `ViewInfo` instances.
+
+#### Scenario: Load all views from default schemas
+
+- **WHEN** `inspect_views(conn)` is called without specifying schemas
+- **THEN** it returns `ViewInfo` instances for all views in schemas other than `pg_catalog` and `information_schema`
+- **AND** each `ViewInfo` contains `schema`, `name`, and `definition` fields
+
+#### Scenario: Load views from specific schemas
+
+- **WHEN** `inspect_views(conn, schemas=["public", "reporting"])` is called
+- **THEN** it returns `ViewInfo` instances only for views in the `public` and `reporting` schemas
+- **AND** views in other user schemas are excluded
+
+#### Scenario: Only regular views are included
+
+- **WHEN** the database contains both regular views (`relkind = 'v'`) and materialized views (`relkind = 'm'`)
+- **THEN** `inspect_views` returns only regular views
+- **AND** materialized views are excluded
+
+#### Scenario: Empty result when no views exist
+
+- **WHEN** `inspect_views` is called on a database with no user-defined views
+- **THEN** it returns an empty sequence
+
+#### Scenario: Single query execution
+
+- **WHEN** `inspect_views` is called
+- **THEN** it executes exactly one SQL query to retrieve all matching views
+
+#### Scenario: SQLAlchemy connection as input
+
+- **WHEN** `inspect_views(conn)` is called with a SQLAlchemy `Connection`
+- **THEN** it executes catalog queries using that connection
+- **AND** it does not create any new connections or engines
+
+#### Scenario: Definition reconstruction uses quote_ident
+
+- **WHEN** a view exists in a schema or with a name that requires quoting (e.g., mixed-case identifiers)
+- **THEN** the reconstructed `definition` uses `quote_ident()` for the schema and view name to ensure proper quoting
+
+### Requirement: CheckConstraintInfo type
+
+The module SHALL provide a `CheckConstraintInfo` NamedTuple representing a single table-level `CHECK` constraint as
+loaded from the catalog.
+
+#### Scenario: CheckConstraintInfo fields
+
+- **WHEN** a `CheckConstraintInfo` instance is created
+- **THEN** it has the following fields:
+  - `schema` (`str`): the constrained table's namespace from `pg_namespace.nspname`
+  - `table_name` (`str`): the constrained table from `pg_class.relname`
+  - `name` (`str`): the constraint name from `pg_constraint.conname`
+  - `expression` (`str`): the normalized check expression from `pg_get_expr(conbin, conrelid, true)`
+
+#### Scenario: CheckConstraintInfo identity
+
+- **WHEN** two `CheckConstraintInfo` instances have the same `schema`, `table_name`, and `name`
+- **THEN** they represent the same database constraint
+- **AND** `info[:-1]` yields that identity, consistent with the other catalog types
+
+#### Scenario: Payload is an expression, not executable DDL
+
+- **WHEN** a constraint `CHECK (amount >= 0)` on a `numeric` column is inspected
+- **THEN** `expression` contains PostgreSQL's deparsed form (e.g. `amount >= 0::numeric`)
+- **AND** it does NOT include the `CHECK (...)` wrapper, an `ALTER TABLE` preamble, `NO INHERIT`, or `NOT VALID`
+
+### Requirement: Bulk-load check constraint expressions from PostgreSQL catalog
+
+The module SHALL provide an `inspect_check_constraints` function that queries `pg_constraint` joined with `pg_class` and
+`pg_namespace` for constraints with `contype = 'c'`, returning a sequence of `CheckConstraintInfo` instances.
+
+#### Scenario: Load all check constraints from default schemas
+
+- **WHEN** `inspect_check_constraints(conn)` is called without specifying schemas
+- **THEN** it returns entries for check constraints in schemas other than `pg_catalog` and `information_schema`
+
+#### Scenario: Load check constraints from specific schemas
+
+- **WHEN** `inspect_check_constraints(conn, schemas=["public"])` is called
+- **THEN** only constraints on tables in `public` are returned
+
+#### Scenario: Restrict to specific tables
+
+- **WHEN** `inspect_check_constraints(conn, schemas=["public"], table_names=["orders"])` is called
+- **THEN** only constraints on `public.orders` are returned
+
+#### Scenario: Extension-owned constraints are excluded
+
+- **WHEN** a constraint depends on an extension with `pg_depend.deptype = 'e'`
+- **THEN** it is excluded from the results
+
+#### Scenario: Non-check constraints are excluded
+
+- **WHEN** a table has primary key, unique, foreign key, or `NOT NULL` constraints
+- **THEN** none of them appear in the results, because only `contype = 'c'` is selected
+
+#### Scenario: Domain constraints are excluded
+
+- **WHEN** a domain is defined with a `CHECK` constraint
+- **THEN** it is excluded, because a domain constraint has no `conrelid` to join `pg_class` on
+
+#### Scenario: Empty result when no check constraints exist
+
+- **WHEN** `inspect_check_constraints` is called against a schema with no check constraints
+- **THEN** it returns an empty sequence
+
+#### Scenario: Single query execution
+
+- **WHEN** `inspect_check_constraints` is called
+- **THEN** it executes exactly one SQL query
+
+### Requirement: Resolve the connection's current schema
+
+The module SHALL provide a `current_schema` function returning the connection's `current_schema()`, so that callers
+resolving Alembic's `None` schema share one implementation.
+
+#### Scenario: Returns the search_path head
+
+- **WHEN** `current_schema(conn)` is called on a connection whose `search_path` begins with `public`
+- **THEN** it returns `"public"`
+
+#### Scenario: Follows a changed search_path
+
+- **WHEN** the connection's `search_path` is set to another schema
+- **THEN** `current_schema(conn)` returns that schema
