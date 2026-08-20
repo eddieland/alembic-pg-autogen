@@ -84,9 +84,11 @@ Getting the list wrong fails silently in one of two directions, and neither rais
   ours too. The comparator that drives the entire diff belongs to `alembic.autogenerate.schemas`, so with it excluded
   nothing dispatches and every migration comes out empty.
 
-To confirm what a run actually loaded, set `logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)`. A
-correct configuration logs nine `setting up autogenerate plugin ...` lines: Alembic's seven, plus
-`alembic_pg_autogen.compare` and `alembic_pg_autogen.checkconstraints`.
+To confirm what a run actually loaded, set `logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)`. Each
+included plugin logs one `setting up autogenerate plugin ...` line, and a correct configuration shows lines from
+**both** namespaces — several `alembic.autogenerate.*` entries (`schemas` and `tables` above all, since those drive the
+diff) alongside `alembic_pg_autogen.compare` and `alembic_pg_autogen.checkconstraints`. Lines from only one namespace
+mean the corresponding wildcard is missing from the list.
 
 ## What gets managed
 

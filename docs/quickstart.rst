@@ -74,8 +74,10 @@ Import the package (this registers the Alembic comparator plugin), then in your
 
       logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)
 
-   A correct configuration logs nine ``setting up autogenerate plugin ...`` lines — Alembic's seven, plus
-   ``alembic_pg_autogen.compare`` and ``alembic_pg_autogen.checkconstraints``.
+   Each included plugin logs one ``setting up autogenerate plugin ...`` line. A correct configuration shows lines from
+   **both** namespaces — several ``alembic.autogenerate.*`` entries, among them ``schemas`` and ``tables``, which drive
+   the diff, alongside ``alembic_pg_autogen.compare`` and ``alembic_pg_autogen.checkconstraints``. Lines from only one
+   namespace mean the corresponding wildcard is missing from the list.
 
 3. Autogenerate as usual
 ------------------------
@@ -177,7 +179,7 @@ asks PostgreSQL instead, so an edited expression produces a migration rather tha
        op.drop_constraint("ck_orders_amount", "orders", type_="check")
        op.create_check_constraint("ck_orders_amount", "orders", "amount > 0")
 
-This augments Alembic, it does not supersede it
+This augments Alembic; it does not supersede it
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Check constraints are the one area where this package and Alembic both have a comparator running, so it is worth being
