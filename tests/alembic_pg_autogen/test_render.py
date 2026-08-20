@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 # pyright: reportPrivateUsage=false
+import re
 from unittest.mock import MagicMock
+
+import pytest
 
 from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
 from alembic_pg_autogen.ops import (
@@ -16,12 +19,14 @@ from alembic_pg_autogen.ops import (
     ReplaceViewOp,
 )
 from alembic_pg_autogen.render import (
+    _quote_ddl,
     _render_create_function,
     _render_create_trigger,
     _render_create_view,
     _render_drop_function,
     _render_drop_trigger,
     _render_drop_view,
+    _render_execute,
     _render_replace_function,
     _render_replace_trigger,
     _render_replace_view,
@@ -167,6 +172,106 @@ class TestRenderDropView:
         op = DropViewOp(ViewInfo("reporting", "monthly_summary", "CREATE OR REPLACE VIEW …"))
         result = _render_drop_view(_ctx(), op)
         assert result == "op.execute('DROP VIEW reporting.monthly_summary')"
+
+
+class TestQuoteDDL:
+    """``_quote_ddl`` must produce a Python literal that survives Alembic's re-indentation."""
+
+    @pytest.mark.parametrize(
+        "ddl",
+        [
+            "CREATE OR REPLACE VIEW public.v AS\n SELECT 1",
+            "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $$\n  SELECT 'hi'\n$$",
+            "line1\nline2\\nstill",
+            "has '''triple''' quotes\nand a newline",
+        ],
+    )
+    def test_multiline_ddl_renders_on_a_single_line(self, ddl: str):
+        """Alembic indents every line of a rendered op, so a multi-line literal would absorb the indentation."""
+        literal = _quote_ddl(ddl)
+
+        assert "\n" not in literal
+        assert eval(literal) == ddl  # noqa: S307
+
+    @pytest.mark.parametrize(
+        "ddl",
+        [
+            "CREATE VIEW public.v AS SELECT 1",
+            "SELECT 'quoted'",
+            r"SELECT E'back\slash'",
+            "mixes ' and \\ together",
+            "contains '''triple''' quotes",
+            'contains """double triple""" quotes',
+            "contains both ''' and \"\"\" quotes",
+        ],
+    )
+    def test_single_line_ddl_round_trips(self, ddl: str):
+        literal = _quote_ddl(ddl)
+
+        assert eval(literal) == ddl  # noqa: S307
+
+    def test_multiline_ddl_survives_alembic_indentation(self):
+        """Reproduces what ``alembic.autogenerate.render._indent`` does to the rendered op text."""
+        ddl = "CREATE OR REPLACE VIEW public.v AS\n SELECT id\n   FROM users"
+
+        indented = re.sub(r"^", "    ", _render_execute(ddl), flags=re.M)
+
+        namespace: dict[str, object] = {"op": _RecordingOp()}
+        exec(indented.strip(), namespace)  # noqa: S102
+        recorded = namespace["op"]
+        assert isinstance(recorded, _RecordingOp)
+        assert recorded.executed == [ddl]
+
+    def test_plain_single_line_ddl_uses_repr(self):
+        assert _quote_ddl("CREATE VIEW public.v AS SELECT 1") == "'CREATE VIEW public.v AS SELECT 1'"
+
+    def test_single_line_with_quotes_uses_triple_quoting(self):
+        assert _quote_ddl("SELECT 'hi' AS greeting") == """'''SELECT 'hi' AS greeting'''"""
+
+    def test_trailing_quote_falls_back_to_repr(self):
+        """``'''SELECT 'hi''''`` is not a valid literal: the trailing quote runs into the closing delimiter."""
+        ddl = "SELECT 'hi'"
+
+        literal = _quote_ddl(ddl)
+
+        assert not literal.startswith("'''")
+        assert eval(literal) == ddl  # noqa: S307
+
+    def test_trailing_backslash_falls_back_to_repr(self):
+        r"""A raw literal cannot end in a backslash, so ``r'''…\'''`` would not terminate."""
+        ddl = "SELECT 'a' " + "\\"
+
+        literal = _quote_ddl(ddl)
+
+        assert not literal.startswith("r'''")
+        assert eval(literal) == ddl  # noqa: S307
+
+    def test_single_line_with_backslash_uses_a_raw_literal(self):
+        ddl = r"SELECT E'a\nb' AS lines"
+
+        literal = _quote_ddl(ddl)
+
+        assert literal.startswith("r'''")
+        assert eval(literal) == ddl  # noqa: S307
+
+    def test_triple_quoted_content_falls_back_to_repr(self):
+        """Triple-quoting cannot nest, so DDL already containing ``'''`` has to be escaped by ``repr()``."""
+        ddl = "SELECT '''x'''"
+
+        literal = _quote_ddl(ddl)
+
+        assert not literal.startswith("'''")
+        assert eval(literal) == ddl  # noqa: S307
+
+
+class _RecordingOp:
+    """Stands in for Alembic's ``op`` module while exec'ing rendered migration source."""
+
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+
+    def execute(self, ddl: str) -> None:
+        self.executed.append(ddl)
 
 
 class TestNoImportsInjected:

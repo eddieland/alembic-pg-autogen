@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import difflib
 import logging
-import re
 from typing import TYPE_CHECKING, Protocol
 
 from alembic.runtime.plugins import Plugin
@@ -39,8 +38,6 @@ if TYPE_CHECKING:
     from alembic_pg_autogen.sentinels import Ignored
 
 log = logging.getLogger(__name__)
-
-_VIEW_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(?:(\w+)\.)?(\w+)", re.IGNORECASE)
 
 _DESIRED_STATE_KEYS: Final = ("pg_functions", "pg_triggers", "pg_views")
 """Configuration keys this comparator reads from ``autogen_context.opts``."""
@@ -260,19 +257,22 @@ def _parse_trigger_identities(ddl_list: Sequence[str], conn: Connection) -> set[
 
 
 def _parse_view_names(ddl_list: Sequence[str], conn: Connection) -> set[tuple[str, str]]:
-    """Extract ``(schema, name)`` pairs from view DDL strings via regex.
+    """Extract ``(schema, name)`` pairs from view DDL strings via postgast.
 
     Raises:
         ValueError: If any DDL string does not contain a valid ``CREATE VIEW`` statement.
     """
+    import postgast
+    from postgast.pg_query_pb2 import ViewStmt
+
     default_schema = current_schema(conn)
     names: set[tuple[str, str]] = set()
     for ddl in ddl_list:
-        m = _VIEW_RE.search(ddl)
-        if m is None:
+        view = next((node.view for node in postgast.find_nodes(postgast.parse(ddl), ViewStmt)), None)
+        if view is None:
             raise ValueError(f"Cannot parse view identity from pg_views DDL: {ddl!r}")
-        schema = m.group(1) if m.group(1) is not None else default_schema
-        names.add((schema, m.group(2)))
+        # ``schemaname`` is the empty string, not None, when the DDL leaves the view unqualified.
+        names.add((view.schemaname or default_schema, view.relname))
     return names
 
 

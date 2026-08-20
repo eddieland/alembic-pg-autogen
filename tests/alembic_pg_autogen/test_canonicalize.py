@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import Connection, text
@@ -13,9 +14,14 @@ from alembic_pg_autogen import (
     canonicalize,
     canonicalize_check_constraints,
     canonicalize_functions,
+    canonicalize_triggers,
     canonicalize_views,
     inspect_check_constraints,
 )
+
+FN_DDL = "CREATE FUNCTION public.f() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$"
+VIEW_DDL = "CREATE VIEW public.v AS SELECT 1"
+TRG_DDL = "CREATE TRIGGER trg AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.f()"
 
 
 class TestCanonicalStateUnit:
@@ -258,6 +264,176 @@ class TestCanonicalizeIgnoredIntegration:
         result = canonicalize(pg_conn, view_ddl=(), schemas=["public"])
 
         assert any(v.name == "test_ci_seen" for v in result.views)
+
+
+class TestCanonicalizeUnit:
+    """Statement ordering and savepoint handling, pinned without a live server.
+
+    A recording connection returns no rows, so every catalog read comes back empty — which is exactly what makes the
+    sequence of statements visible.  The behaviour against real DDL is covered by the integration tests above.
+    """
+
+    def test_ddl_executes_in_dependency_order(self):
+        """Functions first, then views (which may call them), then triggers (which may reference both)."""
+        conn = _RecordingConnection()
+
+        canonicalize(
+            _as_conn(conn),
+            function_ddl=[FN_DDL],
+            view_ddl=[VIEW_DDL],
+            trigger_ddl=[TRG_DDL],
+        )
+
+        assert [_ddl_kind(s) for s in conn.statements if _ddl_kind(s)] == ["function", "view", "trigger"]
+
+    def test_catalog_is_read_after_the_ddl_runs(self):
+        conn = _RecordingConnection()
+
+        canonicalize(_as_conn(conn), function_ddl=[FN_DDL])
+
+        ddl_index = next(i for i, s in enumerate(conn.statements) if _ddl_kind(s) == "function")
+        catalog_index = next(i for i, s in enumerate(conn.statements) if "pg_catalog.pg_proc" in s)
+        assert ddl_index < catalog_index
+
+    def test_savepoint_is_rolled_back(self):
+        conn = _RecordingConnection()
+
+        canonicalize(_as_conn(conn), function_ddl=[FN_DDL])
+
+        assert conn.savepoints == [True]
+
+    def test_savepoint_is_rolled_back_when_ddl_fails(self):
+        """A failed round-trip must still leave the database exactly as it was found."""
+        conn = _RecordingConnection(fail_on="CREATE OR REPLACE FUNCTION")
+
+        with pytest.raises(RuntimeError):
+            canonicalize(_as_conn(conn), function_ddl=[FN_DDL])
+
+        assert conn.savepoints == [True]
+
+    def test_ignored_types_are_neither_executed_nor_inspected(self):
+        conn = _RecordingConnection()
+
+        state = canonicalize(
+            _as_conn(conn),
+            function_ddl=[FN_DDL],
+            view_ddl=IGNORED,
+            trigger_ddl=IGNORED,
+        )
+
+        assert [_ddl_kind(s) for s in conn.statements if _ddl_kind(s)] == ["function"]
+        assert not any("pg_catalog.pg_trigger" in s for s in conn.statements)
+        assert list(state.views) == []
+        assert list(state.triggers) == []
+
+    def test_empty_sequence_still_reads_the_catalog_back(self):
+        """Declaring nothing is a real desired state — the catalog must be read so drops can be detected."""
+        conn = _RecordingConnection()
+
+        canonicalize(_as_conn(conn), function_ddl=[], view_ddl=[], trigger_ddl=[])
+
+        assert any("pg_catalog.pg_proc" in s for s in conn.statements)
+        assert any("pg_catalog.pg_class" in s for s in conn.statements)
+        assert any("pg_catalog.pg_trigger" in s for s in conn.statements)
+
+    def test_ddl_that_produced_nothing_warns(self, caplog: pytest.LogCaptureFixture):
+        """The recording connection reports an empty catalog, which is the symptom this warning exists for."""
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            canonicalize(
+                _as_conn(_RecordingConnection()),
+                function_ddl=[FN_DDL],
+                view_ddl=[VIEW_DDL],
+                trigger_ddl=[TRG_DDL],
+            )
+
+        assert "produced no functions" in caplog.text
+        assert "produced no views" in caplog.text
+        assert "produced no triggers" in caplog.text
+
+
+class TestCanonicalizeWrappersUnit:
+    """Each convenience wrapper manages exactly one object type and ignores the rest."""
+
+    def test_functions_wrapper_ignores_views_and_triggers(self):
+        conn = _RecordingConnection()
+
+        canonicalize_functions(_as_conn(conn), [FN_DDL])
+
+        assert any("pg_catalog.pg_proc" in s for s in conn.statements)
+        assert not any("pg_catalog.pg_trigger" in s for s in conn.statements)
+
+    def test_views_wrapper_ignores_functions_and_triggers(self):
+        conn = _RecordingConnection()
+
+        canonicalize_views(_as_conn(conn), [VIEW_DDL])
+
+        assert any("pg_catalog.pg_class" in s for s in conn.statements)
+        assert not any("pg_catalog.pg_proc" in s for s in conn.statements)
+
+    def test_triggers_wrapper_ignores_functions_and_views(self):
+        conn = _RecordingConnection()
+
+        canonicalize_triggers(_as_conn(conn), [TRG_DDL])
+
+        assert any("pg_catalog.pg_trigger" in s for s in conn.statements)
+        assert not any("pg_catalog.pg_proc" in s for s in conn.statements)
+
+    def test_wrapper_passes_schemas_through(self):
+        conn = _RecordingConnection()
+
+        canonicalize_functions(_as_conn(conn), [FN_DDL], ["audit"])
+
+        assert {"schemas": ["audit"]} in conn.params
+
+
+def _ddl_kind(statement: str) -> str | None:
+    """Classify a canonicalization DDL statement, ignoring the catalog queries around it."""
+    for keyword, kind in (("FUNCTION", "function"), ("VIEW", "view"), ("TRIGGER", "trigger")):
+        if statement.startswith(f"CREATE OR REPLACE {keyword}"):
+            return kind
+    return None
+
+
+def _as_conn(conn: _RecordingConnection) -> Any:
+    """Return the recorder typed as ``Any`` so it can stand in for ``Connection`` without a structural cast."""
+    return conn
+
+
+class _RecordingSavepoint:
+    _log: list[bool]
+
+    def __init__(self, log: list[bool]) -> None:
+        self._log = log
+
+    def rollback(self) -> None:
+        self._log.append(True)
+
+
+class _RecordingConnection:
+    """Records every statement and returns no rows, standing in for a ``Connection``."""
+
+    statements: list[str]
+    params: list[dict[str, object]]
+    savepoints: list[bool]
+    _fail_on: str | None
+
+    def __init__(self, fail_on: str | None = None) -> None:
+        self.statements = []
+        self.params = []
+        self.savepoints = []
+        self._fail_on = fail_on
+
+    def begin_nested(self) -> _RecordingSavepoint:
+        return _RecordingSavepoint(self.savepoints)
+
+    def execute(self, statement: object, params: dict[str, object] | None = None) -> list[object]:
+        rendered = str(statement)
+        self.statements.append(rendered)
+        if params is not None:
+            self.params.append(params)
+        if self._fail_on is not None and self._fail_on in rendered:
+            raise RuntimeError(f"simulated failure for {rendered!r}")
+        return []
 
 
 class TestCanonicalizeCheckConstraintsUnit:

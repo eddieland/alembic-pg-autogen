@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 from __future__ import annotations
 
 from collections.abc import Generator
@@ -17,6 +18,7 @@ from alembic_pg_autogen import (
     inspect_triggers,
     inspect_views,
 )
+from alembic_pg_autogen.inspect import _build_schema_filter
 
 
 class TestFunctionInfoUnit:
@@ -88,6 +90,57 @@ class TestCheckConstraintInfoUnit:
     def test_identity_is_schema_table_and_name(self):
         info = CheckConstraintInfo("myschema", "orders", "ck_orders_amount", "expression text")
         assert info[:-1] == ("myschema", "orders", "ck_orders_amount")
+
+
+class TestBuildSchemaFilterUnit:
+    """``_build_schema_filter`` decides which schemas a catalog query covers.
+
+    Every inspect helper interpolates the returned fragment into its SQL, so the fragment must never carry a schema
+    name — the names always travel as bind parameters.
+    """
+
+    def test_none_excludes_system_schemas(self):
+        fragment, params = _build_schema_filter(None)
+
+        assert fragment == "n.nspname != ALL(:excluded_schemas)"
+        assert params == {"excluded_schemas": ["pg_catalog", "information_schema"]}
+
+    def test_explicit_schemas_become_an_allow_list(self):
+        fragment, params = _build_schema_filter(["public", "audit"])
+
+        assert fragment == "n.nspname = ANY(:schemas)"
+        assert params == {"schemas": ["public", "audit"]}
+
+    def test_empty_sequence_matches_nothing(self):
+        """An empty list is "no schemas", not "every schema" — that is what *None* means."""
+        fragment, params = _build_schema_filter([])
+
+        assert fragment == "n.nspname = ANY(:schemas)"
+        assert params == {"schemas": []}
+
+    def test_schema_names_are_never_interpolated_into_sql(self):
+        hostile = "public'; DROP TABLE users; --"
+
+        fragment, params = _build_schema_filter([hostile])
+
+        assert hostile not in fragment
+        assert params["schemas"] == [hostile]
+
+    def test_params_are_a_fresh_mutable_copy(self):
+        """``inspect_check_constraints`` adds ``table_names`` to the returned mapping, so it must not be shared."""
+        _, first = _build_schema_filter(None)
+        first["table_names"] = ["orders"]
+        _, second = _build_schema_filter(None)
+
+        assert "table_names" not in second
+
+    def test_sequence_is_copied_not_aliased(self):
+        schemas = ["public"]
+
+        _, params = _build_schema_filter(schemas)
+        schemas.append("audit")
+
+        assert params["schemas"] == ["public"]
 
 
 @pytest.fixture
