@@ -57,6 +57,28 @@ Import the package (this registers the Alembic comparator plugin), then in your
        pg_triggers=PG_TRIGGERS,
    )
 
+.. important::
+
+   Both wildcards belong in ``autogenerate_plugins``. The option *replaces* Alembic's default of
+   ``["alembic.autogenerate.*"]`` rather than adding to it, so listing only ``"alembic_pg_autogen.*"`` excludes every
+   comparator Alembic ships, including ``_produce_net_changes`` in ``alembic.autogenerate.schemas``, which drives the
+   whole diff. Autogenerate then produces an empty migration for *everything*, this package included, without raising
+   an error.
+
+   The mirror-image mistake is leaving the option unset. Importing ``alembic_pg_autogen`` registers the plugins but
+   does not opt them in, so the default stays in force and none of this package's comparators ever run.
+
+   To see what a run actually loaded, raise the plugin logger to ``INFO``:
+
+   .. code-block:: python
+
+      logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)
+
+   Each included plugin logs one ``setting up autogenerate plugin ...`` line. A correct configuration shows lines from
+   **both** namespaces: several ``alembic.autogenerate.*`` entries, among them ``schemas`` and ``tables``, which drive
+   the diff, alongside ``alembic_pg_autogen.compare`` and ``alembic_pg_autogen.checkconstraints``. Lines from only one
+   namespace mean the corresponding wildcard is missing from the list.
+
 3. Autogenerate as usual
 ------------------------
 
@@ -157,6 +179,45 @@ asks PostgreSQL instead, so an edited expression produces a migration rather tha
        op.drop_constraint("ck_orders_amount", "orders", type_="check")
        op.create_check_constraint("ck_orders_amount", "orders", "amount > 0")
 
+This augments Alembic; it does not supersede it
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Check constraints are the one area where this package and Alembic both have a comparator running, so it is worth being
+precise about who does what. This package fills a gap in Alembic's coverage; it does not take over check constraints.
+Leave ``alembic.autogenerate.checkconstraint_byname`` enabled.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 35 25
+
+   * - Situation
+     - Handled by
+     - Emits
+   * - Name in your models only
+     - ``alembic.autogenerate.checkconstraint_byname``
+     - ``create_check_constraint``
+   * - Name in the database only
+     - ``alembic.autogenerate.checkconstraint_byname``
+     - ``drop_constraint``
+   * - Name on **both** sides, expression possibly changed
+     - ``alembic_pg_autogen.checkconstraints``
+     - ``drop_constraint`` + re-create
+
+Alembic's comparator matches by name and, for a name present on both sides, always reports the two as equal:
+``DefaultImpl.compare_check_constraint`` returns ``Equal()`` and the PostgreSQL dialect does not override it. That
+undecided case is exactly and only what this package claims; it ignores names that exist on one side alone.
+
+Because the two sets are disjoint, no operation is ever emitted twice, so there is nothing to be gained by disabling
+Alembic's comparator and a great deal to lose: added and removed constraints would stop being detected entirely, with
+nothing from this package to replace them.
+
+The practical consequence: a schema whose only drift is constraints you forgot to declare and ones you no longer want
+will see **nothing at all** from this package, and every operation in the migration will have come from Alembic. That
+is the intended division of labor rather than a failure.
+
+How the comparison works
+~~~~~~~~~~~~~~~~~~~~~~~~
+
 The comparison round-trips each expression through the database: the constraint is added to its table under a
 throwaway name inside a savepoint that is rolled back, and PostgreSQL's own deparsed form is compared against the
 catalog. That is why ``amount >= 0`` in your model and ``amount >= 0::numeric`` in the catalog are not reported as a
@@ -186,5 +247,9 @@ support:
            "~alembic_pg_autogen.checkconstraints",
        ],
    )
+
+Note that the exclusion applies to *this* package's plugin. Leave ``alembic.autogenerate.checkconstraint_byname``
+enabled either way: excluding it stops added and removed constraints from being detected at all, and there is no
+duplication to avoid by turning it off.
 
 Requires Alembic 1.19 or newer, the release that made check constraints part of default autogenerate.
