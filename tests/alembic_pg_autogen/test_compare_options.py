@@ -33,6 +33,7 @@ class TestAbsentKeysDefaultToIgnored:
         upgrade_ops = UpgradeOps(ops=[])
 
         assert _compare_pg_objects(autogen_context, upgrade_ops, {None}) is PriorityDispatchResult.CONTINUE
+        assert list(upgrade_ops.ops) == []
 
 
 class TestWarnUnrecognizedOptions:
@@ -85,6 +86,7 @@ class TestWarnUnrecognizedOptions:
             result = _compare_pg_objects(autogen_context, upgrade_ops, {None})
 
         assert result is PriorityDispatchResult.CONTINUE
+        assert list(upgrade_ops.ops) == []
         assert "pg_view" in caplog.text
         assert "pg_views" in caplog.text
 
