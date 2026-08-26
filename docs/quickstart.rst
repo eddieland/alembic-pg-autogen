@@ -252,4 +252,109 @@ Note that the exclusion applies to *this* package's plugin. Leave ``alembic.auto
 enabled either way: excluding it stops added and removed constraints from being detected at all, and there is no
 duplication to avoid by turning it off.
 
+7. Indexes
+----------
+
+Indexes, like check constraints, need no declaration of their own: they stay in your SQLAlchemy metadata, where
+Alembic already manages whether they exist. What this package adds is a comparison of what an index *does*.
+
+Alembic's index signature covers columns, expressions, uniqueness, and ``NULLS NOT DISTINCT``. It does not cover the
+``WHERE`` predicate of a partial index, the access method, the ``INCLUDE`` columns, or the operator classes. Change any
+of those in a model and stock autogenerate emits nothing, on every run:
+
+.. code-block:: python
+
+   class User(Base):
+       __tablename__ = "users"
+
+       id: Mapped[int] = mapped_column(primary_key=True)
+       email: Mapped[str]
+       deleted_at: Mapped[datetime | None]
+
+       __table_args__ = (
+           Index("ix_users_email", "email", postgresql_where=text("deleted_at IS NULL")),
+       )
+
+With this package the added predicate produces a migration:
+
+.. code-block:: python
+
+   def upgrade() -> None:
+       op.drop_index(op.f("ix_users_email"), table_name="users")
+       op.create_index(
+           "ix_users_email",
+           "users",
+           ["email"],
+           unique=False,
+           postgresql_where=sa.text("deleted_at IS NULL"),
+       )
+
+How the comparison works
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each index is round-tripped through the database. The desired index is built inside a savepoint on an empty ``TEMP``
+clone of its table, and PostgreSQL's own ``pg_get_indexdef()`` output is compared against the catalog's. That is why
+``WHERE status IN ('a', 'b')`` in your model and ``WHERE (status = ANY (ARRAY['a'::text, 'b'::text]))`` in the catalog
+are not reported as a difference, while a genuinely changed predicate is.
+
+The clone matters. ``CREATE INDEX`` has no ``NOT VALID`` equivalent, so it really builds the index, and probing the real
+table would cost seconds per index on a large table and hold a lock for the rest of the run. On an empty clone the
+same probe costs under a millisecond, and your table is never touched.
+
+A few details worth knowing:
+
+- Only **named** indexes on tables present in ``target_metadata`` are compared.
+- Indexes backing a primary key, unique, or exclusion constraint are skipped: the constraint owns them.
+- This comparator runs *after* Alembic's and skips any index Alembic already emitted operations for, so one index
+  never draws two ``drop_index`` / ``create_index`` pairs.
+- An index that cannot be built is reported as unchanged with a warning, never as an error. Each probe is isolated, so
+  one unusable index does not cost the rest of the table its comparison.
+
+Building indexes concurrently
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``CREATE INDEX`` takes a lock that blocks writes. PostgreSQL's ``CONCURRENTLY`` avoids that but cannot run inside a
+transaction, and Alembic runs migrations in one. Opt in with ``pg_index_concurrently`` and the generated migration
+carries the block it needs:
+
+.. code-block:: python
+
+   context.configure(
+       connection=connection,
+       target_metadata=target_metadata,
+       autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+       pg_index_concurrently=True,
+   )
+
+.. code-block:: python
+
+   def upgrade() -> None:
+       with op.get_context().autocommit_block():
+           op.create_index(
+               "ix_users_email",
+               "users",
+               ["email"],
+               unique=False,
+               postgresql_where=sa.text("deleted_at IS NULL"),
+               postgresql_concurrently=True,
+           )
+
+This affects only what is rendered; autogenerate always probes with an ordinary ``CREATE INDEX`` on the clone. Be aware
+that a concurrent build can fail and leave an invalid index behind. That is a property of ``CONCURRENTLY`` itself rather
+than of this package.
+
+Index comparison is a separate Alembic plugin, so you can turn it off on its own:
+
+.. code-block:: python
+
+   context.configure(
+       connection=connection,
+       target_metadata=target_metadata,
+       autogenerate_plugins=[
+           "alembic.autogenerate.*",
+           "alembic_pg_autogen.*",
+           "~alembic_pg_autogen.indexes",
+       ],
+   )
+
 Requires Alembic 1.19 or newer, the release that made check constraints part of default autogenerate.

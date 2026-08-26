@@ -15,11 +15,14 @@ install: ## Install dependencies
 
 fmt: ## Run autoformatters and autofixers
 	uv run mdformat $(DOC_PATHS)
-	uv run codespell --write-changes $(SRC_PATHS) $(DOC_PATHS)
 	uv run ruff check --fix $(SRC_PATHS)
 	uv run ruff format $(SRC_PATHS)
 
-lint: fmt ## Format, then type-check (basedpyright)
+# codespell reports here rather than rewriting in `fmt`. Its dictionary does not know a codebase's
+# vocabulary, and --write-changes let it silently rewrite prose: `brin`, a PostgreSQL access method,
+# became "bring" in the README. CI has always run codespell as a check; this target now matches it.
+lint: fmt ## Format, then check spelling (codespell) and types (basedpyright)
+	uv run codespell $(SRC_PATHS) $(DOC_PATHS)
 	uv run basedpyright --stats $(SRC_PATHS)
 
 test: ## Run tests (unit + integration, requires Docker)

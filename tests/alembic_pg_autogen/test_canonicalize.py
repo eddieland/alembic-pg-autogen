@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import importlib
 import logging
 from collections.abc import Generator
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import Connection, text
+from sqlalchemy import Column, Connection, Integer, MetaData, Table, Text, text
 from sqlalchemy.engine import Engine
 
 from alembic_pg_autogen import (
@@ -14,9 +15,11 @@ from alembic_pg_autogen import (
     canonicalize,
     canonicalize_check_constraints,
     canonicalize_functions,
+    canonicalize_indexes,
     canonicalize_triggers,
     canonicalize_views,
     inspect_check_constraints,
+    inspect_indexes,
 )
 
 FN_DDL = "CREATE FUNCTION public.f() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$"
@@ -539,3 +542,303 @@ class TestCanonicalizeCheckConstraintsIntegration:
         )
 
         assert "ck_test_path" in normalized
+
+
+@pytest.mark.integration
+class TestCanonicalizeIndexesIntegration:
+    """The desired-state half of index comparison, round-tripped through a throwaway clone."""
+
+    def _table(self, conn: Connection, schema: str, name: str = "t") -> None:
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
+        conn.execute(
+            text(f"CREATE TABLE {schema}.{name} (id integer PRIMARY KEY, a text, b text, status text, data jsonb)")
+        )
+
+    def _metadata_table(self, schema: str | None, *indexes: Any) -> Any:
+        from sqlalchemy import Column, Integer, MetaData, Table, Text
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        return Table(
+            "t",
+            MetaData(),
+            Column("id", Integer, primary_key=True),
+            Column("a", Text()),
+            Column("b", Text()),
+            Column("status", Text()),
+            Column("data", JSONB()),
+            *indexes,
+            schema=schema,
+        )
+
+    def test_round_trip_matches_the_catalog(self, pg_conn: Connection):
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_rt")
+        pg_conn.execute(text("CREATE INDEX ix_rt ON test_cix_rt.t (a) INCLUDE (b) WHERE status IS NOT NULL"))
+        table = self._metadata_table(
+            "test_cix_rt",
+            Index("ix_rt", "a", postgresql_include=["b"], postgresql_where=text("status IS NOT NULL")),
+        )
+
+        normalized = canonicalize_indexes(
+            pg_conn, schema="test_cix_rt", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+        )
+        (catalog,) = inspect_indexes(pg_conn, schemas=["test_cix_rt"], table_names=["t"])
+
+        assert normalized["ix_rt"].shape == catalog.shape
+        assert normalized["ix_rt"].unique == catalog.unique
+
+    def test_predicate_rewrites_are_normalized(self, pg_conn: Connection):
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_in")
+        table = self._metadata_table("test_cix_in", Index("ix_in", "a", postgresql_where=text("status IN ('x','y')")))
+
+        normalized = canonicalize_indexes(
+            pg_conn, schema="test_cix_in", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+        )
+
+        assert normalized["ix_in"].shape == ("USING btree (a) WHERE (status = ANY (ARRAY['x'::text, 'y'::text]))")
+
+    def test_result_carries_the_callers_identity(self, pg_conn: Connection):
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_id")
+        table = self._metadata_table("test_cix_id", Index("ix_id", "a"))
+
+        normalized = canonicalize_indexes(
+            pg_conn, schema="test_cix_id", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+        )
+
+        info = normalized["ix_id"]
+        assert (info.schema, info.table_name, info.name) == ("test_cix_id", "t", "ix_id")
+
+    def test_unqualified_metadata_resolves_to_the_clone(self, pg_conn: Connection):
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_path")
+        pg_conn.execute(text("SET search_path TO test_cix_path"))
+        table = self._metadata_table(None, Index("ix_path", text("lower(a)")))
+
+        normalized = canonicalize_indexes(
+            pg_conn, schema=None, table_name="t", indexes={ix.name: ix for ix in table.indexes}
+        )
+
+        assert normalized["ix_path"].shape == "USING btree (lower(a))"
+
+    def test_real_table_is_never_touched(self, pg_conn: Connection):
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_clean")
+        table = self._metadata_table("test_cix_clean", Index("ix_clean", "a"))
+
+        canonicalize_indexes(
+            pg_conn, schema="test_cix_clean", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+        )
+
+        assert inspect_indexes(pg_conn, schemas=["test_cix_clean"], table_names=["t"]) == []
+        remaining = pg_conn.execute(
+            text("SELECT count(*) FROM pg_class WHERE relnamespace = pg_my_temp_schema()")
+        ).scalar()
+        assert remaining == 0
+
+    def test_one_unusable_index_does_not_cost_the_others(self, pg_conn: Connection):
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_bad")
+        table = self._metadata_table(
+            "test_cix_bad", Index("ix_good", "a"), Index("ix_bad", text("no_such_function(a)"))
+        )
+
+        normalized = canonicalize_indexes(
+            pg_conn, schema="test_cix_bad", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+        )
+
+        assert "ix_good" in normalized
+        assert "ix_bad" not in normalized
+
+    def test_every_index_unusable_skips_the_read_back(self, pg_conn: Connection):
+        """With nothing successfully probed there is no read-back to do, and the result is empty rather than an error."""
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_allbad")
+        table = self._metadata_table(
+            "test_cix_allbad",
+            Index("ix_bad_one", text("no_such_function(a)")),
+            Index("ix_bad_two", text("also_missing(b)")),
+        )
+
+        normalized = canonicalize_indexes(
+            pg_conn, schema="test_cix_allbad", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+        )
+
+        assert normalized == {}
+
+    def test_uncompilable_index_does_not_abort_the_run(self, pg_conn: Connection, caplog: pytest.LogCaptureFixture):
+        """A ``CompileError`` is raised inside ``execute()`` before the server sees anything, and is not a DBAPIError.
+
+        Catching only the server-side error let one unrenderable index abort autogenerate outright, taking every other
+        index on the table with it.
+        """
+        from sqlalchemy import Index, bindparam
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        pg_conn.execute(text("CREATE SCHEMA test_cix_compile"))
+        pg_conn.execute(text("CREATE TABLE test_cix_compile.t (id integer PRIMARY KEY, a text, payload jsonb)"))
+        table = Table(
+            "t",
+            MetaData(),
+            Column("id", Integer, primary_key=True),
+            Column("a", Text()),
+            Column("payload", JSONB()),
+            schema="test_cix_compile",
+        )
+        # No literal renderer exists for a JSONB bind, so SQLAlchemy cannot compile this index at all.
+        uncompilable = Index("ix_uncompilable", table.c.payload == bindparam("v", value={"a": 1}, type_=JSONB()))
+        usable = Index("ix_usable", table.c.a)
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_indexes(
+                pg_conn,
+                schema="test_cix_compile",
+                table_name="t",
+                indexes={"ix_uncompilable": uncompilable, "ix_usable": usable},
+            )
+
+        assert "ix_usable" in normalized, "one unrenderable index must not cost the others their comparison"
+        assert "ix_uncompilable" not in normalized
+        assert "Could not canonicalize index 'ix_uncompilable'" in caplog.text
+
+    def test_clone_name_already_taken_reports_the_cause(self, pg_conn: Connection, caplog: pytest.LogCaptureFixture):
+        """The clone must take the target's own name for the redirect to reach it, so the name has to be free."""
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_taken")
+        table = self._metadata_table("test_cix_taken", Index("ix_taken", "a"))
+        pg_conn.execute(text("CREATE TEMP TABLE t (unrelated integer)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_indexes(
+                pg_conn, schema="test_cix_taken", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+            )
+
+        assert normalized == {}
+        assert "Could not create a temporary probe clone" in caplog.text
+        # The pre-existing temporary table is left exactly as it was.
+        columns = (
+            pg_conn
+            .execute(
+                text(
+                    "SELECT attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
+                    "WHERE c.relname = 't' AND c.relnamespace = pg_my_temp_schema() AND a.attnum > 0"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert columns == ["unrelated"]
+
+    def test_failing_read_back_is_treated_as_unchanged(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """The probes themselves can succeed and the read-back still fail; that must not propagate either."""
+        from sqlalchemy import Index
+
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+
+        self._table(pg_conn, "test_cix_readback")
+        table = self._metadata_table("test_cix_readback", Index("ix_readback", "a"))
+        monkeypatch.setattr(canonicalize_module, "_INDEX_PROBE_QUERY", "SELECT this is not valid sql")
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_indexes(
+                pg_conn, schema="test_cix_readback", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+            )
+
+        assert normalized == {}
+        assert "Could not canonicalize indexes on" in caplog.text
+
+    def test_empty_input_executes_no_ddl(self, pg_conn: Connection):
+        assert canonicalize_indexes(pg_conn, schema="public", table_name="missing", indexes={}) == {}
+
+    def test_missing_table_returns_empty(self, pg_conn: Connection):
+        from sqlalchemy import Index
+
+        table = self._metadata_table("public", Index("ix_nope", "a"))
+
+        normalized = canonicalize_indexes(
+            pg_conn, schema="public", table_name="test_cix_absent", indexes={ix.name: ix for ix in table.indexes}
+        )
+
+        assert normalized == {}
+
+    def test_probe_query_strips_a_postgresql_14_style_table_reference(self, pg_conn: Connection):
+        """PostgreSQL 14 prints the backing ``pg_temp_3`` where 15 and newer print the ``pg_temp`` alias.
+
+        CI runs PostgreSQL 14, so the fully-qualified candidate is the branch that fires there, and the branch whose
+        absence made every index look unnormalizable. ``pg_get_indexdef()`` always qualifies the table reference, and
+        a temp table on this server always qualifies it as the alias, so the qualified branch is exercised the only way
+        it can be here: against a table in a named schema, whose rendering is string-for-string what PostgreSQL 14
+        emits for a temporary one.
+        """
+        from alembic_pg_autogen.canonicalize import _INDEX_PROBE_QUERY  # pyright: ignore[reportPrivateUsage]
+
+        # Relax the temp-only filter and neutralise the alias candidate, so a match can only have come from the
+        # fully-qualified one.
+        variant = _INDEX_PROBE_QUERY.replace("tc.relnamespace = pg_my_temp_schema()", "true").replace(
+            "'pg_temp.'", "'not_the_alias_postgresql_uses.'"
+        )
+        assert variant != _INDEX_PROBE_QUERY, "both the temp filter and the alias candidate should be present"
+
+        pg_conn.execute(text("CREATE SCHEMA test_cix_pg14"))
+        pg_conn.execute(text("CREATE TABLE test_cix_pg14.t (a text, status text)"))
+        pg_conn.execute(text("CREATE INDEX ix_pg14 ON test_cix_pg14.t (a) WHERE status IS NOT NULL"))
+
+        rows = pg_conn.execute(text(variant), {"names": ["ix_pg14"]}).all()
+
+        assert [(r.name, r.unique, r.shape) for r in rows] == [
+            ("ix_pg14", False, "USING btree (a) WHERE (status IS NOT NULL)")
+        ]
+
+    def test_unstrippable_probe_definition_is_treated_as_unchanged(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """The branch that hid the PostgreSQL 14 bug: a shape that will not strip must warn, not silently vanish."""
+        from sqlalchemy import Index
+
+        # The package re-exports the ``canonicalize`` *function*, which shadows the submodule of the same name:
+        # both ``from alembic_pg_autogen import canonicalize`` and ``import alembic_pg_autogen.canonicalize as ...``
+        # resolve to it, so reach for the module through the import system instead.
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+
+        self._table(pg_conn, "test_cix_null")
+        table = self._metadata_table("test_cix_null", Index("ix_null", "a"))
+        broken = canonicalize_module._INDEX_PROBE_QUERY.replace(  # pyright: ignore[reportPrivateUsage]
+            "'CREATE '", "'NOT HOW POSTGRESQL SPELLS IT '"
+        )
+        monkeypatch.setattr(canonicalize_module, "_INDEX_PROBE_QUERY", broken)
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_indexes(
+                pg_conn, schema="test_cix_null", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+            )
+
+        assert normalized == {}
+        assert "Could not normalize the probed definition" in caplog.text
+
+    def test_probe_query_yields_null_when_no_candidate_matches(self, pg_conn: Connection):
+        """An unrecognised rendering must produce NULL, which the caller treats as unchanged rather than guessing."""
+        from alembic_pg_autogen.canonicalize import _INDEX_PROBE_QUERY  # pyright: ignore[reportPrivateUsage]
+
+        broken = _INDEX_PROBE_QUERY.replace("'CREATE '", "'NOT HOW POSTGRESQL SPELLS IT '")
+        pg_conn.execute(text("CREATE SCHEMA test_cix_none"))
+        pg_conn.execute(text("CREATE TABLE test_cix_none.t (a text)"))
+        savepoint = pg_conn.begin_nested()
+        try:
+            pg_conn.execute(text("CREATE TEMP TABLE t (LIKE test_cix_none.t)"))
+            pg_conn.execute(text("CREATE INDEX ix_none ON pg_temp.t (a)"))
+            rows = pg_conn.execute(text(broken), {"names": ["ix_none"]}).all()
+        finally:
+            savepoint.rollback()
+
+        assert [r.shape for r in rows] == [None]

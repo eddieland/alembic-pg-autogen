@@ -78,7 +78,7 @@ for Alembic's own, which still do all the table, column, index, and constraint w
 Getting the list wrong fails silently in one of two directions, and neither raises an error:
 
 - **Omitting `alembic_pg_autogen.*`** (or not setting the option at all) leaves the default in force. Importing the
-  package registers the plugins but does not opt them in, so functions, triggers, views, and check constraint
+  package registers the plugins but does not opt them in, so functions, triggers, views, check constraint, and index
   expressions are simply never compared.
 - **Omitting `alembic.autogenerate.*`** turns autogenerate into a total no-op, and not just for Alembic's features but
   for ours too. The comparator that drives the entire diff belongs to `alembic.autogenerate.schemas`, so with it
@@ -87,8 +87,8 @@ Getting the list wrong fails silently in one of two directions, and neither rais
 To confirm what a run actually loaded, set `logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)`. Each
 included plugin logs one `setting up autogenerate plugin ...` line, and a correct configuration shows lines from
 **both** namespaces: several `alembic.autogenerate.*` entries, chiefly `schemas` and `tables`, which drive the diff,
-alongside `alembic_pg_autogen.compare` and `alembic_pg_autogen.checkconstraints`. Lines from only one namespace mean the
-corresponding wildcard is missing from the list.
+alongside `alembic_pg_autogen.compare`, `alembic_pg_autogen.checkconstraints`, and `alembic_pg_autogen.indexes`. Lines
+from only one namespace mean the corresponding wildcard is missing from the list.
 
 ## What gets managed
 
@@ -171,6 +171,94 @@ Beyond the plugin list above there is nothing to configure. Each expression is r
 to the table as a throwaway `NOT VALID` constraint inside a savepoint that is rolled back — so `amount >= 0` and the
 catalog's `amount >= 0::numeric` are recognized as the same constraint, and a real change is recognized as a real
 change.
+
+## Indexes
+
+Alembic compares an index's columns, expressions, uniqueness, and `NULLS NOT DISTINCT` flag. Four things it does not
+compare at all: the `WHERE` predicate of a partial index, the access method, the `INCLUDE` columns, and the operator
+classes. Change any of them in a model and autogenerate emits nothing. Not a wrong migration, but no migration, on every
+run, forever.
+
+Verified against PostgreSQL 16 with Alembic 1.19, each of these is silent:
+
+| Change in your model                                | Stock Alembic | With this package             |
+| --------------------------------------------------- | ------------- | ----------------------------- |
+| Add, remove, or change `postgresql_where`           | nothing       | `drop_index` + `create_index` |
+| Switch `postgresql_using` (`btree` → `gin`, `brin`) | nothing       | `drop_index` + `create_index` |
+| Add or change `postgresql_ops` (operator classes)   | nothing       | `drop_index` + `create_index` |
+| Add or change `postgresql_include`                  | nothing       | `drop_index` + `create_index` |
+| An expression differing only by a cast              | nothing       | `drop_index` + `create_index` |
+
+That last row is a different failure: expressions *are* compared, but through a text heuristic that strips casts,
+quotes, and whitespace before comparing, so an index on `a` and one on `a::int` reduce to the same string.
+
+As with check constraints, this comparator augments Alembic's rather than superseding it. Alembic owns whether an index
+exists, and owns any index its own comparison already rejected; ours runs afterwards and only looks at indexes present
+on both sides that Alembic left alone. One index never draws two `drop_index` / `create_index` pairs.
+
+Keep declaring indexes in SQLAlchemy metadata as usual:
+
+```python
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str]
+    deleted_at: Mapped[datetime | None]
+
+    __table_args__ = (Index("ix_users_email", "email", postgresql_where=text("deleted_at IS NULL")),)
+```
+
+and adding that predicate now produces a migration:
+
+```python
+def upgrade() -> None:
+    op.drop_index(op.f("ix_users_email"), table_name="users")
+    op.create_index("ix_users_email", "users", ["email"], unique=False, postgresql_where=sa.text("deleted_at IS NULL"))
+```
+
+Each index is round-tripped through PostgreSQL, so `WHERE status IN ('a', 'b')` in your model and the catalog's
+`WHERE (status = ANY (ARRAY['a'::text, 'b'::text]))` are recognized as the same index. The round-trip builds the index
+on an empty `TEMP` clone of the table rather than on the table itself: `CREATE INDEX` has no `NOT VALID` equivalent, so
+probing the real table would build a real index, costing seconds per index on a large table and holding a lock for the
+rest of the run. On the clone it costs under a millisecond and never touches your data.
+
+### Building indexes concurrently
+
+`CREATE INDEX` takes a lock that blocks writes, which is usually unacceptable in production. PostgreSQL's `CONCURRENTLY`
+avoids that but cannot run inside a transaction, and Alembic runs migrations in one. Opt in with `pg_index_concurrently`
+and the generated migration brings its own escape hatch:
+
+```python
+context.configure(
+    connection=connection,
+    target_metadata=target_metadata,
+    autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+    pg_index_concurrently=True,
+)
+```
+
+```python
+def upgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.drop_index(op.f("ix_users_email"), table_name="users", postgresql_concurrently=True)
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "ix_users_email",
+            "users",
+            ["email"],
+            unique=False,
+            postgresql_where=sa.text("deleted_at IS NULL"),
+            postgresql_concurrently=True,
+        )
+```
+
+This changes only what is *rendered*. Autogenerate itself always probes with an ordinary `CREATE INDEX` on the throwaway
+clone. Note that a concurrent build can fail and leave an invalid index behind, which is a property of `CONCURRENTLY`
+rather than of this package, so keep that in mind when the migration runs unattended.
+
+Indexes backing a primary key, unique, or exclusion constraint are left alone: the constraint owns them, and Alembic
+compares those as constraints.
 
 ## Installation
 

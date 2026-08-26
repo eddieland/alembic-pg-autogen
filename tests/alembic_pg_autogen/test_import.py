@@ -7,11 +7,13 @@ def test_package_importable():
 def test_extension_modules_importable():
     import alembic_pg_autogen.compare
     import alembic_pg_autogen.compare_check_constraints
+    import alembic_pg_autogen.compare_indexes
     import alembic_pg_autogen.ops
     import alembic_pg_autogen.render
 
     assert alembic_pg_autogen.compare is not None
     assert alembic_pg_autogen.compare_check_constraints is not None
+    assert alembic_pg_autogen.compare_indexes is not None
     assert alembic_pg_autogen.ops is not None
     assert alembic_pg_autogen.render is not None
 
@@ -141,3 +143,38 @@ def test_ignored_exports_importable():
 
     assert IGNORED is not None
     assert Ignored is not None
+
+
+def test_index_exports_present():
+    import alembic_pg_autogen
+
+    assert "IndexInfo" in alembic_pg_autogen.__all__
+    assert "inspect_indexes" in alembic_pg_autogen.__all__
+    assert "canonicalize_indexes" in alembic_pg_autogen.__all__
+    assert "CreateIndexConcurrentlyOp" in alembic_pg_autogen.__all__
+    assert "DropIndexConcurrentlyOp" in alembic_pg_autogen.__all__
+
+
+def test_index_exports_importable():
+    from alembic_pg_autogen import (
+        CreateIndexConcurrentlyOp,
+        DropIndexConcurrentlyOp,
+        IndexInfo,
+        canonicalize_indexes,
+        inspect_indexes,
+    )
+
+    assert IndexInfo is not None
+    assert inspect_indexes is not None
+    assert canonicalize_indexes is not None
+    assert CreateIndexConcurrentlyOp is not None
+    assert DropIndexConcurrentlyOp is not None
+
+
+def test_index_plugin_registered():
+    from alembic.runtime.plugins import _all_plugins  # pyright: ignore[reportPrivateUsage]
+
+    import alembic_pg_autogen
+
+    assert alembic_pg_autogen is not None
+    assert "alembic_pg_autogen.indexes" in _all_plugins
