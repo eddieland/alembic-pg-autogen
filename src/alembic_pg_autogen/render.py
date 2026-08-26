@@ -81,9 +81,16 @@ def _render_replace_view(_autogen_context: AutogenContext, op: ReplaceViewOp) ->
 
 
 @renderers.dispatch_for(DropViewOp)
-def _render_drop_view(_autogen_context: AutogenContext, op: DropViewOp) -> str:
-    """Render a DROP VIEW via op.execute()."""
-    return _render_execute(f"DROP VIEW {op.current.schema}.{op.current.name}")
+def _render_drop_view(autogen_context: AutogenContext, op: DropViewOp) -> str:
+    """Render a DROP VIEW via op.execute().
+
+    Unlike the other renderers, this one builds DDL from catalog identifiers rather than echoing a definition that
+    PostgreSQL already quoted, so the schema and view name go through the dialect's identifier preparer.  Without it a
+    view named ``Order Summary`` or ``orderView`` would render a migration that fails at runtime.
+    """
+    preparer = autogen_context.dialect.identifier_preparer
+    qualified = f"{preparer.quote_schema(op.current.schema)}.{preparer.quote(op.current.name)}"
+    return _render_execute(f"DROP VIEW {qualified}")
 
 
 def _render_execute(ddl: str) -> str:

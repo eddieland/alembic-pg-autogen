@@ -139,7 +139,9 @@ identical in form to create rendering because `CREATE OR REPLACE VIEW` is idempo
 ### Requirement: View drop rendering
 
 The renderer for `DropViewOp` SHALL emit an `op.execute()` call with a `DROP VIEW` statement constructed from the view's
-schema and name.
+schema and name. Because the statement is built from catalog identifiers rather than from a definition PostgreSQL has
+already quoted, both the schema and the view name SHALL be passed through the dialect's identifier preparer
+(`autogen_context.dialect.identifier_preparer`), which double-quotes only the identifiers that require it.
 
 #### Scenario: Render drop view
 
@@ -150,6 +152,13 @@ schema and name.
 
 - **WHEN** a `DropViewOp` is rendered with `current.schema="reporting"`, `current.name="monthly_summary"`
 - **THEN** the output is `op.execute("DROP VIEW reporting.monthly_summary")`
+
+#### Scenario: Render drop view with an identifier that requires quoting
+
+- **WHEN** a `DropViewOp` is rendered with a schema or name that is mixed case, contains whitespace, is a reserved word,
+  or contains a double quote
+- **THEN** that identifier is double-quoted in the emitted DDL, with embedded double quotes doubled — e.g.
+  `current.schema="public"`, `current.name="Order Summary"` renders `DROP VIEW public."Order Summary"`
 
 ### Requirement: View renderer registration
 

@@ -5,6 +5,7 @@ import re
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.dialects.postgresql.base import PGDialect
 
 from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
 from alembic_pg_autogen.ops import (
@@ -34,9 +35,10 @@ from alembic_pg_autogen.render import (
 
 
 def _ctx() -> MagicMock:
-    """Return a mock AutogenContext with an imports set."""
+    """Return a mock AutogenContext with an imports set and a real PostgreSQL dialect."""
     ctx = MagicMock()
     ctx.imports = set()
+    ctx.dialect = PGDialect()
     return ctx
 
 
@@ -173,6 +175,26 @@ class TestRenderDropView:
         result = _render_drop_view(_ctx(), op)
         assert result == "op.execute('DROP VIEW reporting.monthly_summary')"
 
+    @pytest.mark.parametrize(
+        ("schema", "name", "expected_sql"),
+        [
+            ("public", "orderView", 'DROP VIEW public."orderView"'),
+            ("public", "Order Summary", 'DROP VIEW public."Order Summary"'),
+            ("public", "select", 'DROP VIEW public."select"'),
+            ("Reporting", "monthly_summary", 'DROP VIEW "Reporting".monthly_summary'),
+            ("My Schema", "My View", 'DROP VIEW "My Schema"."My View"'),
+            ("public", 'weird"name', 'DROP VIEW public."weird""name"'),
+        ],
+    )
+    def test_drop_view_quotes_identifiers(self, schema: str, name: str, expected_sql: str):
+        """Identifiers that are not lowercase-safe must be double-quoted, or the migration fails at runtime."""
+        op = DropViewOp(ViewInfo(schema, name, "CREATE OR REPLACE VIEW …"))
+
+        result = _render_drop_view(_ctx(), op)
+
+        recorded = _execute_rendered(result)
+        assert recorded == [expected_sql]
+
 
 class TestQuoteDDL:
     """``_quote_ddl`` must produce a Python literal that survives Alembic's re-indentation."""
@@ -272,6 +294,15 @@ class _RecordingOp:
 
     def execute(self, ddl: str) -> None:
         self.executed.append(ddl)
+
+
+def _execute_rendered(rendered: str) -> list[str]:
+    """Execute rendered migration source against a recording ``op`` and return the DDL it ran."""
+    namespace: dict[str, object] = {"op": _RecordingOp()}
+    exec(rendered, namespace)  # noqa: S102
+    recorded = namespace["op"]
+    assert isinstance(recorded, _RecordingOp)
+    return recorded.executed
 
 
 class TestNoImportsInjected:
