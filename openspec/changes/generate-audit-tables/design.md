@@ -90,8 +90,10 @@ A mirrored column is `Column(name, source.type, nullable=True)`. Every constrain
 
 Types are shared by reference, so a `sa.Enum` mirrors as the same PostgreSQL enum type rather than a second one.
 
-The audit table gets its own `aud_id` identity primary key, a non-unique index on the source table's primary key columns
-(so "history of row X" is a lookup, not a scan), and an index on `aud_at`.
+The audit table gets its own `aud_id` identity primary key, an index on `aud_at`, and — when the source table has
+primary key columns — a non-unique index on those columns, so "history of row X" is a lookup rather than a scan. A
+keyless source table is audited without that second index; building one over an empty column list is not valid DDL, and
+there is nothing to look a row up by.
 
 ### D4: Only `aud_action` is written by the trigger; every other audit column comes from its server default
 
@@ -104,12 +106,28 @@ own server defaults:
 | `aud_id`     | `bigint`      | identity                  |
 | `aud_action` | `text`        | the trigger, from `TG_OP` |
 | `aud_at`     | `timestamptz` | `DEFAULT now()`           |
-| `aud_actor`  | `text`        | `DEFAULT current_user`    |
+| `aud_actor`  | `text`        | `DEFAULT session_user`    |
 
 So a user adding `aud_txid bigint DEFAULT pg_current_xact_id()` gets it populated without the generator knowing what a
 transaction id is, and the function body depends only on the mirrored columns. `AuditSpec` validation enforces the rule:
 a bookkeeping column that is neither `aud_action` nor defaulted nor nullable is rejected at build time, not at the first
 `INSERT`.
+
+`session_user` rather than `current_user`, and the distinction is the whole value of the column. The default is
+evaluated during the `INSERT` the trigger performs, which runs inside the `SECURITY DEFINER` function — where
+`current_user` is the function's *owner*, identically for every writer. An audit trail whose actor column records the
+same role for all rows records nothing. `session_user` is the authenticated login role and is unchanged by the privilege
+switch, so it survives to the audit row.
+
+It is also unchanged by `SET ROLE`, which is the right trade for a trail (the login is the accountable identity) but
+wrong for an application that multiplexes end users over one connection. Those callers set an application actor and
+declare the column themselves:
+
+```python
+Column("aud_actor", Text, server_default=text("coalesce(current_setting('app.actor', true), session_user)"))
+```
+
+which D4's rule accommodates without the generator learning anything about it.
 
 ### D5: `AFTER ... FOR EACH ROW`, one function per audited table
 
@@ -180,9 +198,16 @@ every write. This is inherent to the pattern rather than to generating it, but g
 20 tables at once. Documented, not solved.
 
 **R3 — `add_audit_tables()` mutates its argument.** Calling it twice on the same `MetaData` must be idempotent rather
-than raising `InvalidRequestError` for a duplicate table; the implementation checks `metadata.tables` first. Order also
-matters: it must run after every model module is imported, or it derives from a partially populated `MetaData` and
-silently audits a subset.
+than raising `InvalidRequestError` for a duplicate table, so the implementation checks `metadata.tables` first. Finding
+a name taken is not enough to proceed, though: a user migrating off a hand-rolled audit setup already has a `users_aud`
+in their models, and silently adopting it would point the generated function at a table whose columns it does not match.
+So the derived table is stamped `info={"alembic_pg_autogen_audit": True}`, and the check is for that stamp, not for the
+name — a stamped table is ours to rebuild, an unstamped one raises `ValueError` naming the collision. Ownership is the
+question being asked, and only a marker answers it; comparing structure would reject a table we built under a spec that
+has since changed, and accept one someone else happened to shape the same way.
+
+Order matters too: `add_audit_tables()` must run after every model module is imported, or it derives from a partially
+populated `MetaData` and silently audits a subset.
 
 **R4 — `SECURITY DEFINER` makes the function owner's rights the ones that matter.** A pinned `search_path` closes the
 usual hole, and the audit table should not be writable by the roles writing the source table, or the trail can be

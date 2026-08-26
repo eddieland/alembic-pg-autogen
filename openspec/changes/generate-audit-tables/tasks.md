@@ -3,22 +3,25 @@
 - [ ] 1.1 Add `src/alembic_pg_autogen/audit.py` with an `AuditSpec` `NamedTuple` — `tables`, `suffix` (`"_aud"`),
   `schema`, `events`, `exclude_columns`, `audit_columns`, and the function/trigger naming callables
 - [ ] 1.2 Add default audit columns — `aud_id` identity primary key, `aud_action`, `aud_at` defaulting to `now()`,
-  `aud_actor` defaulting to `current_user` — as a module-level `Final`
-- [ ] 1.3 Validate the specification: every named table present in the metadata, no bookkeeping name colliding with a
-  mirrored column, no non-`aud_action` bookkeeping column that is `NOT NULL` without a server default
+  `aud_actor` defaulting to **`session_user`** (not `current_user`, which inside the `SECURITY DEFINER` function is the
+  owner) — as a module-level `Final`
+- [ ] 1.3 Validate the specification: every named table present in the metadata, `events` a non-empty subset of insert /
+  update / delete, no bookkeeping name colliding with a mirrored column, no non-`aud_action` bookkeeping column that is
+  `NOT NULL` without a server default
 - [ ] 1.4 Add specification tests to `tests/alembic_pg_autogen/test_audit.py` — selection, exclusion, each `ValueError`
-  path
+  path including empty and unsupported `events`
 
 ## 2. Audit Table Derivation
 
 - [ ] 2.1 Add `_derive_audit_table(source, spec)` building `Column(name, source.type, nullable=True)` per mirrored
   column, sharing type objects by reference so a named `Enum` is not duplicated
-- [ ] 2.2 Prepend the bookkeeping columns and add the two indexes — non-unique on the source primary key columns, and on
-  `aud_at`
+- [ ] 2.2 Prepend the bookkeeping columns, stamp the table `info={"alembic_pg_autogen_audit": True}`, and add the
+  indexes — always on `aud_at`, and on the source primary key columns only when there are any (an index over an empty
+  column list is not valid DDL)
 - [ ] 2.3 Confirm no constraint survives mirroring: no primary key, foreign key, unique, check, `NOT NULL`, server
   default, or identity
-- [ ] 2.4 Add derivation tests — column names and types, constraint stripping, index placement, composite primary key,
-  schema qualification, `Enum` sharing
+- [ ] 2.4 Add derivation tests — column names and types, constraint stripping, index placement, keyless source table,
+  composite primary key, schema qualification, `Enum` sharing
 
 ## 3. DDL Generation
 
@@ -36,10 +39,12 @@
 - [ ] 4.1 Add `AuditObjects` `NamedTuple` (`tables`, `functions`, `triggers`) and `add_audit_tables(metadata, spec)`
   attaching each derived table to *metadata* and returning the generated DDL
 - [ ] 4.2 Make attachment idempotent — check `metadata.tables` before constructing, so a second call is a no-op rather
-  than an `InvalidRequestError`
-- [ ] 4.3 Export `AuditSpec`, `AuditObjects`, and `add_audit_tables` from `src/alembic_pg_autogen/__init__.py` and add
+  than an `InvalidRequestError`, keying the check on the `info` stamp rather than the name, and raising `ValueError`
+  when the derived name is occupied by a table this generator did not produce
+- [ ] 4.3 Add entry-point tests — repeat calls, and the `ValueError` for an unstamped table occupying the derived name
+- [ ] 4.4 Export `AuditSpec`, `AuditObjects`, and `add_audit_tables` from `src/alembic_pg_autogen/__init__.py` and add
   them to `__all__`
-- [ ] 4.4 Update export tests in `tests/alembic_pg_autogen/test_import.py`
+- [ ] 4.5 Update export tests in `tests/alembic_pg_autogen/test_import.py`
 
 ## 5. End-to-End Verification
 
@@ -53,8 +58,11 @@
   function definition against the pre-upgrade catalog snapshot byte for byte
 - [ ] 5.5 Verify the trail is actually written — insert, update, delete against a live database, then assert three audit
   rows with the right `aud_action`, values, `aud_at`, and `aud_actor`
-- [ ] 5.6 Verify removal — dropping a table from `AuditSpec.tables` drops its trigger, function, and audit table
-- [ ] 5.7 Verify composition — generated DDL spliced alongside hand-written `pg_functions` leaves neither set dropped
+- [ ] 5.6 Verify the actor survives the privilege switch — write to an audited table as a role that does not own the
+  trigger function, and assert `aud_actor` is that role rather than the owner (the `current_user`/`session_user`
+  distinction is invisible when the test runs as the owner, so the test must use a second role)
+- [ ] 5.7 Verify removal — dropping a table from `AuditSpec.tables` drops its trigger, function, and audit table
+- [ ] 5.8 Verify composition — generated DDL spliced alongside hand-written `pg_functions` leaves neither set dropped
 
 ## 6. Documentation
 
@@ -62,8 +70,9 @@
   (`pg_functions=[*PG_FUNCTIONS, *audit.functions]`) and why assigning instead drops the user's own functions
 - [ ] 6.2 Document the two hazards from the design: a dropped source column destroys that column's history (with the
   `include_object` recipe), and `add_audit_tables()` must run after every model module is imported
-- [ ] 6.3 Document the `SECURITY DEFINER` note — the audit table should not be writable by the roles writing the source
-  table
+- [ ] 6.3 Document the `SECURITY DEFINER` notes — the audit table should not be writable by the roles writing the source
+  table, and `aud_actor` records `session_user` (with the `current_setting('app.actor', …)` recipe for applications that
+  multiplex end users over one connection)
 - [ ] 6.4 Add `AuditSpec`, `AuditObjects`, and `add_audit_tables` to `docs/api.rst`
 - [ ] 6.5 Run `make lint` and `uv run mdformat --check README.md CLAUDE.md openspec/`
 - [ ] 6.6 Run the full suite against PostgreSQL and confirm existing tests still pass

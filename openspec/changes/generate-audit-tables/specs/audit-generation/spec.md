@@ -4,7 +4,8 @@
 
 The module SHALL provide an `AuditSpec` configuration object naming the tables to audit and the shape of the derived
 objects. It SHALL expose at least `tables`, `suffix` (default `"_aud"`), `schema`, `events` (default insert, update, and
-delete), `exclude_columns`, and the audit bookkeeping columns.
+delete), `exclude_columns`, and the audit bookkeeping columns. `events` SHALL be validated as a non-empty subset of the
+supported row events before any DDL is rendered.
 
 #### Scenario: Table names select what is audited
 
@@ -16,6 +17,11 @@ delete), `exclude_columns`, and the audit bookkeeping columns.
 
 - **WHEN** `AuditSpec(tables=["nonexistent"])` is used
 - **THEN** `add_audit_tables()` raises `ValueError` naming the missing table
+
+#### Scenario: An empty or unsupported event selection is an error
+
+- **WHEN** `AuditSpec.events` is empty, or names an event outside insert, update, and delete
+- **THEN** `add_audit_tables()` raises `ValueError`, rather than rendering an `AFTER ... ON` clause with no events
 
 #### Scenario: Excluded columns are not mirrored
 
@@ -42,13 +48,26 @@ the configured suffix, and attach it to the caller's `MetaData` so Alembic's own
 
 - **WHEN** an audit table is derived with the default specification
 - **THEN** it has `aud_id` (identity primary key), `aud_action`, `aud_at` (defaulting to `now()`), and `aud_actor`
-  (defaulting to `current_user`)
+  (defaulting to `session_user`)
+
+#### Scenario: The actor column survives the privilege switch
+
+- **WHEN** a role other than the trigger function's owner writes to an audited table
+- **THEN** the recorded `aud_actor` is that writer's login role, not the function owner
+- **AND** the default is `session_user`, because `current_user` inside a `SECURITY DEFINER` function is the owner and
+  would record the same value for every writer
 
 #### Scenario: Source primary key is indexed
 
 - **WHEN** an audit table is derived for a table with primary key `id`
 - **THEN** the audit table carries a non-unique index on `id`
 - **AND** an index on `aud_at`
+
+#### Scenario: A keyless source table omits the lookup index
+
+- **WHEN** an audit table is derived for a source table with no primary key columns
+- **THEN** the audit table carries the `aud_at` index and no source-row lookup index
+- **AND** derivation succeeds rather than emitting an index over an empty column list
 
 #### Scenario: Enum types are shared, not duplicated
 
@@ -60,6 +79,14 @@ the configured suffix, and attach it to the caller's `MetaData` so Alembic's own
 - **WHEN** `add_audit_tables()` is called twice on the same `MetaData` with the same specification
 - **THEN** the second call does not raise
 - **AND** the metadata contains one audit table per audited table
+- **AND** each derived table is marked as generated, so the second call recognizes its own work
+
+#### Scenario: An unrelated table occupying the derived name is an error
+
+- **WHEN** the metadata already contains a table named `users_aud` that this generator did not derive — a hand-rolled
+  audit table, or any unrelated table
+- **THEN** `add_audit_tables()` raises `ValueError` naming the collision
+- **AND** does not adopt it, which would point the generated function at a table whose columns it does not match
 
 #### Scenario: A bookkeeping name colliding with a source column is an error
 
