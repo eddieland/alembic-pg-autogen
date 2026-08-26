@@ -6,13 +6,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from alembic.autogenerate.render import renderers
+from alembic.autogenerate.render import render_op, renderers
 
 from alembic_pg_autogen.ops import (
     CreateFunctionOp,
+    CreateIndexConcurrentlyOp,
     CreateTriggerOp,
     CreateViewOp,
     DropFunctionOp,
+    DropIndexConcurrentlyOp,
     DropTriggerOp,
     DropViewOp,
     ReplaceFunctionOp,
@@ -22,6 +24,7 @@ from alembic_pg_autogen.ops import (
 
 if TYPE_CHECKING:
     from alembic.autogenerate.api import AutogenContext
+    from alembic.operations.ops import MigrateOperation
 
 
 @renderers.dispatch_for(CreateFunctionOp)
@@ -91,6 +94,35 @@ def _render_drop_view(autogen_context: AutogenContext, op: DropViewOp) -> str:
     preparer = autogen_context.dialect.identifier_preparer
     qualified = f"{preparer.quote_schema(op.current.schema)}.{preparer.quote(op.current.name)}"
     return _render_execute(f"DROP VIEW {qualified}")
+
+
+@renderers.dispatch_for(CreateIndexConcurrentlyOp)
+def _render_create_index_concurrently(autogen_context: AutogenContext, op: CreateIndexConcurrentlyOp) -> str:
+    """Render an ``op.create_index(..., postgresql_concurrently=True)`` inside an autocommit block."""
+    return _render_autocommit_block(autogen_context, op.inner)
+
+
+@renderers.dispatch_for(DropIndexConcurrentlyOp)
+def _render_drop_index_concurrently(autogen_context: AutogenContext, op: DropIndexConcurrentlyOp) -> str:
+    """Render an ``op.drop_index(..., postgresql_concurrently=True)`` inside an autocommit block."""
+    return _render_autocommit_block(autogen_context, op.inner)
+
+
+def _render_autocommit_block(autogen_context: AutogenContext, inner: MigrateOperation) -> str:
+    """Render *inner* with Alembic's own renderer, wrapped in ``op.get_context().autocommit_block()``.
+
+    PostgreSQL refuses ``CREATE INDEX CONCURRENTLY`` inside a transaction block, and Alembic runs migrations in one by
+    default.  ``autocommit_block()`` is Alembic's escape hatch: it commits the open transaction, runs the body in
+    autocommit mode, and opens a fresh transaction afterwards.
+
+    Delegating the body to :func:`~alembic.autogenerate.render.render_op` keeps the generated call identical to the one
+    Alembic would have emitted on its own — every ``postgresql_*`` keyword included — so only the surrounding block is
+    this library's contribution.  Alembic indents the whole rendered string uniformly, which preserves the relative
+    indentation of the block body.
+    """
+    body = "\n".join(render_op(autogen_context, inner))
+    indented = "\n".join(f"    {line}" if line else line for line in body.splitlines())
+    return f"with op.get_context().autocommit_block():\n{indented}"
 
 
 def _render_execute(ddl: str) -> str:

@@ -15,6 +15,7 @@ from alembic_pg_autogen import (
     current_schema,
     inspect_check_constraints,
     inspect_functions,
+    inspect_indexes,
     inspect_triggers,
     inspect_views,
 )
@@ -440,3 +441,100 @@ class TestCurrentSchemaIntegration:
         pg_conn.execute(text("SET search_path TO test_current_schema"))
 
         assert current_schema(pg_conn) == "test_current_schema"
+
+
+@pytest.mark.integration
+class TestInspectIndexesIntegration:
+    def _table(self, conn: Connection, name: str) -> None:
+        conn.execute(
+            text(f"CREATE TABLE public.{name} (id integer PRIMARY KEY, a text, b text, status text, data jsonb)")
+        )
+
+    def test_shape_excludes_identity_and_covers_every_feature(self, pg_conn: Connection):
+        self._table(pg_conn, "test_ix_feat")
+        pg_conn.execute(
+            text(
+                "CREATE INDEX test_ix_all ON public.test_ix_feat (a, lower(b)) INCLUDE (status) WHERE data IS NOT NULL"
+            )
+        )
+
+        results = inspect_indexes(pg_conn, schemas=["public"], table_names=["test_ix_feat"])
+
+        assert len(results) == 1
+        info = results[0]
+        assert (info.schema, info.table_name, info.name) == ("public", "test_ix_feat", "test_ix_all")
+        assert info.unique is False
+        assert info.shape == "USING btree (a, lower(b)) INCLUDE (status) WHERE (data IS NOT NULL)"
+
+    def test_operator_class_and_access_method_are_part_of_the_shape(self, pg_conn: Connection):
+        self._table(pg_conn, "test_ix_ops")
+        pg_conn.execute(text("CREATE INDEX test_ix_gin ON public.test_ix_ops USING gin (data jsonb_path_ops)"))
+
+        (info,) = inspect_indexes(pg_conn, schemas=["public"], table_names=["test_ix_ops"])
+
+        assert info.shape == "USING gin (data jsonb_path_ops)"
+
+    def test_unique_is_carried_separately_from_the_shape(self, pg_conn: Connection):
+        self._table(pg_conn, "test_ix_uniq")
+        pg_conn.execute(text("CREATE UNIQUE INDEX test_ix_u ON public.test_ix_uniq (a)"))
+
+        (info,) = inspect_indexes(pg_conn, schemas=["public"], table_names=["test_ix_uniq"])
+
+        # ``UNIQUE`` sits in the statement head, ahead of the name, so it cannot ride along in the shape.
+        assert info.unique is True
+        assert info.shape == "USING btree (a)"
+        assert "UNIQUE" not in info.shape
+
+    def test_nulls_not_distinct_is_part_of_the_shape(self, pg_conn: Connection):
+        if pg_conn.dialect.server_version_info is None or pg_conn.dialect.server_version_info < (15,):
+            pytest.skip("NULLS NOT DISTINCT requires PostgreSQL 15 or newer")
+        self._table(pg_conn, "test_ix_nnd")
+        pg_conn.execute(text("CREATE UNIQUE INDEX test_ix_n ON public.test_ix_nnd (a) NULLS NOT DISTINCT"))
+
+        (info,) = inspect_indexes(pg_conn, schemas=["public"], table_names=["test_ix_nnd"])
+
+        assert info.unique is True
+        assert info.shape == "USING btree (a) NULLS NOT DISTINCT"
+
+    def test_constraint_backed_indexes_excluded(self, pg_conn: Connection):
+        pg_conn.execute(
+            text(
+                "CREATE TABLE public.test_ix_con (id integer PRIMARY KEY, a text UNIQUE, b int4range, EXCLUDE USING gist (b WITH &&))"
+            )
+        )
+
+        results = inspect_indexes(pg_conn, schemas=["public"], table_names=["test_ix_con"])
+
+        assert results == []
+
+    def test_identifiers_containing_using_are_stripped_correctly(self, pg_conn: Connection):
+        """A naive split on the first `` USING `` would cut inside the quoted identifiers."""
+        pg_conn.execute(text('CREATE TABLE public."tbl USING x" (a text)'))
+        pg_conn.execute(text('CREATE INDEX "ix USING y" ON public."tbl USING x" (a)'))
+
+        (info,) = inspect_indexes(pg_conn, schemas=["public"], table_names=["tbl USING x"])
+
+        assert info.name == "ix USING y"
+        assert info.shape == "USING btree (a)"
+
+    def test_schema_filtering(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE SCHEMA test_ix_schema"))
+        pg_conn.execute(text("CREATE TABLE test_ix_schema.t (a text)"))
+        pg_conn.execute(text("CREATE INDEX test_ix_scoped ON test_ix_schema.t (a)"))
+
+        results = inspect_indexes(pg_conn, schemas=["test_ix_schema"])
+
+        assert [i.name for i in results] == ["test_ix_scoped"]
+
+    def test_table_filtering(self, pg_conn: Connection):
+        self._table(pg_conn, "test_ix_one")
+        self._table(pg_conn, "test_ix_two")
+        pg_conn.execute(text("CREATE INDEX test_ix_only_one ON public.test_ix_one (a)"))
+        pg_conn.execute(text("CREATE INDEX test_ix_only_two ON public.test_ix_two (a)"))
+
+        results = inspect_indexes(pg_conn, schemas=["public"], table_names=["test_ix_one"])
+
+        assert [i.name for i in results] == ["test_ix_only_one"]
+
+    def test_no_indexes_returns_empty(self, pg_conn: Connection):
+        assert inspect_indexes(pg_conn, schemas=["nonexistent"]) == []

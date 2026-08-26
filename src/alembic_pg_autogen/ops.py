@@ -10,6 +10,8 @@ from alembic.operations.ops import MigrateOperation
 from typing_extensions import override
 
 if TYPE_CHECKING:
+    from alembic.operations.ops import CreateIndexOp, DropIndexOp
+
     from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
 
 
@@ -188,3 +190,49 @@ class DropViewOp(MigrateOperation):
     def to_diff_tuple(self) -> tuple[str, str, str]:
         """Return a hashable tuple for debugging and comparison."""
         return ("drop_view", self.current.schema, self.current.name)
+
+
+class CreateIndexConcurrentlyOp(MigrateOperation):
+    """Create an index with ``CREATE INDEX CONCURRENTLY``, outside the migration's transaction.
+
+    Wraps Alembic's own :class:`~alembic.operations.ops.CreateIndexOp` rather than replacing it, so the rendered call
+    is still ``op.create_index(...)`` with the arguments Alembic would have produced.  What this op adds is the
+    ``postgresql_concurrently=True`` keyword and, at render time, the ``autocommit_block()`` that keyword requires:
+    PostgreSQL refuses to build an index concurrently inside a transaction block.
+    """
+
+    inner: CreateIndexOp
+
+    def __init__(self, inner: CreateIndexOp) -> None:
+        inner.kw["postgresql_concurrently"] = True
+        self.inner = inner
+
+    @override
+    def reverse(self) -> DropIndexConcurrentlyOp:
+        """Reverse is dropping the newly created index, also concurrently."""
+        return DropIndexConcurrentlyOp(self.inner.reverse())
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, object]:
+        """Return a tuple mirroring Alembic's own ``add_index`` diff entry."""
+        return ("add_index", self.inner.to_index())
+
+
+class DropIndexConcurrentlyOp(MigrateOperation):
+    """Drop an index with ``DROP INDEX CONCURRENTLY``, outside the migration's transaction."""
+
+    inner: DropIndexOp
+
+    def __init__(self, inner: DropIndexOp) -> None:
+        inner.kw["postgresql_concurrently"] = True
+        self.inner = inner
+
+    @override
+    def reverse(self) -> CreateIndexConcurrentlyOp:
+        """Reverse is recreating the dropped index, also concurrently."""
+        return CreateIndexConcurrentlyOp(self.inner.reverse())
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, object]:
+        """Return a tuple mirroring Alembic's own ``remove_index`` diff entry."""
+        return ("remove_index", self.inner.to_index())
