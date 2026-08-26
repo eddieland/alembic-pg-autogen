@@ -46,4 +46,4 @@ marker. They require a PostgreSQL container that runs under Docker.
 
 ## License
 
-Your contributions are licensed under the MIT License.
+You agree to license your contributions under the MIT License when you open a pull request.
