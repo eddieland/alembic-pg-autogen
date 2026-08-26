@@ -196,7 +196,7 @@ class CreateIndexConcurrentlyOp(MigrateOperation):
     """Create an index with ``CREATE INDEX CONCURRENTLY``, outside the migration's transaction.
 
     Wraps Alembic's own :class:`~alembic.operations.ops.CreateIndexOp` rather than replacing it, so the rendered call
-    is still ``op.create_index(...)`` with the arguments Alembic would have produced.  What this op adds is the
+    is still ``op.create_index(...)`` with the arguments Alembic would have produced. What this op adds is the
     ``postgresql_concurrently=True`` keyword and, at render time, the ``autocommit_block()`` that keyword requires:
     PostgreSQL refuses to build an index concurrently inside a transaction block.
     """

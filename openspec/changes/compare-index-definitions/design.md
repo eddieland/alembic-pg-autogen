@@ -5,8 +5,8 @@ through a second pattern: Alembic owns existence, this library owns whether two 
 Indexes are a third case, and the difference matters for every decision below.
 
 Alembic has an opinion about indexes, and it is a partial one. `_ix_constraint_sig` compares columns, expressions,
-uniqueness, and — through `PostgresqlImpl._dialect_options` — `nulls_not_distinct`. Everything else a PostgreSQL index
-can be is absent from the signature: the `WHERE` predicate, the access method, `INCLUDE`, and operator classes. And the
+uniqueness, and, through `PostgresqlImpl._dialect_options`, `nulls_not_distinct`. Everything else a PostgreSQL index can
+be is absent from the signature: the `WHERE` predicate, the access method, `INCLUDE`, and operator classes. And the
 expression comparison it does perform runs through `_cleanup_index_expr`, which lowercases and strips quotes, casts,
 sort modifiers, and whitespace before comparing strings.
 
@@ -37,8 +37,8 @@ design has to say what happens when both comparators look at the same index.
 ### D1: Source desired state from `target_metadata`, not from DDL strings
 
 Same reasoning as check constraints. Indexes already live in SQLAlchemy models and Alembic already manages their
-existence from there. A parallel DDL channel would need an ownership model — table scoping, metadata-name exclusion,
-warnings for indexes declared twice — and every rule in it is a chance to drop an index the user wanted.
+existence from there. A parallel DDL channel would need an ownership model: table scoping, metadata-name exclusion,
+warnings for indexes declared twice. Every rule in it is a chance to drop an index the user wanted.
 
 Reading from `target_metadata` needs no ownership model: Alembic owns existence, this library owns definition.
 
@@ -49,7 +49,7 @@ today.
 
 `pg_get_indexdef()` emits
 `CREATE [UNIQUE] INDEX <name> ON <schema>.<table> USING <am> (<keys>) [INCLUDE (...)] [NULLS NOT DISTINCT] [WITH (...)] [WHERE ...]`.
-The head is identity — matched separately, by name — and the tail is what this comparator is actually about. `IndexInfo`
+The head is identity, matched separately by name, and the tail is what this comparator is actually about. `IndexInfo`
 therefore carries `(unique, shape)` as its payload, where *shape* is everything from `USING` onward.
 
 Splitting identity off is what makes the desired side comparable at all: it is read back from a different table (D4), so
@@ -61,7 +61,7 @@ types follow, and the docstring says so.
 
 **Splitting is done in SQL, and verified.** The prefix is rebuilt with `quote_ident()` and compared against the
 definition's leading characters with `left()`; only on a match is it stripped. Splitting on the first `" USING "`
-instead would be wrong for a real if unlikely case — an index named `"ix USING y"` on a table named `"tbl USING x"`
+instead would be wrong for a real if unlikely case. An index named `"ix USING y"` on a table named `"tbl USING x"`
 renders a definition whose first `" USING "` sits inside a quoted identifier. An index whose prefix does not match is
 dropped from the result with a warning rather than reported with an unstripped shape, because an unstripped shape could
 never equal a canonicalized one and would show up as a permanent phantom difference.
@@ -70,8 +70,8 @@ never equal a canonicalized one and would show up as a permanent phantom differe
 
 The comparator appends `ops.DropIndexOp.from_index(reflected)` and `ops.CreateIndexOp.from_index(metadata_index)`.
 
-SQLAlchemy's PostgreSQL reflection is lossless for this purpose — it returns `postgresql_ops`, `postgresql_using`,
-`postgresql_where`, `postgresql_include`, and `postgresql_with` — so the reflected index reconstructs a faithful
+SQLAlchemy's PostgreSQL reflection is lossless for this purpose, returning `postgresql_ops`, `postgresql_using`,
+`postgresql_where`, `postgresql_include`, and `postgresql_with`, so the reflected index reconstructs a faithful
 `op.create_index()` for the downgrade. Generated output is ordinary Alembic:
 
 ```python
@@ -81,7 +81,7 @@ def upgrade() -> None:
 ```
 
 **Alternative considered:** custom ops rendering `op.execute()` with the canonical DDL, matching how this library
-handles functions, triggers, and views. Rejected for the reason check constraints rejected it — it would duplicate
+handles functions, triggers, and views. Rejected for the reason check constraints rejected it: it would duplicate
 operations Alembic already has, produce raw SQL where users expect `op.create_index()`, and bypass `include_object`
 filters. That pattern exists because Alembic has no `CreateFunctionOp`; it does have `CreateIndexOp`.
 
@@ -93,9 +93,9 @@ savepoint back.
 
 This is the one place the check-constraint design does not carry over. There, probing the real table was free:
 `NOT VALID` skips the validation scan, and the design doc explicitly rejected a clone as trading a guaranteed-identical
-deparse context for a very-likely-identical one. `CREATE INDEX` has no `NOT VALID` — it builds the index. Measured on a
-500k-row table: 1218 ms for an expression index and 2138 ms for a GIN index, against 0.8 ms each on an empty clone, plus
-1.4 ms to create the clone. Autogenerate against a developer's database would stall for seconds per index.
+deparse context for a very-likely-identical one. `CREATE INDEX` has no `NOT VALID`, so it builds the index. Measured on
+a 500k-row table: 1218 ms for an expression index and 2138 ms for a GIN index, against 0.8 ms each on an empty clone,
+plus 1.4 ms to create the clone. Autogenerate against a developer's database would stall for seconds per index.
 
 The clone also removes the risk the check-constraint design had to document: probing the real table takes a lock that
 PostgreSQL holds until the transaction ends, so a probed table stayed locked for the rest of the autogenerate run.
@@ -105,17 +105,18 @@ Nothing here touches the real table beyond reading its shape.
 to produce byte-identical shapes for expression, predicate, opclass, `INCLUDE`, GIN, and `NULLS NOT DISTINCT` indexes.
 
 **Redirecting the DDL onto the clone** takes two mechanisms together, because either alone leaves a case uncovered. The
-clone takes the real table's own name, which catches metadata that leaves its schema implicit — `pg_temp` is searched
-first, so an unqualified `ON t` resolves to the clone. Metadata that names its schema compiles to `ON myschema.t` and
-would hit the real table, so the DDL executes under `schema_translate_map={None: "pg_temp", schema: "pg_temp"}`. Mapping
-to `None` does not work: SQLAlchemy renders the default schema as `public` rather than omitting it.
+clone takes the real table's own name, which catches metadata that leaves its schema implicit, because `pg_temp` is
+searched first, so an unqualified `ON t` resolves to the clone. Metadata that names its schema compiles to
+`ON myschema.t` and would hit the real table, so the DDL executes under
+`schema_translate_map={None: "pg_temp", schema: "pg_temp"}`. Mapping to `None` does not work: SQLAlchemy renders the
+default schema as `public` rather than omitting it.
 
 **Alternative considered:** dropping and recreating the real index inside the savepoint under its own name, which would
-make the definitions compare with no splitting at all. Rejected — it pays the full build cost twice and briefly removes
-a real index.
+make the definitions compare with no splitting at all. Rejected, because it pays the full build cost twice and briefly
+removes a real index.
 
 **Reading the probe back takes two candidate spellings.** `pg_get_indexdef()` always schema-qualifies the table
-reference — verified for temporary and regular tables alike, under every `search_path` — but *how* it spells a temporary
+reference, verified for temporary and regular tables alike under every `search_path`, but *how* it spells a temporary
 schema changed. PostgreSQL 15 deparses through `get_namespace_name_or_temp()`, which collapses the backing `pg_temp_3`
 to the alias `pg_temp`; PostgreSQL 14 prints `pg_temp_3`. The probe query therefore builds both prefixes and strips
 whichever matches, rather than asking the server its version. A definition matching neither yields NULL and is reported
@@ -133,7 +134,7 @@ Testing found no case where Alembic reports a difference for two identical index
 a real finding.
 
 **Alternative considered:** registering under Alembic's own `"indexes"` subgroup with `qualifier="postgresql"` and
-returning `STOP`, which the dispatcher supports and which would replace Alembic's comparison outright. Rejected —
+returning `STOP`, which the dispatcher supports and which would replace Alembic's comparison outright. Rejected, because
 `_compare_indexes_and_uniques` also owns unique constraints and index existence, so stopping it would mean
 reimplementing both.
 
@@ -141,7 +142,7 @@ reimplementing both.
 
 `pg_index_concurrently=True` makes the comparator wrap each operation in `CreateIndexConcurrentlyOp` /
 `DropIndexConcurrentlyOp`. These set `postgresql_concurrently=True` on the operation they wrap and render it through
-`render_op()` — Alembic's own renderer — inside `op.get_context().autocommit_block()`:
+`render_op()`, Alembic's own renderer, inside `op.get_context().autocommit_block()`:
 
 ```python
 with op.get_context().autocommit_block():
@@ -157,8 +158,8 @@ throwaway clone, where concurrency would be pure cost.
 
 ### D7: Degrade to "assume unchanged" on any failure
 
-An index that will not compile or will not apply — an expression referencing a column that does not exist yet, an
-operator class the access method does not accept — produces a logged warning and no operation. Each probe runs in its
+An index that will not compile or will not apply, such as an expression referencing a column that does not exist yet or
+an operator class the access method does not accept, produces a logged warning and no operation. Each probe runs in its
 own nested savepoint, so one unusable index does not cost the rest of the table its comparison.
 
 The caught type is `SQLAlchemyError`, not `DBAPIError`. Compilation happens inside `execute()`, so an index SQLAlchemy
@@ -189,4 +190,4 @@ disableable.
 
 ## Open Questions
 
-_(none — all significant decisions resolved above)_
+_(none; all significant decisions resolved above)_

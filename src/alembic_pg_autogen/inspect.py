@@ -62,18 +62,18 @@ class CheckConstraintInfo(NamedTuple):
 class IndexInfo(NamedTuple):
     """A PostgreSQL index as loaded from the system catalog.
 
-    Identity is ``(schema, table_name, name)``.  The payload is ``(unique, shape)`` rather than a single ``definition``
+    Identity is ``(schema, table_name, name)``. The payload is ``(unique, shape)`` rather than a single ``definition``
     field, because a ``CREATE INDEX`` statement carries part of its meaning ahead of the part that varies: ``UNIQUE``
-    sits in the statement head, next to the name and table that make up the identity.  Splitting it out keeps *shape*
+    sits in the statement head, next to the name and table that make up the identity. Splitting it out keeps *shape*
     a self-contained fragment that compares as a plain string.
 
-    ``shape`` is everything ``pg_get_indexdef()`` emits from ``USING`` onward — access method, key expressions and
+    ``shape`` is everything ``pg_get_indexdef()`` emits from ``USING`` onward: access method, key expressions and
     their operator classes, ``INCLUDE``, ``NULLS NOT DISTINCT``, storage parameters, and the ``WHERE`` predicate::
 
         USING btree (lower(email)) INCLUDE (name) WHERE (deleted_at IS NULL)
 
     Because the index name and table are stripped, two shapes are comparable even when they were read back from
-    different tables — which is exactly what :func:`canonicalize_indexes
+    different tables, which is exactly what :func:`canonicalize_indexes
     <alembic_pg_autogen.canonicalize.canonicalize_indexes>` relies on when it probes a throwaway clone.
     """
 
@@ -205,23 +205,23 @@ def inspect_indexes(
     """Bulk-load index definitions from PostgreSQL system catalogs.
 
     Queries ``pg_index`` joined with ``pg_class`` and ``pg_namespace``, using ``pg_get_indexdef()`` to obtain the
-    canonical ``CREATE INDEX`` statement PostgreSQL itself would emit.  The statement's identity prefix — ``CREATE
-    [UNIQUE] INDEX <name> ON <schema>.<table>`` — is stripped in SQL so that :attr:`IndexInfo.shape` holds only the
+    canonical ``CREATE INDEX`` statement PostgreSQL itself would emit. The statement's identity prefix, ``CREATE
+    [UNIQUE] INDEX <name> ON <schema>.<table>``, is stripped in SQL so that :attr:`IndexInfo.shape` holds only the
     part that describes what the index *does*.
 
     Stripping is verified rather than assumed: the prefix is rebuilt with ``quote_ident()`` and compared against the
-    definition's leading characters.  An index whose definition does not start with the expected prefix is omitted
+    definition's leading characters. An index whose definition does not start with the expected prefix is omitted
     entirely rather than reported with an unstripped shape, since an unstripped shape could never match a canonicalized
     one and would show up as a permanent phantom difference.
 
     Indexes that implement a constraint are excluded: a primary key, unique, or exclusion constraint owns its index,
-    and Alembic compares those as constraints.  Extension-owned indexes are excluded on the same basis as extension-owned
+    and Alembic compares those as constraints. Extension-owned indexes are excluded on the same basis as extension-owned
     functions and triggers.
 
     Args:
         conn: An open SQLAlchemy connection.
-        schemas: Schemas to inspect.  When *None*, every schema except ``pg_catalog`` and ``information_schema``.
-        table_names: Tables to restrict the query to.  When *None*, all tables are included.
+        schemas: Schemas to inspect. When *None*, every schema except ``pg_catalog`` and ``information_schema``.
+        table_names: Tables to restrict the query to. When *None*, all tables are included.
 
     Returns:
         A sequence of :class:`IndexInfo` instances, one per index.

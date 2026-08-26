@@ -1,7 +1,7 @@
 ## Why
 
 Alembic's index signature covers columns, expressions, uniqueness, and `NULLS NOT DISTINCT`. It does not cover
-`postgresql_where`, `postgresql_using`, `postgresql_include`, or `postgresql_ops` — those four are absent from the
+`postgresql_where`, `postgresql_using`, `postgresql_include`, or `postgresql_ops`. Those four are absent from the
 comparison entirely. Change one in a model and autogenerate emits nothing. Not a wrong migration: no migration, on every
 run, forever.
 
@@ -18,9 +18,9 @@ The expressions Alembic *does* compare go through `_cleanup_index_expr`, a regex
 quotes, casts, and spaces before comparing. It is lossy in the unsafe direction: an index on `a` and one on `a::int`
 reduce to the same string and compare equal.
 
-This library already owns the right primitive. `pg_get_indexdef()` is the `pg_get_expr()` of indexes — one canonical
+This library already owns the right primitive. `pg_get_indexdef()` is the `pg_get_expr()` of indexes: one canonical
 string covering expressions, opclasses, access method, `INCLUDE`, `NULLS NOT DISTINCT`, storage parameters, and the
-predicate — and the savepoint round-trip that `canonicalize_check_constraints()` uses works the same way here.
+predicate. The savepoint round-trip that `canonicalize_check_constraints()` uses works the same way here.
 
 ## What Changes
 
@@ -35,7 +35,7 @@ predicate — and the savepoint round-trip that `canonicalize_check_constraints(
   wrapping Alembic's rendered call in `op.get_context().autocommit_block()`
 
 **Key difference from check constraints**: there the probe was free, because `NOT VALID` skips validation.
-`CREATE INDEX` really builds the index — measured at 1.2s for an expression index and 2.1s for a GIN index on a 500k-row
+`CREATE INDEX` really builds the index, measured at 1.2s for an expression index and 2.1s for a GIN index on a 500k-row
 table, against 0.8ms on an empty clone. So the probe moves off the real table, which also keeps autogenerate from
 holding a lock on it.
 
@@ -45,15 +45,15 @@ operations for, so one index never draws two drop/create pairs.
 
 ## Non-goals
 
-- **Indexes outside `target_metadata`** — no `pg_indexes` DDL-string channel, for the reason check constraints have
-  none: it would put this library in a fight with Alembic over which of them owns an index
-- **Unnamed indexes** — they cannot be matched between metadata and catalog by name
-- **Constraint-backed indexes** — a primary key, unique, or exclusion constraint owns its index, and Alembic compares
+- **Indexes outside `target_metadata`**: no `pg_indexes` DDL-string channel, for the reason check constraints have none.
+  It would put this library in a fight with Alembic over which of them owns an index
+- **Unnamed indexes**: they cannot be matched between metadata and catalog by name
+- **Constraint-backed indexes**: a primary key, unique, or exclusion constraint owns its index, and Alembic compares
   those as constraints
-- **Index existence** — adding and removing an index stays Alembic's, as does any index it has already decided differs
-- **Tablespaces and collations** — `pg_get_indexdef()` omits the tablespace, and a collation change is a column change
+- **Index existence**: adding and removing an index stays Alembic's, as does any index it has already decided differs
+- **Tablespaces and collations**: `pg_get_indexdef()` omits the tablespace, and a collation change is a column change
   rather than an index one
-- **Running `CREATE INDEX CONCURRENTLY` during autogenerate** — the opt-in changes what is *rendered*; the probe is
+- **Running `CREATE INDEX CONCURRENTLY` during autogenerate**: the opt-in changes what is *rendered*; the probe is
   always an ordinary index on a throwaway clone
 
 ## Capabilities
@@ -75,5 +75,5 @@ operations for, so one index never draws two drop/create pairs.
 - **Behavior**: a changed predicate, access method, operator class, or `INCLUDE` list now produces a migration where it
   previously produced silence
 - **Dependencies**: none new
-- **Public API**: new exports — `IndexInfo`, `inspect_indexes`, `canonicalize_indexes`, `CreateIndexConcurrentlyOp`,
+- **Public API**: new exports are `IndexInfo`, `inspect_indexes`, `canonicalize_indexes`, `CreateIndexConcurrentlyOp`,
   `DropIndexConcurrentlyOp`

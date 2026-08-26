@@ -8,8 +8,8 @@
   extension-owned indexes
 - [x] 1.4 Add `inspect_indexes(conn, schemas=None, table_names=None)`, omitting rows whose prefix did not match and
   logging a warning
-- [x] 1.5 Add inspection tests to `tests/alembic_pg_autogen/test_inspect.py` — identity, shape for every feature, schema
-  and table filtering, constraint-backed exclusion, identifiers containing `USING`, empty result
+- [x] 1.5 Add inspection tests to `tests/alembic_pg_autogen/test_inspect.py` covering identity, shape for every feature,
+  schema and table filtering, constraint-backed exclusion, identifiers containing `USING`, empty result
 
 ## 2. Canonicalization Layer
 
@@ -19,8 +19,8 @@
 - [x] 2.3 Read probes back with the same prefix-stripping deparse the inspector uses, returning `IndexInfo` carrying the
   caller's schema and table
 - [x] 2.4 Isolate each probe in its own nested savepoint so one unusable index does not cost the rest their comparison
-- [x] 2.5 Add canonicalization tests to `tests/alembic_pg_autogen/test_canonicalize.py` — round-trip equality, predicate
-  rewrites, qualified and unqualified metadata, unusable indexes, savepoint cleanliness, real table untouched
+- [x] 2.5 Add canonicalization tests to `tests/alembic_pg_autogen/test_canonicalize.py` covering round-trip equality,
+  predicate rewrites, qualified and unqualified metadata, unusable indexes, savepoint cleanliness, real table untouched
 
 ## 3. Comparator
 
@@ -30,8 +30,8 @@
 - [x] 3.3 Skip indexes for which an operation is already present in `modify_table_ops`
 - [x] 3.4 Emit `DropIndexOp.from_index()` + `CreateIndexOp.from_index()` for differing definitions, honoring
   `include_name` and `include_object` filters
-- [x] 3.5 Add comparator tests to `tests/alembic_pg_autogen/test_indexes.py` — helper units, short-circuits, plugin
-  registration, and end-to-end autogenerate for every gap case and every equivalent case
+- [x] 3.5 Add comparator tests to `tests/alembic_pg_autogen/test_indexes.py` covering helper units, short-circuits,
+  plugin registration, and end-to-end autogenerate for every gap case and every equivalent case
 
 ## 4. Concurrent Rendering
 

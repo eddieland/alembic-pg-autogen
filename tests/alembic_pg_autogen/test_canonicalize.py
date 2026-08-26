@@ -775,8 +775,8 @@ class TestCanonicalizeIndexesIntegration:
     def test_probe_query_strips_a_postgresql_14_style_table_reference(self, pg_conn: Connection):
         """PostgreSQL 14 prints the backing ``pg_temp_3`` where 15 and newer print the ``pg_temp`` alias.
 
-        CI runs PostgreSQL 14, so the fully-qualified candidate is the branch that fires there — and the branch whose
-        absence made every index look unnormalizable.  ``pg_get_indexdef()`` always qualifies the table reference, and
+        CI runs PostgreSQL 14, so the fully-qualified candidate is the branch that fires there, and the branch whose
+        absence made every index look unnormalizable. ``pg_get_indexdef()`` always qualifies the table reference, and
         a temp table on this server always qualifies it as the alias, so the qualified branch is exercised the only way
         it can be here: against a table in a named schema, whose rendering is string-for-string what PostgreSQL 14
         emits for a temporary one.
@@ -806,7 +806,7 @@ class TestCanonicalizeIndexesIntegration:
         """The branch that hid the PostgreSQL 14 bug: a shape that will not strip must warn, not silently vanish."""
         from sqlalchemy import Index
 
-        # The package re-exports the ``canonicalize`` *function*, which shadows the submodule of the same name —
+        # The package re-exports the ``canonicalize`` *function*, which shadows the submodule of the same name:
         # both ``from alembic_pg_autogen import canonicalize`` and ``import alembic_pg_autogen.canonicalize as ...``
         # resolve to it, so reach for the module through the import system instead.
         canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")

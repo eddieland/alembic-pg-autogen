@@ -50,8 +50,8 @@ uv run pytest -k "test_name"
   characters is enough to fail the build. The `PostToolUse` hook in `.claude/settings.json` formats markdown
   automatically, but only for files written with the Edit/Write tools — markdown written through the shell (heredocs,
   `sed`, scripts) bypasses it. Re-run the check after any late edit; ticking off a task list counts.
-- **Codespell**: Spell checking on src, tests, docs, and markdown files. It **reports** rather than rewrites — its
-  dictionary does not know this codebase's vocabulary, and auto-writing let it turn `brin` into "bring" in prose. A
+- **Codespell**: Spell checking on src, tests, docs, and markdown files. It **reports** rather than rewrites, because
+  its dictionary does not know this codebase's vocabulary: auto-writing let it turn `brin` into "bring" in prose. A
   legitimate word it flags belongs in `ignore-words-list` in pyproject.toml.
 - `make fmt` auto-fixes with mdformat and `ruff --fix`, so running `make lint` modifies files in place.
 - **Module ordering**: Public API functions first, `_private` helpers after, generally in order of usefulness to someone

@@ -112,12 +112,12 @@ def _render_autocommit_block(autogen_context: AutogenContext, inner: MigrateOper
     """Render *inner* with Alembic's own renderer, wrapped in ``op.get_context().autocommit_block()``.
 
     PostgreSQL refuses ``CREATE INDEX CONCURRENTLY`` inside a transaction block, and Alembic runs migrations in one by
-    default.  ``autocommit_block()`` is Alembic's escape hatch: it commits the open transaction, runs the body in
+    default. ``autocommit_block()`` is Alembic's escape hatch: it commits the open transaction, runs the body in
     autocommit mode, and opens a fresh transaction afterwards.
 
     Delegating the body to :func:`~alembic.autogenerate.render.render_op` keeps the generated call identical to the one
-    Alembic would have emitted on its own — every ``postgresql_*`` keyword included — so only the surrounding block is
-    this library's contribution.  Alembic indents the whole rendered string uniformly, which preserves the relative
+    Alembic would have emitted on its own, every ``postgresql_*`` keyword included, so only the surrounding block is
+    this library's contribution. Alembic indents the whole rendered string uniformly, which preserves the relative
     indentation of the block body.
     """
     body = "\n".join(render_op(autogen_context, inner))

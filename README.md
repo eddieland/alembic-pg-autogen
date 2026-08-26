@@ -176,8 +176,8 @@ change.
 
 Alembic compares an index's columns, expressions, uniqueness, and `NULLS NOT DISTINCT` flag. Four things it does not
 compare at all: the `WHERE` predicate of a partial index, the access method, the `INCLUDE` columns, and the operator
-classes. Change any of them in a model and autogenerate emits nothing — not a wrong migration, but no migration, on
-every run, forever.
+classes. Change any of them in a model and autogenerate emits nothing. Not a wrong migration, but no migration, on every
+run, forever.
 
 Verified against PostgreSQL 16 with Alembic 1.19, each of these is silent:
 
@@ -220,8 +220,8 @@ def upgrade() -> None:
 Each index is round-tripped through PostgreSQL, so `WHERE status IN ('a', 'b')` in your model and the catalog's
 `WHERE (status = ANY (ARRAY['a'::text, 'b'::text]))` are recognized as the same index. The round-trip builds the index
 on an empty `TEMP` clone of the table rather than on the table itself: `CREATE INDEX` has no `NOT VALID` equivalent, so
-probing the real table would build a real index — seconds per index on a large table, and a lock held for the rest of
-the run. On the clone it costs under a millisecond and never touches your data.
+probing the real table would build a real index, costing seconds per index on a large table and holding a lock for the
+rest of the run. On the clone it costs under a millisecond and never touches your data.
 
 ### Building indexes concurrently
 
@@ -255,7 +255,7 @@ def upgrade() -> None:
 
 This changes only what is *rendered*. Autogenerate itself always probes with an ordinary `CREATE INDEX` on the throwaway
 clone. Note that a concurrent build can fail and leave an invalid index behind, which is a property of `CONCURRENTLY`
-rather than of this package — keep that in mind when the migration runs unattended.
+rather than of this package, so keep that in mind when the migration runs unattended.
 
 Indexes backing a primary key, unique, or exclusion constraint are left alone: the constraint owns them, and Alembic
 compares those as constraints.

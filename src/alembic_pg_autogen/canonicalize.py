@@ -242,34 +242,33 @@ def canonicalize_indexes(
     """Canonicalize desired indexes by round-tripping them through PostgreSQL.
 
     Each index is created inside a savepoint on an empty ``TEMP`` clone of the target table, read back with
-    ``pg_get_indexdef()``, and then rolled back — leaving the database unchanged.  The result is directly comparable
+    ``pg_get_indexdef()``, and then rolled back, leaving the database unchanged. The result is directly comparable
     with :func:`inspect_indexes <alembic_pg_autogen.inspect.inspect_indexes>`, which reads the live catalog through
-    the same deparse.  That is the whole point of the round-trip: ``WHERE status IN ('a', 'b')`` in a SQLAlchemy model
+    the same deparse. That is the whole point of the round-trip: ``WHERE status IN ('a', 'b')`` in a SQLAlchemy model
     and ``WHERE (status = ANY (ARRAY['a'::text, 'b'::text]))`` in the catalog are the same index, and only PostgreSQL
     can say so.
 
-    Probing a clone rather than the real table is what makes this affordable.  Unlike a ``NOT VALID`` check constraint,
+    Probing a clone rather than the real table is what makes this affordable. Unlike a ``NOT VALID`` check constraint,
     ``CREATE INDEX`` really does build the index: on a 500k-row table an expression index took roughly 1.2 seconds and a
-    GIN index roughly 2.1, against under a millisecond on an empty clone.  The clone also keeps autogenerate from
-    holding a lock on the real table for the rest of the transaction.  ``CREATE TEMP TABLE ... (LIKE ...)`` copies the
+    GIN index roughly 2.1, against under a millisecond on an empty clone. The clone also keeps autogenerate from
+    holding a lock on the real table for the rest of the transaction. ``CREATE TEMP TABLE ... (LIKE ...)`` copies the
     column names, types, and collations that the deparse depends on, so the canonical form it produces is the same one
     the real table would have produced.
 
     The clone takes the target table's own name inside ``pg_temp``, and the index DDL is executed under a
-    ``schema_translate_map`` that redirects the table's schema there.  Both are needed: the map handles metadata that
+    ``schema_translate_map`` that redirects the table's schema there. Both are needed: the map handles metadata that
     names its schema explicitly, and the shared name handles metadata that leaves it implicit.
 
     Args:
         conn: An open SQLAlchemy connection (may have an active transaction).
         schema: Schema qualifying *table_name*, or *None* to resolve it through the connection's ``search_path``.
-        table_name: The table the indexes belong to.  It must already exist in the database.
+        table_name: The table the indexes belong to. It must already exist in the database.
         indexes: Mapping of index name to the SQLAlchemy :class:`~sqlalchemy.schema.Index` to normalize.
 
     Returns:
         A mapping of index name to :class:`~alembic_pg_autogen.inspect.IndexInfo`, carrying *schema* and *table_name*
-        as given so the result compares directly against the live catalog.  Names whose index could not be created —
-        an expression SQLAlchemy cannot compile, a column that does not exist yet, an operator class the access method
-        does not accept, a probe name already taken in the temporary schema — are absent from the result rather than
+        as given so the result compares directly against the live catalog. Names whose index could not be created are
+        absent from the result rather than
         raising, so a single unusable index cannot break autogenerate.
     """
     if not indexes:
@@ -286,7 +285,7 @@ def canonicalize_indexes(
         conn.execute(text(f"CREATE TEMP TABLE {preparer.quote(table_name)} (LIKE {qualified})"))
     except SQLAlchemyError:
         # The clone has to take the target table's own name for the redirect above to reach it, so a temporary
-        # relation already using that name on this connection blocks the probe.  Nothing about the table is wrong;
+        # relation already using that name on this connection blocks the probe. Nothing about the table is wrong;
         # there is simply nowhere to build the probe, so its indexes go uncompared this run.
         log.warning(
             "Could not create a temporary probe clone of %s; treating its indexes as unchanged. A temporary relation "
@@ -305,8 +304,8 @@ def canonicalize_indexes(
         for name, index in indexes.items():
             probe = conn.begin_nested()
             # ``SQLAlchemyError``, not ``DBAPIError``: the statement is compiled inside ``execute()``, and an index
-            # SQLAlchemy cannot render — an expression whose type has no literal renderer, say — raises ``CompileError``
-            # before the server is ever asked.  Catching only the server-side error let that one abort the whole run,
+            # SQLAlchemy cannot render, such as an expression whose type has no literal renderer, raises ``CompileError``
+            # before the server is ever asked. Catching only the server-side error let that one abort the whole run,
             # taking every other index on the table with it.
             try:
                 probe_conn.execute(CreateIndex(index))
@@ -353,7 +352,7 @@ _TEMP_SCHEMA = "pg_temp"
 ``pg_temp`` always *resolves* to the session's temporary schema, but it is not always how PostgreSQL *prints* one.
 ``pg_get_indexdef()`` deparses the table reference with ``get_namespace_name_or_temp()`` on PostgreSQL 15 and newer,
 which collapses the backing ``pg_temp_N`` namespace to the alias ``pg_temp``; PostgreSQL 14 has no such collapsing and
-prints ``pg_temp_3.t``.  The probe query therefore has to accept both spellings — see :data:`_INDEX_PROBE_QUERY`."""
+prints ``pg_temp_3.t``. The probe query therefore has to accept both spellings; see :data:`_INDEX_PROBE_QUERY`."""
 
 _INDEX_PROBE_QUERY = f"""\
 SELECT
@@ -386,9 +385,9 @@ WHERE ic.relname = ANY(:names)
 """Read the probed indexes back, stripping the identity that precedes the shape.
 
 Two spellings of the clone's table reference are accepted because PostgreSQL changed how it prints one: 15 and newer
-collapse the temporary namespace to the ``pg_temp`` alias, while 14 prints the backing ``pg_temp_3``.  Trying the alias
-first and the real namespace second covers both without asking the server its version.  A definition matching neither
-yields NULL, which the caller reports as "could not normalize" and treats as unchanged — the safe direction, since a
+collapse the temporary namespace to the ``pg_temp`` alias, while 14 prints the backing ``pg_temp_3``. Trying the alias
+first and the real namespace second covers both without asking the server its version. A definition matching neither
+yields NULL, which the caller reports as "could not normalize" and treats as unchanged. That is the safe direction, since a
 half-stripped shape could never equal a catalog one and would show up as a permanent phantom difference.
 """
 

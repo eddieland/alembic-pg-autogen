@@ -1,20 +1,20 @@
 """Comparator that verifies PostgreSQL-specific index definitions during autogenerate.
 
-Alembic compares an index's columns, expressions, uniqueness, and ``NULLS NOT DISTINCT`` flag.  What its index
+Alembic compares an index's columns, expressions, uniqueness, and ``NULLS NOT DISTINCT`` flag. What its index
 signature does not include is the rest of what makes a PostgreSQL index what it is: the ``WHERE`` predicate of a
-partial index, the access method, the ``INCLUDE`` columns, and the operator classes.  Change any of those in a model
-and autogenerate emits nothing — not a wrong migration, but no migration at all, forever.  Alembic's expression
+partial index, the access method, the ``INCLUDE`` columns, and the operator classes. Change any of those in a model
+and autogenerate emits nothing. Not a wrong migration, but no migration at all, forever. Alembic's expression
 comparison is also a text heuristic that strips casts and quotes before comparing, so two genuinely different
 expressions can reduce to the same string.
 
-This module closes both gaps for PostgreSQL by asking PostgreSQL itself.  Each metadata index is round-tripped
+This module closes both gaps for PostgreSQL by asking PostgreSQL itself. Each metadata index is round-tripped
 through the server and compared against the catalog's own ``pg_get_indexdef()`` output, so a changed predicate,
 operator class, access method, or expression produces a drop/create pair instead of silently drifting.
 
-It complements Alembic's index comparator rather than replacing it.  Alembic owns existence — indexes present on only
-one side — and it owns any index it has already decided differs; this comparator runs afterwards, at
+It complements Alembic's index comparator rather than replacing it. Alembic owns existence, meaning indexes present on
+only one side, and it owns any index it has already decided differs; this comparator runs afterwards, at
 :attr:`~alembic.util.DispatchPriority.LAST`, and only considers indexes that are present on both sides and that
-Alembic left alone.  The two never emit an operation for the same index.
+Alembic left alone. The two never emit an operation for the same index.
 
 It is registered as its own plugin (``alembic_pg_autogen.indexes``) so it can be disabled independently of the
 function/trigger/view and check constraint comparators, and only fires for the ``postgresql`` dialect.
@@ -51,7 +51,7 @@ def setup(plugin: Plugin) -> None:
         "table",
         "index_definitions",
         qualifier="postgresql",
-        # Alembic's own index comparator runs at MEDIUM.  Running last lets this one see what Alembic decided and
+        # Alembic's own index comparator runs at MEDIUM. Running last lets this one see what Alembic decided and
         # leave those indexes alone, so a single index never draws two drop/create pairs.
         priority=DispatchPriority.LAST,
     )
@@ -130,7 +130,7 @@ def _names_already_emitted(modify_table_ops: ModifyTableOps) -> frozenset[str]:
     """Return the names of indexes Alembic's own comparator has already emitted operations for.
 
     Alembic runs first and owns two decisions this comparator must not second-guess: whether an index exists on both
-    sides, and — for the parts of an index it does compare — whether it changed.  Any index it has already acted on is
+    sides, and, for the parts of an index it does compare, whether it changed. Any index it has already acted on is
     therefore off limits, or the migration would carry two drop/create pairs for one index.
     """
     names: set[str] = set()

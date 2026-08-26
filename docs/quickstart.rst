@@ -297,7 +297,7 @@ clone of its table, and PostgreSQL's own ``pg_get_indexdef()`` output is compare
 ``WHERE status IN ('a', 'b')`` in your model and ``WHERE (status = ANY (ARRAY['a'::text, 'b'::text]))`` in the catalog
 are not reported as a difference, while a genuinely changed predicate is.
 
-The clone matters. ``CREATE INDEX`` has no ``NOT VALID`` equivalent — it really builds the index — so probing the real
+The clone matters. ``CREATE INDEX`` has no ``NOT VALID`` equivalent, so it really builds the index, and probing the real
 table would cost seconds per index on a large table and hold a lock for the rest of the run. On an empty clone the
 same probe costs under a millisecond, and your table is never touched.
 
@@ -340,8 +340,8 @@ carries the block it needs:
            )
 
 This affects only what is rendered; autogenerate always probes with an ordinary ``CREATE INDEX`` on the clone. Be aware
-that a concurrent build can fail and leave an invalid index behind — a property of ``CONCURRENTLY`` itself rather than
-of this package.
+that a concurrent build can fail and leave an invalid index behind. That is a property of ``CONCURRENTLY`` itself rather
+than of this package.
 
 Index comparison is a separate Alembic plugin, so you can turn it off on its own:
 
