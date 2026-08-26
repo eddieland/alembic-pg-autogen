@@ -270,6 +270,21 @@ class TestComparatorSkips:
 
         assert [type(op).__name__ for op in ops] == ["DropIndexOp", "CreateIndexOp"]
 
+    def test_index_absent_from_the_reflected_table_is_skipped(self, catalog: Any):
+        """Both operations are built from a reflected Index, so a name Alembic did not reflect has nothing to drop."""
+        probed = catalog({"ix_t_a": "USING btree (a)"}, {"ix_t_a": "USING btree (lower(a))"})
+        metadata_table = _t_table(Index("ix_t_a", "a"))
+        conn_table = _t_table()
+
+        modify_table_ops = ModifyTableOps("t", [])
+        result = _compare_index_definitions(
+            _stub_context(connection=object()), modify_table_ops, "public", "t", conn_table, metadata_table
+        )
+
+        assert result is PriorityDispatchResult.CONTINUE
+        assert modify_table_ops.is_empty()
+        assert probed == []
+
     def test_concurrent_option_wraps_the_emitted_operations(self, catalog: Any):
         catalog({"ix_t_a": "USING btree (a)"}, {"ix_t_a": "USING btree (a) WHERE (deleted_at IS NULL)"})
         table = _t_table(Index("ix_t_a", "a"))

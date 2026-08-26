@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 
 import pytest
@@ -538,3 +539,20 @@ class TestInspectIndexesIntegration:
 
     def test_no_indexes_returns_empty(self, pg_conn: Connection):
         assert inspect_indexes(pg_conn, schemas=["nonexistent"]) == []
+
+    def test_unstrippable_definition_is_skipped(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """An index whose definition does not start with the expected prefix is dropped, not returned unstripped."""
+        from alembic_pg_autogen import inspect as inspect_module
+
+        self._table(pg_conn, "test_ix_unstrippable")
+        pg_conn.execute(text("CREATE INDEX test_ix_odd ON public.test_ix_unstrippable (a)"))
+        broken = inspect_module._INDEXES_QUERY.replace("'CREATE '", "'NOT HOW POSTGRESQL SPELLS IT '")
+        monkeypatch.setattr(inspect_module, "_INDEXES_QUERY", broken)
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.inspect"):
+            results = inspect_indexes(pg_conn, schemas=["public"], table_names=["test_ix_unstrippable"])
+
+        assert results == []
+        assert "Could not normalize the definition" in caplog.text

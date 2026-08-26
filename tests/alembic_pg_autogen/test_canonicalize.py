@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import logging
 from collections.abc import Generator
 from typing import Any, cast
@@ -656,6 +657,23 @@ class TestCanonicalizeIndexesIntegration:
         assert "ix_good" in normalized
         assert "ix_bad" not in normalized
 
+    def test_every_index_unusable_skips_the_read_back(self, pg_conn: Connection):
+        """With nothing successfully probed there is no read-back to do, and the result is empty rather than an error."""
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_allbad")
+        table = self._metadata_table(
+            "test_cix_allbad",
+            Index("ix_bad_one", text("no_such_function(a)")),
+            Index("ix_bad_two", text("also_missing(b)")),
+        )
+
+        normalized = canonicalize_indexes(
+            pg_conn, schema="test_cix_allbad", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+        )
+
+        assert normalized == {}
+
     def test_empty_input_executes_no_ddl(self, pg_conn: Connection):
         assert canonicalize_indexes(pg_conn, schema="public", table_name="missing", indexes={}) == {}
 
@@ -697,6 +715,32 @@ class TestCanonicalizeIndexesIntegration:
         assert [(r.name, r.unique, r.shape) for r in rows] == [
             ("ix_pg14", False, "USING btree (a) WHERE (status IS NOT NULL)")
         ]
+
+    def test_unstrippable_probe_definition_is_treated_as_unchanged(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """The branch that hid the PostgreSQL 14 bug: a shape that will not strip must warn, not silently vanish."""
+        from sqlalchemy import Index
+
+        # The package re-exports the ``canonicalize`` *function*, which shadows the submodule of the same name —
+        # both ``from alembic_pg_autogen import canonicalize`` and ``import alembic_pg_autogen.canonicalize as ...``
+        # resolve to it, so reach for the module through the import system instead.
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+
+        self._table(pg_conn, "test_cix_null")
+        table = self._metadata_table("test_cix_null", Index("ix_null", "a"))
+        broken = canonicalize_module._INDEX_PROBE_QUERY.replace(  # pyright: ignore[reportPrivateUsage]
+            "'CREATE '", "'NOT HOW POSTGRESQL SPELLS IT '"
+        )
+        monkeypatch.setattr(canonicalize_module, "_INDEX_PROBE_QUERY", broken)
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_indexes(
+                pg_conn, schema="test_cix_null", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+            )
+
+        assert normalized == {}
+        assert "Could not normalize the probed definition" in caplog.text
 
     def test_probe_query_yields_null_when_no_candidate_matches(self, pg_conn: Connection):
         """An unrecognised rendering must produce NULL, which the caller treats as unchanged rather than guessing."""
