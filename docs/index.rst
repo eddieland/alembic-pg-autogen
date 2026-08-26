@@ -6,9 +6,9 @@ Alembic autogenerate extension for PostgreSQL functions and triggers.
 `GitHub <https://github.com/eddieland/alembic-pg-autogen>`_ |
 `PyPI <https://pypi.org/project/alembic-pg-autogen/>`_
 
-If you've been manually writing ``op.execute()`` calls every time you add or change a PL/pgSQL function,
-this package automates that: declare your DDL strings and let ``alembic revision --autogenerate`` figure
-out the ``CREATE``, ``DROP``, and ``CREATE OR REPLACE`` for you.
+This package automates the ``op.execute()`` calls that you write by hand for each new or changed PL/pgSQL function. You
+declare your DDL strings, and ``alembic revision --autogenerate`` writes the ``CREATE``, ``DROP``, and
+``CREATE OR REPLACE`` statements.
 
 .. toctree::
    :maxdepth: 2
@@ -18,15 +18,15 @@ out the ``CREATE``, ``DROP``, and ``CREATE OR REPLACE`` for you.
    migrating
    api
 
-LLM-friendly documentation
---------------------------
+Documentation for language models
+---------------------------------
 
-This documentation is also available in plain-text formats designed for large language models:
+This documentation also exists in plain text formats for large language models:
 
-- `llms.txt </llms.txt>`_ — concise overview with links to each page
-- `llms-full.txt </llms-full.txt>`_ — complete documentation in a single file
+- `llms.txt </llms.txt>`_ (a short overview with a link to each page)
+- `llms-full.txt </llms-full.txt>`_ (the complete documentation in a single file)
 
-See `llmstxt.org <https://llmstxt.org/>`_ for more about the ``llms.txt`` standard.
+See `llmstxt.org <https://llmstxt.org/>`_ for a description of the ``llms.txt`` standard.
 
 Indices and tables
 ------------------

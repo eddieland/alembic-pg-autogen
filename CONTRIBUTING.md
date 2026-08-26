@@ -1,10 +1,10 @@
 # Contributing
 
-Contributions are welcome! Please fork the repository and open a pull request.
+Contributions are welcome. Fork the repository and open a pull request.
 
 ## Getting started
 
-1. [Fork the repository](https://github.com/eddieland/alembic-pg-autogen/fork) on GitHub
+1. [Fork the repository](https://github.com/eddieland/alembic-pg-autogen/fork) on GitHub.
 
 1. Clone your fork and create a branch:
 
@@ -14,13 +14,13 @@ Contributions are welcome! Please fork the repository and open a pull request.
    git checkout -b my-change
    ```
 
-1. Install dependencies (requires [uv](https://docs.astral.sh/uv/)):
+1. Install the dependencies. This step requires [uv](https://docs.astral.sh/uv/):
 
    ```bash
    make install
    ```
 
-1. Make your changes, then lint and test:
+1. Make your changes, then lint and test them:
 
    ```bash
    make lint       # format, spell-check, type-check
@@ -28,22 +28,28 @@ Contributions are welcome! Please fork the repository and open a pull request.
    make test-unit  # unit tests only (no Docker)
    ```
 
-1. Commit, push, and open a pull request against `main`.
+1. Commit your changes, push the branch, and open a pull request against `main`.
 
 ## Code style
 
 - **Line length**: 120 characters.
-- **Ruff** handles formatting, import sorting, and linting. `make lint` auto-fixes in place.
-- **BasedPyright** for type checking.
-- Wildcard imports are banned — always use explicit imports.
-- Public modules, functions, and classes in `src/` require docstrings (Google convention).
+- **Ruff** handles formatting, import sorting, and linting. `make lint` applies each fix in place.
+- **BasedPyright** checks types.
+- Wildcard imports are banned. Always write explicit imports.
+- Public modules, functions, and classes in `src/` require docstrings in the Google convention.
 - Prefer `typing.NamedTuple` over `dataclass` for data containers.
+
+## Prose style
+
+Documentation, docstrings, and comments follow the rules in [CLAUDE.md](CLAUDE.md). Write one idea per sentence, and
+keep each sentence under 20 words. Use active voice and present tense. Do not use a dash as punctuation between clauses,
+and do not use idioms or phrasal verbs.
 
 ## Tests
 
-Tests live in `tests/` and are discovered in `src/` as well. Integration tests are marked with
-`@pytest.mark.integration` and require a running PostgreSQL container via Docker.
+Tests live in `tests/`. Pytest also discovers tests in `src/`. Integration tests carry the `@pytest.mark.integration`
+marker. They require a PostgreSQL container that runs under Docker.
 
 ## License
 
-By contributing you agree that your contributions will be licensed under the MIT License.
+Your contributions are licensed under the MIT License.

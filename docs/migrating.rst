@@ -1,9 +1,9 @@
 Migrating from alembic_utils
 ============================
 
-If you're coming from `alembic_utils <https://github.com/olirice/alembic_utils>`_, you can pass
-your existing ``PGFunction`` / ``PGTrigger`` objects directly. Any object with a
-``to_sql_statement_create()`` method is accepted alongside plain DDL strings:
+You can pass your existing ``PGFunction`` and ``PGTrigger`` objects from
+`alembic_utils <https://github.com/olirice/alembic_utils>`_ directly to this package. It accepts any object with a
+``to_sql_statement_create()`` method. You can mix those objects with plain DDL strings:
 
 .. code-block:: python
 
@@ -12,8 +12,8 @@ your existing ``PGFunction`` / ``PGTrigger`` objects directly. Any object with a
    my_func = PGFunction(schema="public", signature="my_func()", definition="...")
 
    PG_FUNCTIONS = [
-       my_func,  # alembic_utils object, works as-is
-       "CREATE FUNCTION new_func() ...",  # plain DDL string, also works
+       my_func,  # an alembic_utils object
+       "CREATE FUNCTION new_func() ...",  # a plain DDL string
    ]
 
-This lets you migrate incrementally without rewriting all your declarations at once.
+You can therefore migrate one declaration at a time. You do not need to rewrite every declaration at once.
