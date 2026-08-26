@@ -161,6 +161,10 @@ An index that will not compile or will not apply — an expression referencing a
 operator class the access method does not accept — produces a logged warning and no operation. Each probe runs in its
 own nested savepoint, so one unusable index does not cost the rest of the table its comparison.
 
+The caught type is `SQLAlchemyError`, not `DBAPIError`. Compilation happens inside `execute()`, so an index SQLAlchemy
+cannot render raises `CompileError` before the server is asked anything; catching only the server-side error let one
+such index abort the whole run.
+
 ## Risks / Trade-offs
 
 **[The clone's deparse context is a copy, not the original]** → `LIKE` reproduces column names, types, and collations,

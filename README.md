@@ -181,13 +181,13 @@ every run, forever.
 
 Verified against PostgreSQL 16 with Alembic 1.19, each of these is silent:
 
-| Change in your model                                 | Stock Alembic | With this package             |
-| ---------------------------------------------------- | ------------- | ----------------------------- |
-| Add, remove, or change `postgresql_where`            | nothing       | `drop_index` + `create_index` |
-| Switch `postgresql_using` (`btree` → `gin`, `bring`) | nothing       | `drop_index` + `create_index` |
-| Add or change `postgresql_ops` (operator classes)    | nothing       | `drop_index` + `create_index` |
-| Add or change `postgresql_include`                   | nothing       | `drop_index` + `create_index` |
-| An expression differing only by a cast               | nothing       | `drop_index` + `create_index` |
+| Change in your model                                | Stock Alembic | With this package             |
+| --------------------------------------------------- | ------------- | ----------------------------- |
+| Add, remove, or change `postgresql_where`           | nothing       | `drop_index` + `create_index` |
+| Switch `postgresql_using` (`btree` → `gin`, `brin`) | nothing       | `drop_index` + `create_index` |
+| Add or change `postgresql_ops` (operator classes)   | nothing       | `drop_index` + `create_index` |
+| Add or change `postgresql_include`                  | nothing       | `drop_index` + `create_index` |
+| An expression differing only by a cast              | nothing       | `drop_index` + `create_index` |
 
 That last row is a different failure: expressions *are* compared, but through a text heuristic that strips casts,
 quotes, and whitespace before comparing, so an index on `a` and one on `a::int` reduce to the same string.

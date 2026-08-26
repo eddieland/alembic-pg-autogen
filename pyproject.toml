@@ -176,6 +176,9 @@ end_of_line = "lf"
 
 [tool.codespell]
 skip = "uv.lock"
+# ``brin`` is a PostgreSQL access method; codespell reads it as a misspelling of "bring" and,
+# because the lint target passes --write-changes, silently rewrites it in prose.
+ignore-words-list = "brin"
 
 [tool.coverage.run]
 source = ["alembic_pg_autogen"]

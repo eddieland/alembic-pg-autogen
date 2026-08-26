@@ -6,7 +6,7 @@ from collections.abc import Generator
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import Connection, text
+from sqlalchemy import Column, Connection, Integer, MetaData, Table, Text, text
 from sqlalchemy.engine import Engine
 
 from alembic_pg_autogen import (
@@ -673,6 +673,90 @@ class TestCanonicalizeIndexesIntegration:
         )
 
         assert normalized == {}
+
+    def test_uncompilable_index_does_not_abort_the_run(self, pg_conn: Connection, caplog: pytest.LogCaptureFixture):
+        """A ``CompileError`` is raised inside ``execute()`` before the server sees anything, and is not a DBAPIError.
+
+        Catching only the server-side error let one unrenderable index abort autogenerate outright, taking every other
+        index on the table with it.
+        """
+        from sqlalchemy import Index, bindparam
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        pg_conn.execute(text("CREATE SCHEMA test_cix_compile"))
+        pg_conn.execute(text("CREATE TABLE test_cix_compile.t (id integer PRIMARY KEY, a text, payload jsonb)"))
+        table = Table(
+            "t",
+            MetaData(),
+            Column("id", Integer, primary_key=True),
+            Column("a", Text()),
+            Column("payload", JSONB()),
+            schema="test_cix_compile",
+        )
+        # No literal renderer exists for a JSONB bind, so SQLAlchemy cannot compile this index at all.
+        uncompilable = Index("ix_uncompilable", table.c.payload == bindparam("v", value={"a": 1}, type_=JSONB()))
+        usable = Index("ix_usable", table.c.a)
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_indexes(
+                pg_conn,
+                schema="test_cix_compile",
+                table_name="t",
+                indexes={"ix_uncompilable": uncompilable, "ix_usable": usable},
+            )
+
+        assert "ix_usable" in normalized, "one unrenderable index must not cost the others their comparison"
+        assert "ix_uncompilable" not in normalized
+        assert "Could not canonicalize index 'ix_uncompilable'" in caplog.text
+
+    def test_clone_name_already_taken_reports_the_cause(self, pg_conn: Connection, caplog: pytest.LogCaptureFixture):
+        """The clone must take the target's own name for the redirect to reach it, so the name has to be free."""
+        from sqlalchemy import Index
+
+        self._table(pg_conn, "test_cix_taken")
+        table = self._metadata_table("test_cix_taken", Index("ix_taken", "a"))
+        pg_conn.execute(text("CREATE TEMP TABLE t (unrelated integer)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_indexes(
+                pg_conn, schema="test_cix_taken", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+            )
+
+        assert normalized == {}
+        assert "Could not create a temporary probe clone" in caplog.text
+        # The pre-existing temporary table is left exactly as it was.
+        columns = (
+            pg_conn
+            .execute(
+                text(
+                    "SELECT attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
+                    "WHERE c.relname = 't' AND c.relnamespace = pg_my_temp_schema() AND a.attnum > 0"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert columns == ["unrelated"]
+
+    def test_failing_read_back_is_treated_as_unchanged(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """The probes themselves can succeed and the read-back still fail; that must not propagate either."""
+        from sqlalchemy import Index
+
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+
+        self._table(pg_conn, "test_cix_readback")
+        table = self._metadata_table("test_cix_readback", Index("ix_readback", "a"))
+        monkeypatch.setattr(canonicalize_module, "_INDEX_PROBE_QUERY", "SELECT this is not valid sql")
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_indexes(
+                pg_conn, schema="test_cix_readback", table_name="t", indexes={ix.name: ix for ix in table.indexes}
+            )
+
+        assert normalized == {}
+        assert "Could not canonicalize indexes on" in caplog.text
 
     def test_empty_input_executes_no_ddl(self, pg_conn: Connection):
         assert canonicalize_indexes(pg_conn, schema="public", table_name="missing", indexes={}) == {}

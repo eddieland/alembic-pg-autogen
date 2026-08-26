@@ -82,6 +82,19 @@ The function SHALL roll back its savepoint, leaving neither probe indexes nor th
 The function SHALL isolate each probe so that an index that cannot be created is omitted from the result while the
 others still canonicalize.
 
+#### Scenario: An index SQLAlchemy cannot compile
+
+- **WHEN** a metadata index cannot be rendered to DDL at all, such as an expression whose type has no literal renderer
+- **THEN** a warning is logged, that name is absent from the returned mapping, and the remaining indexes are still
+  returned, because the compilation error is caught alongside the server-side ones rather than escaping the run
+
+#### Scenario: The clone's name is already taken
+
+- **WHEN** a temporary relation on the connection already uses the target table's name, which the clone must take for
+  the redirect to reach it
+- **THEN** a warning naming that cause is logged, an empty mapping is returned, and the pre-existing temporary relation
+  is left untouched
+
 #### Scenario: One unusable index among several
 
 - **WHEN** one metadata index references a function or column that does not exist

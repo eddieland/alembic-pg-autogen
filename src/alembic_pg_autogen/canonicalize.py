@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.schema import CreateIndex
 
 from alembic_pg_autogen.inspect import IndexInfo, current_schema, inspect_functions, inspect_triggers, inspect_views
@@ -268,9 +268,9 @@ def canonicalize_indexes(
     Returns:
         A mapping of index name to :class:`~alembic_pg_autogen.inspect.IndexInfo`, carrying *schema* and *table_name*
         as given so the result compares directly against the live catalog.  Names whose index could not be created —
-        an expression that does not compile, a column that does not exist yet, an operator class the access method
-        does not accept — are absent from the result rather than raising, so a single unusable index cannot break
-        autogenerate.
+        an expression SQLAlchemy cannot compile, a column that does not exist yet, an operator class the access method
+        does not accept, a probe name already taken in the temporary schema — are absent from the result rather than
+        raising, so a single unusable index cannot break autogenerate.
     """
     if not indexes:
         return {}
@@ -284,14 +284,33 @@ def canonicalize_indexes(
     savepoint = conn.begin_nested()
     try:
         conn.execute(text(f"CREATE TEMP TABLE {preparer.quote(table_name)} (LIKE {qualified})"))
+    except SQLAlchemyError:
+        # The clone has to take the target table's own name for the redirect above to reach it, so a temporary
+        # relation already using that name on this connection blocks the probe.  Nothing about the table is wrong;
+        # there is simply nowhere to build the probe, so its indexes go uncompared this run.
+        log.warning(
+            "Could not create a temporary probe clone of %s; treating its indexes as unchanged. A temporary relation "
+            "already named %r on this connection would cause this.",
+            qualified,
+            table_name,
+        )
+        log.debug("Probe clone creation failed for %s", qualified, exc_info=True)
+        savepoint.rollback()
+        return {}
+
+    try:
         # ``None`` covers metadata that leaves the schema implicit; *schema* covers metadata that names it.
         probe_conn = conn.execution_options(schema_translate_map={None: _TEMP_SCHEMA, schema: _TEMP_SCHEMA})
         created: list[str] = []
         for name, index in indexes.items():
             probe = conn.begin_nested()
+            # ``SQLAlchemyError``, not ``DBAPIError``: the statement is compiled inside ``execute()``, and an index
+            # SQLAlchemy cannot render — an expression whose type has no literal renderer, say — raises ``CompileError``
+            # before the server is ever asked.  Catching only the server-side error let that one abort the whole run,
+            # taking every other index on the table with it.
             try:
                 probe_conn.execute(CreateIndex(index))
-            except DBAPIError:
+            except SQLAlchemyError:
                 probe.rollback()
                 log.warning("Could not canonicalize index %r on %s; treating it as unchanged", name, qualified)
                 log.debug("Index canonicalization failure for %r", name, exc_info=True)
@@ -314,7 +333,7 @@ def canonicalize_indexes(
                     unique=row.unique,
                     shape=row.shape,
                 )
-    except DBAPIError:
+    except SQLAlchemyError:
         log.warning("Could not canonicalize indexes on %s; treating them as unchanged", qualified, exc_info=True)
         normalized = {}
     finally:
