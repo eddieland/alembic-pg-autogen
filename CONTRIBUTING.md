@@ -39,12 +39,6 @@ Contributions are welcome. Fork the repository and open a pull request.
 - Public modules, functions, and classes in `src/` require docstrings in the Google convention.
 - Prefer `typing.NamedTuple` over `dataclass` for data containers.
 
-## Prose style
-
-Documentation, docstrings, and comments follow the rules in [CLAUDE.md](CLAUDE.md). Write one idea per sentence, and
-keep each sentence under 20 words. Use active voice and present tense. Do not use a dash as punctuation between clauses,
-and do not use idioms or phrasal verbs.
-
 ## Tests
 
 Tests live in `tests/`. Pytest also discovers tests in `src/`. Integration tests carry the `@pytest.mark.integration`
