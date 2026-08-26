@@ -48,9 +48,11 @@
   than an `InvalidRequestError`, keying the check on the `info` stamp rather than the name, and raising `ValueError`
   when the derived name is occupied by a table this generator did not produce
 - [ ] 4.3 Add entry-point tests — repeat calls, and the `ValueError` for an unstamped table occupying the derived name
-- [ ] 4.4 Export `AuditSpec`, `AuditObjects`, and `add_audit_tables` from `src/alembic_pg_autogen/__init__.py` and add
-  them to `__all__`
-- [ ] 4.5 Update export tests in `tests/alembic_pg_autogen/test_import.py`
+- [ ] 4.4 Give `audit.py` its own `__all__` and **do not** re-export from `src/alembic_pg_autogen/__init__.py` (D8) —
+  the module is reached as `from alembic_pg_autogen.audit import ...`, which is where the opt-in is expressed
+- [ ] 4.5 Add an isolation test to `tests/alembic_pg_autogen/test_import.py` — assert `alembic_pg_autogen.audit` imports
+  no `alembic_pg_autogen.*` sibling (walk the module AST, or assert against `sys.modules` after a subprocess import),
+  and that the top-level `__all__` is unchanged by this feature
 
 ## 5. End-to-End Verification
 

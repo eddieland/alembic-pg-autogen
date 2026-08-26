@@ -212,6 +212,41 @@ A source table with a column named `aud_at` would collide with a bookkeeping col
 `ValueError` naming the table and the column, rather than generating a table whose two columns differ only in what wrote
 them. Prefix is configurable for exactly this reason.
 
+### D8: `audit.py` is an extension in everything but packaging
+
+The feature ships inside the distribution because it is cheap to carry — one module depending on nothing the package
+does not already depend on — but it is not part of the pipeline, and the boundary is enforced rather than described:
+
+- **It imports nothing from `alembic_pg_autogen`.** Not `compare`, `canonicalize`, `diff`, `inspect`, `ops`, `render`,
+  or `sentinels` — only SQLAlchemy. Every other module in the package routes through the pipeline (`compare` alone
+  imports five siblings); this one has no inbound edge at all. Identifier quoting uses a module-level
+  `postgresql.dialect().identifier_preparer` rather than a connection's, which is what keeps it connection-free and so
+  keeps it importable, testable, and usable offline.
+- **Nothing imports it.** No comparator branches on whether an object was generated; a generated
+  `CREATE OR REPLACE FUNCTION` is indistinguishable downstream from one a user typed. Adding the module changes no
+  existing code path.
+- **It registers no plugin.** `__init__.py` sets up `alembic_pg_autogen.compare` and
+  `alembic_pg_autogen.checkconstraints` at import; audit generation adds no third, because it contributes no comparator.
+- **It modifies no capability.** The change adds `audit-generation` and amends nothing — where `add-check-constraints`
+  and `compare-server-defaults` each had to extend `catalog-inspector` and `canonicalization`, this one has an empty
+  "Modified Capabilities" list. That is the spec-level statement of the same fact.
+- **It is not re-exported from `__init__`.** `AuditSpec`, `AuditObjects`, and `add_audit_tables` are reachable only as
+  `from alembic_pg_autogen.audit import ...`. The import path is where the opt-in is expressed, in the manner of
+  `sqlalchemy.ext.*`: the top-level namespace stays the core pipeline, and a user who never audits never imports the
+  module.
+
+**Trade-off:** the last point breaks the package's convention that every public name is available from the top-level
+namespace. That is the intended cost — consistency would make the extension look like a core feature, which is the thing
+being avoided. If more distance is wanted later, the module moves to `alembic_pg_autogen.ext.audit` without touching a
+line of the pipeline.
+
+The seam that is *not* clean is the one worth naming: generated function and trigger names join `pg_functions` and
+`pg_triggers`, which are whole-truth namespaces. Assigning rather than splicing — `pg_functions=audit.functions` instead
+of `pg_functions=[*PG_FUNCTIONS, *audit.functions]` — drops the user's own functions. That is the one way a mistake in
+audit land damages non-audit objects, and it is documentation rather than machinery, because the alternative (a
+`pg_audit_functions` key the comparator unions in) would mean editing `compare.py` and forfeiting every property listed
+above. Isolation is worth more here than a guardrail.
+
 ## Risks / Trade-offs
 
 **R1 — op ordering between Alembic's comparators and ours.** In one migration, `add_column` on `users_aud` should

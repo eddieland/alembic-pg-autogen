@@ -51,4 +51,7 @@ The migration still contains the DDL — it must, to be replayable. What changes
   `pg_triggers`
 - **Behavior**: none for existing users; the module is inert until called
 - **Dependencies**: none new
-- **Public API**: new exports — `AuditSpec`, `AuditObjects`, `add_audit_tables`
+- **Public API**: new names on `alembic_pg_autogen.audit` — `AuditSpec`, `AuditObjects`, `add_audit_tables` — reached by
+  importing that module, not re-exported from the top-level namespace (D8)
+- **Isolation**: the module imports nothing from `alembic_pg_autogen`, nothing imports it, it registers no plugin, and
+  it modifies no existing capability — an extension in everything but packaging
