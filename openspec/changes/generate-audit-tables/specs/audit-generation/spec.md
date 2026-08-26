@@ -93,6 +93,25 @@ the configured suffix, and attach it to the caller's `MetaData` so Alembic's own
 - **WHEN** an audited table has a column named `aud_at`
 - **THEN** `add_audit_tables()` raises `ValueError` naming the table and the column
 
+#### Scenario: Bookkeeping columns are replaced, not extended
+
+- **WHEN** the specification supplies its own `audit_columns` — for example `aud_id`, `aud_action`, and an
+  `audit_event_id` foreign key defaulted to a function reading session state
+- **THEN** the derived audit table carries exactly those bookkeeping columns and none of the defaults
+- **AND** the generated function still writes only `aud_action` and the mirrored columns
+
+#### Scenario: Bookkeeping columns are built per table
+
+- **WHEN** more than one table is audited
+- **THEN** each derived audit table receives its own `Column` objects, because a SQLAlchemy `Column` cannot be attached
+  to two `Table` objects
+- **AND** `audit_columns` is therefore a factory invoked once per audited table, not a shared sequence of instances
+
+#### Scenario: Bookkeeping constraints are preserved
+
+- **WHEN** a bookkeeping column declares a foreign key or `NOT NULL`
+- **THEN** the derived audit table keeps them, because the constraint stripping applies to mirrored columns only
+
 #### Scenario: A bookkeeping column that cannot populate itself is an error
 
 - **WHEN** the specification supplies a bookkeeping column that is `NOT NULL`, is not `aud_action`, and has no server

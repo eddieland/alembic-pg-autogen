@@ -1,10 +1,12 @@
 ## 1. Specification Object
 
 - [ ] 1.1 Add `src/alembic_pg_autogen/audit.py` with an `AuditSpec` `NamedTuple` — `tables`, `suffix` (`"_aud"`),
-  `schema`, `events`, `exclude_columns`, `audit_columns`, and the function/trigger naming callables
-- [ ] 1.2 Add default audit columns — `aud_id` identity primary key, `aud_action`, `aud_at` defaulting to `now()`,
-  `aud_actor` defaulting to **`session_user`** (not `current_user`, which inside the `SECURITY DEFINER` function is the
-  owner) — as a module-level `Final`
+  `schema`, `events`, `exclude_columns`, `audit_columns` (a **factory** returning fresh `Column` objects — a SQLAlchemy
+  `Column` cannot be attached to two `Table` objects), and the function/trigger naming callables
+- [ ] 1.2 Add the default `audit_columns` factory — `aud_id` identity primary key, `aud_action`, `aud_at` defaulting to
+  `now()`, `aud_actor` defaulting to **`session_user`** (not `current_user`, which inside the `SECURITY DEFINER`
+  function is the owner) — building fresh `Column` objects on each call, and document that supplying `audit_columns`
+  replaces this set rather than extending it
 - [ ] 1.3 Validate the specification: every named table present in the metadata, `events` a non-empty subset of insert /
   update / delete, no bookkeeping name colliding with a mirrored column, no non-`aud_action` bookkeeping column that is
   `NOT NULL` without a server default
@@ -15,13 +17,17 @@
 
 - [ ] 2.1 Add `_derive_audit_table(source, spec)` building `Column(name, source.type, nullable=True)` per mirrored
   column, sharing type objects by reference so a named `Enum` is not duplicated
-- [ ] 2.2 Prepend the bookkeeping columns, stamp the table `info={"alembic_pg_autogen_audit": True}`, and add the
-  indexes — always on `aud_at`, and on the source primary key columns only when there are any (an index over an empty
-  column list is not valid DDL)
-- [ ] 2.3 Confirm no constraint survives mirroring: no primary key, foreign key, unique, check, `NOT NULL`, server
+- [ ] 2.2 Prepend the bookkeeping columns by invoking `audit_columns` once per audited table, never reusing instances,
+  and keep any foreign key or `NOT NULL` they declare — constraint stripping applies to mirrored columns only
+- [ ] 2.3 Stamp the table `info={"alembic_pg_autogen_audit": True}` and add the indexes — always on `aud_at`, and on the
+  source primary key columns only when there are any (an index over an empty column list is not valid DDL)
+- [ ] 2.4 Confirm no constraint survives mirroring: no primary key, foreign key, unique, check, `NOT NULL`, server
   default, or identity
-- [ ] 2.4 Add derivation tests — column names and types, constraint stripping, index placement, keyless source table,
+- [ ] 2.5 Add derivation tests — column names and types, constraint stripping, index placement, keyless source table,
   composite primary key, schema qualification, `Enum` sharing
+- [ ] 2.6 Add a replaced-bookkeeping test — a spec supplying `aud_id` / `aud_action` / an `audit_event_id` foreign key
+  defaulted to a session-reading function, over two or more audited tables, asserting the default set is replaced, the
+  foreign key survives, and no `Column` instance is shared between the derived tables
 
 ## 3. DDL Generation
 
@@ -73,6 +79,9 @@
 - [ ] 6.3 Document the `SECURITY DEFINER` notes — the audit table should not be writable by the roles writing the source
   table, and `aud_actor` records `session_user` (with the `current_setting('app.actor', …)` recipe for applications that
   multiplex end users over one connection)
-- [ ] 6.4 Add `AuditSpec`, `AuditObjects`, and `add_audit_tables` to `docs/api.rst`
-- [ ] 6.5 Run `make lint` and `uv run mdformat --check README.md CLAUDE.md openspec/`
-- [ ] 6.6 Run the full suite against PostgreSQL and confirm existing tests still pass
+- [ ] 6.4 Document R5 — a bookkeeping default reading session state fails on writes that never set it (data migrations,
+  background jobs, `psql`), with the `missing_ok` + deliberate-fallback shape, and note that such defaults are not
+  compared by autogenerate until `compare-server-defaults` lands
+- [ ] 6.5 Add `AuditSpec`, `AuditObjects`, and `add_audit_tables` to `docs/api.rst`
+- [ ] 6.6 Run `make lint` and `uv run mdformat --check README.md CLAUDE.md openspec/`
+- [ ] 6.7 Run the full suite against PostgreSQL and confirm existing tests still pass

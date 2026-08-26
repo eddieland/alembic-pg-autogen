@@ -129,6 +129,35 @@ Column("aud_actor", Text, server_default=text("coalesce(current_setting('app.act
 
 which D4's rule accommodates without the generator learning anything about it.
 
+The four defaults are a starting set, not a floor: `audit_columns` **replaces** them rather than extending them, and
+only `aud_action` is structural. A service that already denormalizes request metadata into an audit-event row wants
+per-row bookkeeping to be a single foreign key rather than a repeated actor and timestamp, and declares exactly that:
+
+```python
+audit_columns = lambda: [
+    Column("aud_id", BigInteger, Identity(), primary_key=True),
+    Column("aud_action", Text, nullable=False),
+    Column(
+        "audit_event_id",
+        BigInteger,
+        ForeignKey("audit_event.id"),
+        nullable=False,
+        server_default=text("current_audit_event()"),
+    ),
+]
+```
+
+`current_audit_event()` reading a session GUC set at the start of the request is the intended shape, and the generated
+function stays unaware of it: it writes `aud_action` and the mirrored columns, and PostgreSQL fills the rest. Note that
+D3's constraint stripping governs *mirrored* columns only — a bookkeeping column keeps whatever the caller declares, and
+a foreign key is legitimate here because an audit-event row, unlike a deleted parent, does exist.
+
+`audit_columns` is a **factory** rather than a `Sequence[Column]` because a SQLAlchemy `Column` cannot be attached to
+two `Table` objects — reusing one instance across audited tables raises
+`ArgumentError: Column object ... already assigned to Table ...`. The factory is called once per audited table, which
+also keeps the audit-event foreign key pointing at one shared table without aliasing a single `ForeignKey` object across
+many.
+
 ### D5: `AFTER ... FOR EACH ROW`, one function per audited table
 
 `AFTER` rather than `BEFORE`: by then other `BEFORE` triggers have made their edits, so the recorded row is the row that
@@ -212,6 +241,24 @@ populated `MetaData` and silently audits a subset.
 **R4 — `SECURITY DEFINER` makes the function owner's rights the ones that matter.** A pinned `search_path` closes the
 usual hole, and the audit table should not be writable by the roles writing the source table, or the trail can be
 forged. Called out in the docs; not enforced by the generator, which does not manage grants.
+
+**R5 — a bookkeeping default that reads session state fails on writes that never set it.** The trigger fires on *every*
+write to an audited table, not only the ones arriving through the application: data migrations, background jobs, and a
+maintenance `psql` session all count. A `NOT NULL` column defaulted to something like `current_audit_event()` therefore
+turns any write from those paths into an error, and a data migration touching an audited table is the case that bites
+first — it is exactly the kind of write nobody thinks of as a request.
+
+That is a property of the caller's default expression rather than of the generator, and the generator cannot repair it
+without knowing what the column means. What it can do is make the shape obvious in the docs: read the setting with
+`missing_ok` and decide the fallback deliberately —
+`coalesce(current_setting('app.audit_event_id', true)::bigint, create_orphan_audit_event())` to keep an out-of-band
+write auditable, or letting it fail loudly if an unattributed write should be impossible. Either is defensible; the
+accident is arriving at one without choosing.
+
+Note also that a change to such a default is not detected by autogenerate today: Alembic's `compare_server_default` is
+opt-in and off. The `compare-server-defaults` change proposed alongside this one is what closes that, and the two
+compose — expression-level default comparison is what keeps a generated audit table's bookkeeping defaults from drifting
+the same way trigger bodies do.
 
 ## Migration Plan
 
