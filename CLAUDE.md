@@ -64,8 +64,12 @@ uv run pytest -k "test_name"
 
 ## Documentation Style
 
-Apply this style to every piece of prose you write: documentation, `README.md`, docstrings, code comments, OpenSpec
-artifacts (proposals, design docs, specs, task lists), commit messages, and pull request titles and bodies.
+These rules apply to the prose you write. The scope covers documentation, `README.md`, docstrings, and code comments.
+The scope also covers OpenSpec artifacts, commit messages, and pull request titles and bodies. OpenSpec artifacts
+include proposals, design docs, specs, and task lists.
+
+The rules apply to this file too. Older prose in this repository predates the rules. Rewrite that prose to this style
+when you edit it.
 
 The style follows the principles of ASD-STE100 (simplified technical English), applied informally. The rules below are
 authoritative. Write for readers whose first language is not English.
