@@ -55,6 +55,18 @@ itself.
 - **THEN** the DDL is executed under a `schema_translate_map` redirecting that schema to `pg_temp`, so it still resolves
   to the clone
 
+#### Scenario: Both spellings of the temporary schema are read back
+
+- **WHEN** the server deparses the clone's table reference as `pg_temp.t` (PostgreSQL 15 and newer) or as the backing
+  `pg_temp_3.t` (PostgreSQL 14)
+- **THEN** the probed definition is stripped to the same shape either way
+
+#### Scenario: An unrecognised rendering is not guessed at
+
+- **WHEN** a probed definition matches neither spelling
+- **THEN** a warning is logged and that index is absent from the result, rather than being returned with a half-stripped
+  shape that could never match a catalog one
+
 ### Requirement: Savepoint leaves the database unchanged
 
 The function SHALL roll back its savepoint, leaving neither probe indexes nor the clone behind.

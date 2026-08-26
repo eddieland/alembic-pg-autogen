@@ -329,34 +329,48 @@ def canonicalize_indexes(
 
 
 _TEMP_SCHEMA = "pg_temp"
-"""Schema the probe clone lives in.  ``pg_get_indexdef()`` renders a temporary relation as ``pg_temp.<name>`` whatever
-the backend-specific ``pg_temp_N`` namespace is actually called, so this same spelling serves both the
-``schema_translate_map`` that redirects the DDL and the prefix the probe query strips back off."""
+"""Alias the probe clone is addressed through when redirecting the index DDL.
+
+``pg_temp`` always *resolves* to the session's temporary schema, but it is not always how PostgreSQL *prints* one.
+``pg_get_indexdef()`` deparses the table reference with ``get_namespace_name_or_temp()`` on PostgreSQL 15 and newer,
+which collapses the backing ``pg_temp_N`` namespace to the alias ``pg_temp``; PostgreSQL 14 has no such collapsing and
+prints ``pg_temp_3.t``.  The probe query therefore has to accept both spellings — see :data:`_INDEX_PROBE_QUERY`."""
 
 _INDEX_PROBE_QUERY = f"""\
 SELECT
     ic.relname AS name,
     i.indisunique AS unique,
     CASE
-        WHEN left(d.definition, length(d.prefix)) = d.prefix
-        THEN substr(d.definition, length(d.prefix) + 1)
+        WHEN left(d.definition, length(d.aliased)) = d.aliased THEN substr(d.definition, length(d.aliased) + 1)
+        WHEN left(d.definition, length(d.qualified)) = d.qualified THEN substr(d.definition, length(d.qualified) + 1)
     END AS shape
 FROM pg_catalog.pg_index i
 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
 JOIN pg_catalog.pg_class tc ON tc.oid = i.indrelid
+JOIN pg_catalog.pg_namespace tn ON tn.oid = tc.relnamespace
 CROSS JOIN LATERAL (
     SELECT
         pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,
-        'CREATE '
+        h.head || '{_TEMP_SCHEMA}.' || pg_catalog.quote_ident(tc.relname) || ' ' AS aliased,
+        h.head || pg_catalog.quote_ident(tn.nspname) || '.' || pg_catalog.quote_ident(tc.relname) || ' ' AS qualified
+    FROM (
+        SELECT 'CREATE '
             || CASE WHEN i.indisunique THEN 'UNIQUE ' ELSE '' END
             || 'INDEX '
             || pg_catalog.quote_ident(ic.relname)
-            || ' ON {_TEMP_SCHEMA}.'
-            || pg_catalog.quote_ident(tc.relname)
-            || ' ' AS prefix
+            || ' ON ' AS head
+    ) h
 ) d
 WHERE ic.relname = ANY(:names)
   AND tc.relnamespace = pg_my_temp_schema()
+"""
+"""Read the probed indexes back, stripping the identity that precedes the shape.
+
+Two spellings of the clone's table reference are accepted because PostgreSQL changed how it prints one: 15 and newer
+collapse the temporary namespace to the ``pg_temp`` alias, while 14 prints the backing ``pg_temp_3``.  Trying the alias
+first and the real namespace second covers both without asking the server its version.  A definition matching neither
+yields NULL, which the caller reports as "could not normalize" and treats as unchanged — the safe direction, since a
+half-stripped shape could never equal a catalog one and would show up as a permanent phantom difference.
 """
 
 _PROBE_PREFIX = "_alembic_pg_autogen_probe_"

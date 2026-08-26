@@ -669,3 +669,48 @@ class TestCanonicalizeIndexesIntegration:
         )
 
         assert normalized == {}
+
+    def test_probe_query_strips_a_postgresql_14_style_table_reference(self, pg_conn: Connection):
+        """PostgreSQL 14 prints the backing ``pg_temp_3`` where 15 and newer print the ``pg_temp`` alias.
+
+        CI runs PostgreSQL 14, so the fully-qualified candidate is the branch that fires there — and the branch whose
+        absence made every index look unnormalizable.  ``pg_get_indexdef()`` always qualifies the table reference, and
+        a temp table on this server always qualifies it as the alias, so the qualified branch is exercised the only way
+        it can be here: against a table in a named schema, whose rendering is string-for-string what PostgreSQL 14
+        emits for a temporary one.
+        """
+        from alembic_pg_autogen.canonicalize import _INDEX_PROBE_QUERY  # pyright: ignore[reportPrivateUsage]
+
+        # Relax the temp-only filter and neutralise the alias candidate, so a match can only have come from the
+        # fully-qualified one.
+        variant = _INDEX_PROBE_QUERY.replace("tc.relnamespace = pg_my_temp_schema()", "true").replace(
+            "'pg_temp.'", "'not_the_alias_postgresql_uses.'"
+        )
+        assert variant != _INDEX_PROBE_QUERY, "both the temp filter and the alias candidate should be present"
+
+        pg_conn.execute(text("CREATE SCHEMA test_cix_pg14"))
+        pg_conn.execute(text("CREATE TABLE test_cix_pg14.t (a text, status text)"))
+        pg_conn.execute(text("CREATE INDEX ix_pg14 ON test_cix_pg14.t (a) WHERE status IS NOT NULL"))
+
+        rows = pg_conn.execute(text(variant), {"names": ["ix_pg14"]}).all()
+
+        assert [(r.name, r.unique, r.shape) for r in rows] == [
+            ("ix_pg14", False, "USING btree (a) WHERE (status IS NOT NULL)")
+        ]
+
+    def test_probe_query_yields_null_when_no_candidate_matches(self, pg_conn: Connection):
+        """An unrecognised rendering must produce NULL, which the caller treats as unchanged rather than guessing."""
+        from alembic_pg_autogen.canonicalize import _INDEX_PROBE_QUERY  # pyright: ignore[reportPrivateUsage]
+
+        broken = _INDEX_PROBE_QUERY.replace("'CREATE '", "'NOT HOW POSTGRESQL SPELLS IT '")
+        pg_conn.execute(text("CREATE SCHEMA test_cix_none"))
+        pg_conn.execute(text("CREATE TABLE test_cix_none.t (a text)"))
+        savepoint = pg_conn.begin_nested()
+        try:
+            pg_conn.execute(text("CREATE TEMP TABLE t (LIKE test_cix_none.t)"))
+            pg_conn.execute(text("CREATE INDEX ix_none ON pg_temp.t (a)"))
+            rows = pg_conn.execute(text(broken), {"names": ["ix_none"]}).all()
+        finally:
+            savepoint.rollback()
+
+        assert [r.shape for r in rows] == [None]

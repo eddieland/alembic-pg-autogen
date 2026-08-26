@@ -114,6 +114,13 @@ to `None` does not work: SQLAlchemy renders the default schema as `public` rathe
 make the definitions compare with no splitting at all. Rejected — it pays the full build cost twice and briefly removes
 a real index.
 
+**Reading the probe back takes two candidate spellings.** `pg_get_indexdef()` always schema-qualifies the table
+reference — verified for temporary and regular tables alike, under every `search_path` — but *how* it spells a temporary
+schema changed. PostgreSQL 15 deparses through `get_namespace_name_or_temp()`, which collapses the backing `pg_temp_3`
+to the alias `pg_temp`; PostgreSQL 14 prints `pg_temp_3`. The probe query therefore builds both prefixes and strips
+whichever matches, rather than asking the server its version. A definition matching neither yields NULL and is reported
+unchanged, per D7.
+
 ### D5: Run last, and defer to Alembic on any index it already touched
 
 Alembic's index comparator registers at `DispatchPriority.MEDIUM`; this one registers at `LAST`, so it runs after
