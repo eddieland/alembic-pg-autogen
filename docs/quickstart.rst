@@ -9,12 +9,13 @@ Installation
    pip install alembic-pg-autogen
 
 Requires Python 3.10+ and SQLAlchemy 2.x.
-Bring your own PostgreSQL driver (``psycopg``, ``psycopg2``, ``asyncpg``, etc.).
+Install a PostgreSQL driver yourself (``psycopg``, ``psycopg2``, or ``asyncpg``).
 
 1. Declare your DDL
 -------------------
 
-In your ``env.py`` (or a separate module), define the functions and triggers you want managed:
+Define the functions and triggers that you want to manage. Put the definitions in your ``env.py`` or in a separate
+module:
 
 .. code-block:: python
 
@@ -38,11 +39,11 @@ In your ``env.py`` (or a separate module), define the functions and triggers you
        """,
    ]
 
-2. Wire it into ``env.py``
---------------------------
+2. Configure ``env.py``
+-----------------------
 
-Import the package (this registers the Alembic comparator plugin), then in your
-``run_migrations_online()`` function pass them as keyword arguments to ``context.configure()``:
+Import the package to register the Alembic comparator plugin. Then pass your declarations to ``context.configure()``
+inside ``run_migrations_online()``:
 
 .. code-block:: python
 
@@ -59,37 +60,37 @@ Import the package (this registers the Alembic comparator plugin), then in your
 
 .. important::
 
-   Both wildcards belong in ``autogenerate_plugins``. The option *replaces* Alembic's default of
-   ``["alembic.autogenerate.*"]`` rather than adding to it, so listing only ``"alembic_pg_autogen.*"`` excludes every
-   comparator Alembic ships, including ``_produce_net_changes`` in ``alembic.autogenerate.schemas``, which drives the
-   whole diff. Autogenerate then produces an empty migration for *everything*, this package included, without raising
-   an error.
+   Keep both wildcards in ``autogenerate_plugins``. The option *replaces* Alembic's default value of
+   ``["alembic.autogenerate.*"]``, and it does not extend that value. A list that contains only
+   ``"alembic_pg_autogen.*"`` excludes every comparator that Alembic ships. The excluded comparators include
+   ``_produce_net_changes`` in ``alembic.autogenerate.schemas``, which drives the whole diff. Autogenerate then
+   produces an empty migration for *every* feature, this package included, and it raises no error.
 
-   The mirror-image mistake is leaving the option unset. Importing ``alembic_pg_autogen`` registers the plugins but
-   does not opt them in, so the default stays in force and none of this package's comparators ever run.
+   The opposite mistake is an unset option. An import of ``alembic_pg_autogen`` registers the plugins but does not
+   enable them. Alembic's default value stays in force, and no comparator from this package ever runs.
 
-   To see what a run actually loaded, raise the plugin logger to ``INFO``:
+   To see what a run loaded, raise the plugin logger to ``INFO``:
 
    .. code-block:: python
 
       logging.getLogger("alembic.runtime.plugins").setLevel(logging.INFO)
 
-   Each included plugin logs one ``setting up autogenerate plugin ...`` line. A correct configuration shows lines from
-   **both** namespaces: several ``alembic.autogenerate.*`` entries, among them ``schemas`` and ``tables``, which drive
-   the diff, alongside ``alembic_pg_autogen.compare`` and ``alembic_pg_autogen.checkconstraints``. Lines from only one
-   namespace mean the corresponding wildcard is missing from the list.
+   Each included plugin logs one ``setting up autogenerate plugin ...`` line. A correct configuration logs lines from
+   **both** namespaces. It logs several ``alembic.autogenerate.*`` entries, among them ``schemas`` and ``tables``,
+   which drive the diff. It also logs ``alembic_pg_autogen.compare`` and ``alembic_pg_autogen.checkconstraints``.
+   Lines from one namespace only mean that your list is missing the other wildcard.
 
-3. Autogenerate as usual
-------------------------
+3. Run autogenerate as usual
+----------------------------
 
 .. code-block:: bash
 
    alembic revision --autogenerate -m "add audit trigger"
 
-4. Generated migration
-----------------------
+4. Read the generated migration
+-------------------------------
 
-The migration file will contain ``op.execute()`` calls with no custom op imports needed:
+The migration file contains ``op.execute()`` calls. It imports no custom operations:
 
 .. code-block:: python
 
@@ -111,22 +112,21 @@ The migration file will contain ``op.execute()`` calls with no custom op imports
        op.execute("DROP TRIGGER set_updated_at ON public.my_table")
        op.execute("DROP FUNCTION public.audit_trigger_func()")
 
-Note that the ``upgrade`` DDL is the **canonical** form read back from PostgreSQL's catalog,
-not a copy of your input. This means formatting will differ from what you wrote, but the
-semantics are identical.
+The DDL in ``upgrade`` is the **canonical** form that the extension reads back from PostgreSQL's catalog. The DDL is
+not a copy of your input. The formatting therefore differs from your text, and the meaning stays identical.
 
 5. What gets managed
 --------------------
 
-An object type becomes *managed* when you declare it, and within a managed type the declared set is the whole
-truth: anything found in the inspected schemas that you did not declare is dropped.
+An object type becomes *managed* when you declare it. Inside a managed type, your declared set is the whole truth. The
+extension drops each object that it finds in the inspected schemas and that you did not declare.
 
-A key you never pass leaves that object type unmanaged — its catalog is never queried, nothing is diffed, and no
-``CREATE``/``REPLACE``/``DROP`` operations are emitted for it. The configuration above declares functions and
-triggers, so existing views are left untouched, and you can adopt the library one object type at a time.
+A key that you never pass leaves that object type unmanaged. The extension queries no catalog, compares nothing, and
+emits no ``CREATE``, ``REPLACE``, or ``DROP`` operation for that type. The configuration above declares functions and
+triggers, so existing views stay unchanged. You can adopt the library one object type at a time.
 
-To record that opt-out at the configuration site, or to set it conditionally, pass the ``IGNORED`` sentinel. It
-means exactly what omitting the key means:
+Pass the ``IGNORED`` sentinel to record the unmanaged object type in the configuration, or to set it conditionally. The
+sentinel means exactly what an absent key means:
 
 .. code-block:: python
 
@@ -138,26 +138,26 @@ means exactly what omitting the key means:
        autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
        pg_functions=PG_FUNCTIONS,
        pg_triggers=PG_TRIGGERS,
-       pg_views=IGNORED,  # leave views alone for now
+       pg_views=IGNORED,  # views are not managed yet, so keep them
    )
 
-Neither is the same as passing an empty sequence. ``pg_views=[]`` declares "there should be no views", so every
-existing view is dropped; ``pg_views=IGNORED`` declares "views are none of my business". Watch out for this if you
-build the DDL list dynamically:
+An empty sequence means something else. ``pg_views=[]`` declares that the schema contains no views, so the extension
+drops every existing view. ``pg_views=IGNORED`` declares that this configuration does not manage views. Note the
+difference when you build the DDL list at runtime:
 
 .. code-block:: python
 
    pg_views = collect_view_ddl() or IGNORED
 
-With no object type declared the comparator does nothing at all. Since an absent key is what leaves a type
-unmanaged, a misspelled key would silently manage nothing; unrecognized ``pg_*`` options that look like a
-recognized one are logged as a warning naming the key you meant.
+The comparator does nothing when you declare no object type. An absent key is what leaves a type unmanaged, so a
+misspelled key manages nothing. The extension logs a warning for each unrecognized ``pg_*`` option that resembles a
+recognized one. The warning names the option you meant.
 
 6. Check constraints
 --------------------
 
-Check constraints need no declaration of their own: they stay in your SQLAlchemy metadata, where Alembic already
-manages them.
+Check constraints need no separate declaration. They stay in your SQLAlchemy metadata, where Alembic already manages
+them.
 
 .. code-block:: python
 
@@ -169,8 +169,8 @@ manages them.
 
        __table_args__ = (CheckConstraint("amount > 0", name="ck_orders_amount"),)
 
-Alembic notices when a named constraint appears or disappears, but it cannot tell whether two constraints sharing a
-name still mean the same thing — normalizing SQL expressions is not possible in a backend-agnostic way. This package
+Alembic detects a named constraint that appears or disappears. Alembic cannot decide whether two constraints with the
+same name still mean the same thing. No backend-agnostic way exists to normalize SQL expressions. This package
 asks PostgreSQL instead, so an edited expression produces a migration rather than silent drift:
 
 .. code-block:: python
@@ -179,12 +179,12 @@ asks PostgreSQL instead, so an edited expression produces a migration rather tha
        op.drop_constraint("ck_orders_amount", "orders", type_="check")
        op.create_check_constraint("ck_orders_amount", "orders", "amount > 0")
 
-This augments Alembic; it does not supersede it
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This package augments Alembic
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Check constraints are the one area where this package and Alembic both have a comparator running, so it is worth being
-precise about who does what. This package fills a gap in Alembic's coverage; it does not take over check constraints.
-Leave ``alembic.autogenerate.checkconstraint_byname`` enabled.
+Check constraints are the one area where this package and Alembic both run a comparator. The division of work
+therefore deserves a precise description. This package fills a gap in Alembic's coverage. This package does not
+replace Alembic for check constraints. Keep ``alembic.autogenerate.checkconstraint_byname`` enabled.
 
 .. list-table::
    :header-rows: 1
@@ -201,40 +201,43 @@ Leave ``alembic.autogenerate.checkconstraint_byname`` enabled.
      - ``drop_constraint``
    * - Name on **both** sides, expression possibly changed
      - ``alembic_pg_autogen.checkconstraints``
-     - ``drop_constraint`` + re-create
+     - ``drop_constraint`` and ``create_check_constraint``
 
-Alembic's comparator matches by name and, for a name present on both sides, always reports the two as equal:
-``DefaultImpl.compare_check_constraint`` returns ``Equal()`` and the PostgreSQL dialect does not override it. That
-undecided case is exactly and only what this package claims; it ignores names that exist on one side alone.
+Alembic's comparator matches constraints by name. For a name that exists on both sides, it always reports the two
+constraints as equal: ``DefaultImpl.compare_check_constraint`` returns ``Equal()``, and the PostgreSQL dialect does not
+override that method. This package claims that undecided case, and it claims nothing else. It ignores each name that
+exists on one side alone.
 
-Because the two sets are disjoint, no operation is ever emitted twice, so there is nothing to be gained by disabling
-Alembic's comparator and a great deal to lose: added and removed constraints would stop being detected entirely, with
-nothing from this package to replace them.
+The two sets of names are disjoint, so no operation is ever emitted twice. You gain nothing when you disable Alembic's
+comparator, and you lose a lot. Alembic then detects no added constraint and no removed constraint, and this package
+replaces none of that work.
 
-The practical consequence: a schema whose only drift is constraints you forgot to declare and ones you no longer want
-will see **nothing at all** from this package, and every operation in the migration will have come from Alembic. That
-is the intended division of labor rather than a failure.
+One consequence matters in practice. Your schema may drift only through constraints that you forgot to declare and
+constraints that you no longer want. This package then reports **nothing at all**, and Alembic emits every operation in
+the migration. That outcome is the intended division of work rather than a failure.
 
 How the comparison works
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-The comparison round-trips each expression through the database: the constraint is added to its table under a
-throwaway name inside a savepoint that is rolled back, and PostgreSQL's own deparsed form is compared against the
-catalog. That is why ``amount >= 0`` in your model and ``amount >= 0::numeric`` in the catalog are not reported as a
-difference, while ``amount > 0`` is.
+The comparison sends each expression through the database. It adds the constraint to its table under a throwaway name
+inside a savepoint, and then reverts the savepoint. It compares PostgreSQL's own deparsed form against the catalog.
+Your model may contain ``amount >= 0``, and the catalog may contain ``amount >= 0::numeric``. The comparator reports no
+difference for that pair. It does report a difference for ``amount > 0``.
 
-A few details worth knowing:
+Four details are worth knowing:
 
-- Only **named** constraints on tables present in ``target_metadata`` are compared. Unnamed constraints cannot be
-  matched by name, and constraints generated by a type (such as ``Enum(native_enum=False)``) are left to Alembic.
-- Probe constraints are added ``NOT VALID``, so no table scan happens and existing rows that would violate a newly
-  tightened constraint do not turn autogenerate into an error.
-- Adding a constraint takes a brief ``ACCESS EXCLUSIVE`` lock, held until the autogenerate transaction ends. This is
-  the usual reason to point ``alembic revision --autogenerate`` at a development database rather than a production one.
-- A constraint that cannot be compiled or applied is reported as unchanged with a warning, never as an error.
+- The comparator only compares **named** constraints on tables that exist in ``target_metadata``. It cannot match an
+  unnamed constraint by name. It leaves each constraint that a type generates (such as ``Enum(native_enum=False)``) to
+  Alembic.
+- The comparator adds each probe constraint as ``NOT VALID``. PostgreSQL therefore runs no table scan. Existing rows
+  that violate a newly tightened constraint do not turn autogenerate into an error.
+- Each added constraint takes a brief ``ACCESS EXCLUSIVE`` lock. PostgreSQL holds the lock until the autogenerate
+  transaction ends. This lock is the usual reason to run ``alembic revision --autogenerate`` against a development
+  database instead of a production database.
+- The comparator reports a constraint that it cannot compile or apply as unchanged, and it logs a warning. It never
+  raises an error for such a constraint.
 
-This comparison is a separate Alembic plugin, so you can turn it off while keeping function, trigger, and view
-support:
+This comparison is a separate Alembic plugin. You can disable it and keep support for functions, triggers, and views:
 
 .. code-block:: python
 
@@ -248,8 +251,8 @@ support:
        ],
    )
 
-Note that the exclusion applies to *this* package's plugin. Leave ``alembic.autogenerate.checkconstraint_byname``
-enabled either way: excluding it stops added and removed constraints from being detected at all, and there is no
-duplication to avoid by turning it off.
+The exclusion above applies to *this* package's plugin. Keep ``alembic.autogenerate.checkconstraint_byname`` enabled in
+both cases. An exclusion of Alembic's plugin stops the detection of added constraints and removed constraints. No
+duplicate operation exists to avoid.
 
-Requires Alembic 1.19 or newer, the release that made check constraints part of default autogenerate.
+Requires Alembic 1.19 or newer. That release added check constraints to default autogenerate.
