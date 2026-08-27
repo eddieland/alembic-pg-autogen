@@ -129,6 +129,18 @@ on materialized views. Drops SHALL proceed in reverse dependency order.
   → drop functions → create/replace functions → create/replace views → create/replace materialized views →
   create/replace triggers)
 
+#### Scenario: Materialized view over regular view drops safely
+
+- **WHEN** a managed materialized view selects from a managed regular view and both are removed from the desired state
+- **THEN** the `DropMaterializedViewOp` precedes the `DropViewOp`, so both drops succeed
+
+#### Scenario: Regular view over materialized view is unsupported
+
+- **WHEN** a managed regular view selects from a managed materialized view
+- **THEN** the configuration is unsupported: canonicalization raises a missing-relation error at autogenerate time, and
+  a migration dropping such a materialized view fails while the dependent view exists
+- **AND** the failure is loud and names the dependency; no fixed group order supports both dependency directions
+
 #### Scenario: Only view ops
 
 - **WHEN** the diff produces only view operations (no function, materialized view, or trigger changes)

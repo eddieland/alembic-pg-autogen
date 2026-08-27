@@ -6,8 +6,6 @@ PostgreSQL 16 instance at /tmp/pgmv port 55432.
 
 from __future__ import annotations
 
-import traceback
-
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, ProgrammingError
 
@@ -82,7 +80,11 @@ with engine.connect() as conn:
     conn.execute(text("CREATE UNIQUE INDEX mv1_category_idx ON mv1 (category)"))
     sp = conn.begin_nested()
     conn.execute(text("DROP MATERIALIZED VIEW IF EXISTS mv1"))
-    conn.execute(text("CREATE MATERIALIZED VIEW mv1 AS SELECT   category  ,  sum(amount)   AS total FROM t GROUP BY category WITH NO DATA"))
+    conn.execute(
+        text(
+            "CREATE MATERIALIZED VIEW mv1 AS SELECT   category  ,  sum(amount)   AS total FROM t GROUP BY category WITH NO DATA"
+        )
+    )
     canonical = conn.execute(text(MATVIEW_QUERY)).all()[0].definition
     sp.rollback()
     print("canonical definition read back inside savepoint:")
@@ -137,14 +139,18 @@ with engine.connect() as conn:
     sp = conn.begin_nested()
     conn.execute(text("DROP MATERIALIZED VIEW mv1"))
     conn.execute(
-        text("create materialized view MV1 as select CATEGORY, SUM(amount) total from public.t group by category with no data")
+        text(
+            "create materialized view MV1 as select CATEGORY, SUM(amount) total from public.t group by category with no data"
+        )
     )
     variant = conn.execute(text(MATVIEW_QUERY)).all()[0].definition
     sp.rollback()
     sp = conn.begin_nested()
     conn.execute(text("DROP MATERIALIZED VIEW mv1"))
     conn.execute(
-        text("CREATE MATERIALIZED VIEW mv1 AS\n  SELECT category,\n         sum(amount) AS total\n  FROM t\n  GROUP BY category\n  WITH NO DATA")
+        text(
+            "CREATE MATERIALIZED VIEW mv1 AS\n  SELECT category,\n         sum(amount) AS total\n  FROM t\n  GROUP BY category\n  WITH NO DATA"
+        )
     )
     variant2 = conn.execute(text(MATVIEW_QUERY)).all()[0].definition
     sp.rollback()
@@ -157,7 +163,11 @@ with engine.connect() as conn:
     print(f"indexes before: {idx}")
     sp = conn.begin_nested()
     conn.execute(text("DROP MATERIALIZED VIEW mv1"))
-    conn.execute(text("CREATE MATERIALIZED VIEW mv1 AS SELECT category, sum(amount) AS total FROM t GROUP BY category WITH NO DATA"))
+    conn.execute(
+        text(
+            "CREATE MATERIALIZED VIEW mv1 AS SELECT category, sum(amount) AS total FROM t GROUP BY category WITH NO DATA"
+        )
+    )
     idx_gone = [r.indexdef for r in conn.execute(text(INDEX_QUERY), {"name": "mv1"})]
     print(f"indexes after drop+create: {idx_gone}")
     for stmt in idx:
@@ -194,6 +204,33 @@ with engine.connect() as conn:
         print(f"failed: {e.orig}")
     finally:
         sp.rollback()
+
+    # ------------------------------------------------------------------
+    proof("10b. No fixed drop order is safe for both view/matview dependency directions")
+    sp = conn.begin_nested()
+    conn.execute(text("CREATE VIEW v_on_mv AS SELECT * FROM mv1"))
+    try:
+        conn.execute(text("DROP MATERIALIZED VIEW mv1"))
+        print("UNEXPECTED: dropped matview with dependent regular view")
+    except DBAPIError as e:
+        print(f"view-over-matview: matview-first drop fails as expected: {e.orig}")
+    sp.rollback()
+    sp = conn.begin_nested()
+    conn.execute(text("CREATE VIEW v_base AS SELECT id FROM t"))
+    conn.execute(text("CREATE MATERIALIZED VIEW mv_on_v AS SELECT * FROM v_base WITH NO DATA"))
+    try:
+        conn.execute(text("DROP VIEW v_base"))
+        print("UNEXPECTED: dropped view with dependent matview")
+    except DBAPIError as e:
+        print(f"matview-over-view: view-first drop fails as expected: {e.orig}")
+    sp.rollback()
+    sp = conn.begin_nested()
+    conn.execute(text("CREATE VIEW v_base AS SELECT id FROM t"))
+    conn.execute(text("CREATE MATERIALIZED VIEW mv_on_v AS SELECT * FROM v_base WITH NO DATA"))
+    conn.execute(text("DROP MATERIALIZED VIEW mv_on_v"))
+    conn.execute(text("DROP VIEW v_base"))
+    print("matview-over-view: matview-first drop order succeeds (the supported direction)")
+    sp.rollback()
 
     # ------------------------------------------------------------------
     proof("11. ALTER MATERIALIZED VIEW cannot change the defining query")
@@ -233,7 +270,9 @@ except Exception as e:
 # unqualified name
 tree2 = postgast.parse("CREATE MATERIALIZED VIEW mv2 AS SELECT 1 WITH NO DATA")
 ctas2 = next(postgast.find_nodes(tree2, pg_query_pb2.CreateTableAsStmt), None)
-print(f"unqualified: schema={ctas2.into.rel.schemaname!r} name={ctas2.into.rel.relname!r} skip_data={ctas2.into.skip_data}")
+print(
+    f"unqualified: schema={ctas2.into.rel.schemaname!r} name={ctas2.into.rel.relname!r} skip_data={ctas2.into.skip_data}"
+)
 
 # make sure plain CREATE TABLE AS is distinguishable from CREATE MATERIALIZED VIEW
 tree3 = postgast.parse("CREATE TABLE t2 AS SELECT 1")

@@ -114,8 +114,25 @@ Canonicalization execution order: matview drops, functions, views, materialized 
 grows from 6 groups to 8, with materialized view drops before view drops and materialized view creates after view
 creates. Triggers cannot reference materialized views (fact 9), so triggers stay last unchanged.
 
-A regular view over a materialized view cannot be expressed under this fixed order. This mirrors the existing stance on
-view-to-view dependencies and is documented as a limitation.
+Dependencies between the two view types run in both directions. A materialized view can select from a regular view, and
+a regular view can select from a materialized view. The prototype confirmed that each direction fails under the opposite
+drop order, so no fixed order is safe for both. This change supports one direction: a materialized view over a regular
+view. Creates run views first, and drops run materialized views first, which is exactly what that direction needs.
+
+The other direction, a regular view over a materialized view, is unsupported and fails loudly in both places. During
+canonicalization the view DDL executes before the materialized view exists, so PostgreSQL raises a missing-relation
+error at autogenerate time. In an emitted migration, dropping such a materialized view fails because the dependent view
+still exists, and the error names the dependency. This mirrors the existing stance on view-to-view dependencies and is
+documented as a limitation.
+
+**Alternative considered:** dependency-aware ordering derived from `pg_depend` or from parsing the view queries.
+Rejected for this change: the library has no dependency graph for any object type, desired-state objects do not exist in
+the catalog to query, and the `add-views` change already settled this trade-off. A later change can add it for every
+relation type at once.
+
+**Alternative considered:** the reverse fixed order (view drops before materialized view drops, materialized view
+creates before view creates). Rejected: it supports the rarer direction and breaks the common one, a materialized view
+that aggregates over regular views.
 
 ### D8: Configuration key `pg_materialized_views`
 
