@@ -177,6 +177,46 @@ expression to the table as a throwaway `NOT VALID` constraint. It works inside a
 savepoint. PostgreSQL therefore reports `amount >= 0` and the catalog form `amount >= 0::numeric` as one constraint. A
 real change still appears as a change.
 
+## Skipping `drop_index` for dropped tables
+
+Alembic writes one `op.drop_index()` call for each index of a table that the same migration drops. PostgreSQL removes
+the indexes together with the table, so the calls do nothing. PostgreSQL also rejects `DROP INDEX` for a unique index
+that a foreign key depends on, so a redundant call can fail the migration. The
+[Alembic cookbook](https://alembic.sqlalchemy.org/en/latest/cookbook.html#don-t-emit-drop-index-when-the-table-is-to-be-dropped-as-well)
+documents a `process_revision_directives` hook that removes the calls. This package ships that hook as a ready-made
+Alembic `Rewriter`.
+
+The hook is opt-in. Alembic's plugin system only registers comparators, so `autogenerate_plugins` cannot enable the
+hook. Pass it to `context.configure()`:
+
+```python
+from alembic_pg_autogen import skip_drop_index_for_dropped_tables
+
+context.configure(
+    connection=connection,
+    target_metadata=target_metadata,
+    autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+    process_revision_directives=skip_drop_index_for_dropped_tables,
+)
+```
+
+The hook processes `upgrade()` and `downgrade()` separately. In each function it removes every `drop_index` whose table
+the same function drops. Every other operation stays in place. A dropped table therefore renders as one call:
+
+```python
+def upgrade() -> None:
+    op.drop_table("orders")
+```
+
+The `create_index` in `downgrade()` stays, because the index must exist again after the table returns.
+
+Use `chain()` when you already pass a `process_revision_directives` hook. The method accepts a plain function or another
+`Rewriter`, and it returns a new `Rewriter`:
+
+```python
+process_revision_directives = skip_drop_index_for_dropped_tables.chain(my_hook)
+```
+
 ## Installation
 
 ```bash
