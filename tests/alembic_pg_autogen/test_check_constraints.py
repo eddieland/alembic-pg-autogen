@@ -408,6 +408,13 @@ class TestTypeBoundOwnership(TestComparatorSkips):
         assert op.constraint_name == "ck_orders_status"
         assert probed == []
 
+    def test_constraint_of_a_column_alembic_is_adding_is_left_to_add_column(self, catalog: Any):
+        """``op.add_column()`` creates the constraint with the column; a second add would fail the upgrade."""
+        catalog({}, {})
+        reflected = Table("orders", MetaData(), Column("id", Integer, primary_key=True))
+
+        assert self._run(_enum_orders_table(Status), conn_table=reflected).is_empty()
+
     def test_missing_constraint_declaring_not_valid_is_added_not_valid(self, catalog: Any):
         """Alembic's renderer drops ``postgresql_not_valid``; the subclass keeps the declared state in the migration."""
         catalog({}, {})
@@ -891,6 +898,18 @@ class TestCheckConstraintAutogenerateIntegration:
         assert "create_check_constraint" in upgrade_body
         assert "ck_orders_status" in upgrade_body
         assert "drop_constraint" not in upgrade_body
+
+    def test_new_enum_column_upgrades_with_one_constraint(self, alembic_project: AlembicProject):
+        """Regression test: the comparator once added the constraint that ``add_column`` already creates."""
+        alembic_project.execute("CREATE TABLE orders (id serial PRIMARY KEY)")
+        metadata = _enum_orders_table(Status).metadata
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata)
+
+        assert "add_column" in _upgrade_body(content)
+        assert "create_check_constraint" not in _upgrade_body(content)
+        assert _status_constraint(alembic_project).validated is True
+        assert "ck_orders_status" not in _autogenerate_and_upgrade(alembic_project, metadata)
 
     def test_canonicalization_leaves_no_probe_constraints_behind(self, alembic_project: AlembicProject):
         alembic_project.execute("CREATE TABLE orders (id serial PRIMARY KEY, amount numeric)")

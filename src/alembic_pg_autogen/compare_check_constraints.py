@@ -118,6 +118,11 @@ def _compare_check_constraint_expressions(
         constraint = metadata_constraints[name]
         if not name_included(name):
             continue
+        # A column Alembic is about to add brings its constraint along: ``op.add_column()`` emits every constraint
+        # the column's type generates.  Adding it here too would fail the upgrade with a duplicate constraint.
+        if any(column.name not in conn_table.c for column in constraint.columns):
+            log.debug("Type-bound check constraint %r waits for its column on table %r", name, table_name)
+            continue
         if not autogen_context.run_object_filters(constraint, name, "check_constraint", False, None):
             continue
         expression = _compile_check_expression(constraint, autogen_context.dialect)

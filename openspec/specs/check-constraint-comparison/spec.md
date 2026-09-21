@@ -173,6 +173,12 @@ expression.
   `postgresql_not_valid=True`
 - **THEN** a `CreateCheckConstraintNotValidOp` is appended, so the rendered migration keeps the flag
 
+#### Scenario: Constraint of a column Alembic is adding is left to add_column
+
+- **WHEN** the model declares a non-native `Enum` column that the database table lacks
+- **THEN** the comparator emits nothing for its constraint, because `op.add_column()` creates the constraint with the
+  column
+
 #### Scenario: Missing plain constraint stays Alembic's job
 
 - **WHEN** a constraint that is not type-bound exists in the model only
