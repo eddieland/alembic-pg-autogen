@@ -23,7 +23,8 @@ Every decision below rests on prototype work against PostgreSQL 16.13, SQLAlchem
    behaves the same way. One `UPDATE` makes the stored text match the declared text.
 1. `CREATE TEMP TABLE ... (LIKE t INCLUDING DEFAULTS)` copies `nextval()` of the real sequence. An insert into the copy
    advances that sequence, and a savepoint rollback does not restore it.
-1. Under `standard_conforming_strings`, doubling single quotes is the only escaping a literal needs.
+1. `quote_literal()` doubles single quotes. When the value holds a backslash, it also doubles each backslash and adds an
+   `E` prefix. That form reads back identically under both `standard_conforming_strings` settings.
 1. Some numeric text forms are not valid bare literals: `NaN`, `Infinity`, and `$12.34` for `money`.
 1. `pg_attribute` reports which declared columns exist. A declared column the catalog lacks reads as `NULL`.
 1. `DELETE` of a row that a foreign key references fails with `ForeignKeyViolation`.
@@ -95,6 +96,10 @@ key needs an explicit `key`. A key change is a delete plus an insert, because id
 The current side may hold duplicate keys when `key` is not unique in the database. The comparator raises `ValueError`
 naming the table, because the diff has no correct answer.
 
+Identity is the `text` form of the key values (D3). A key type whose equality is broader than text equality, such as
+`citext`, turns a case change into a delete plus an insert. Declare key values exactly as the database stores them. The
+risks section covers the failure mode.
+
 ### D3: Both sides compare PostgreSQL's `text` form of each value
 
 `inspect_rows()` reads `SELECT col::text, ...` from the live table. `canonicalize_rows()` reads the same expression from
@@ -155,10 +160,11 @@ def downgrade() -> None:
     op.execute("INSERT INTO public.order_status (code, label, sort_order) VALUES ('draft', 'Draft', '5')")
 ```
 
-Every value renders as a single-quoted literal with doubled single quotes (fact 9), and `NULL` renders bare. No literal
-carries a cast, because the column context supplies the type (fact 5). An `UPDATE` sets only the columns whose text
-changed and filters on the key columns. Schema, table, and column names go through
-`autogen_context.dialect.identifier_preparer`, like `DropViewOp`.
+Every value renders the way `quote_literal()` renders it (fact 9). Single quotes are doubled. A value that holds a
+backslash gets doubled backslashes and an `E` prefix, so the literal is correct under both `standard_conforming_strings`
+settings. `NULL` renders bare. No literal carries a cast, because the column context supplies the type (fact 5). An
+`UPDATE` sets only the columns whose text changed and filters on the key columns. Schema, table, and column names go
+through `autogen_context.dialect.identifier_preparer`, like `DropViewOp`.
 
 One statement per row keeps each row on its own line. A diff of the migration file then shows one changed row as one
 changed line.
@@ -234,8 +240,14 @@ migration restores the declared value. Mitigation: this is the declarative contr
 `expand_only` protects undeclared rows only, never edits to declared rows.
 
 **[Unique constraints on non-key columns]** → Two rows that swap a unique `sort_order` fail at migration time under the
-fixed update-then-insert order. Mitigation: the statements are visible and editable, and PostgreSQL names the
-constraint.
+fixed update-then-insert order. Mitigation: declare the constraint `DEFERRABLE INITIALLY DEFERRED`, so PostgreSQL checks
+it at commit. Otherwise the statements are visible and editable, and PostgreSQL names the constraint. Detecting swaps
+and rendering a temporary value is out of scope for this change.
+
+**[Key types with equality broader than text]** → A `citext` key that changes case becomes a delete plus an insert. On a
+sync table the `DELETE` fails when a foreign key references the row. On an expand-only table the `INSERT` fails on the
+primary key. Mitigation: both failures are visible at migration time, and D2 tells users to declare key values as
+stored. Rejecting such key types at validation time needs a list of types that this change does not attempt.
 
 **[Whole-table reads]** → A declared table with many rows makes autogenerate slow. Mitigation: none in this change. The
 proposal names it as a non-goal.

@@ -245,12 +245,17 @@ with engine.connect() as conn:
     print("  -> the desired-side temp table must carry column types only, never defaults")
 
     # ------------------------------------------------------------------
-    proof("9. Doubling single quotes is the only escaping needed under standard_conforming_strings")
-    print("  standard_conforming_strings =", conn.execute(text("SHOW standard_conforming_strings")).scalar())
-    sp = conn.begin_nested()
-    conn.execute(text("INSERT INTO typed (code) VALUES ('it''s a \\ backslash')"))
-    print("  stored:", conn.execute(text("SELECT code FROM typed WHERE code LIKE 'it%'")).scalar())
-    sp.rollback()
+    proof("9. quote_literal() output reads back identically under both standard_conforming_strings settings")
+    for setting in ("on", "off"):
+        sp = conn.begin_nested()
+        conn.execute(text(f"SET LOCAL standard_conforming_strings = {setting}"))
+        value = "it's a \\ backslash"
+        literal = conn.execute(text("SELECT quote_literal(:v)"), {"v": value}).scalar()
+        conn.execute(text(f"INSERT INTO typed (code) VALUES ({literal})"))
+        stored = conn.execute(text("SELECT code FROM typed WHERE code LIKE 'it%'")).scalar()
+        print(f"  {setting:>3}: literal {literal!r} stores {stored!r}, round trip exact: {stored == value}")
+        sp.rollback()
+    print("  no backslash:", conn.execute(text("SELECT quote_literal('it''s')")).scalar())
 
     # ------------------------------------------------------------------
     proof("10. Text forms that are safe to render without quotes, and ones that are not")
