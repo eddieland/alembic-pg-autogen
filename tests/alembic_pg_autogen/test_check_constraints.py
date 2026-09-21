@@ -67,6 +67,11 @@ def _orders_table(*constraints: CheckConstraint, metadata: MetaData | None = Non
     )
 
 
+def _always_created(_compiler: object) -> bool:
+    """A ``_create_rule`` that accepts every dialect, standing in for the rule SQLAlchemy attaches to an ``Enum``."""
+    return True
+
+
 def _jsonb_comparison() -> ColumnElement[bool]:
     """Return an expression PostgreSQL can run but SQLAlchemy cannot render with literal binds."""
     table = Table("payloads", MetaData(), Column("payload", JSONB()))
@@ -168,6 +173,13 @@ class TestMetadataCheckConstraints:
             Column("id", Integer, primary_key=True),
             Column("flag", Boolean(create_constraint=True, name="ck_orders_flag")),
         )
+
+        assert _metadata_check_constraints(table, PG_DIALECT) == {}
+
+    def test_type_bound_constraint_without_a_create_rule_skipped(self):
+        """SQLAlchemy always attaches a rule; a constraint that lacks one keeps the old skip behavior."""
+        constraint = CheckConstraint("amount >= 0", name="ck_orders_amount", _type_bound=True)
+        table = _orders_table(constraint)
 
         assert _metadata_check_constraints(table, PG_DIALECT) == {}
 
@@ -395,6 +407,16 @@ class TestTypeBoundOwnership(TestComparatorSkips):
         assert type(op) is CreateCheckConstraintOp
         assert op.constraint_name == "ck_orders_status"
         assert probed == []
+
+    def test_missing_add_of_an_uncompilable_constraint_is_skipped(self, catalog: Any):
+        """A type-bound constraint whose expression has no literal renderer is treated as unchanged, as elsewhere."""
+        catalog({}, {})
+        constraint = CheckConstraint(
+            _jsonb_comparison(), name="ck_orders_payload", _type_bound=True, _create_rule=_always_created
+        )
+        table = _orders_table(constraint)
+
+        assert self._run(table).is_empty()
 
     def test_name_filter_vetoes_the_missing_add(self, catalog: Any):
         catalog({}, {})

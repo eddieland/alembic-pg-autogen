@@ -42,6 +42,8 @@ class TestParseValueSet:
             "status <> ANY (ARRAY['a'::text])",
             "priority IN (1, 2)",
             "status IN ('a', NULL)",
+            "status = 'a'",
+            "orders.* IN ('a')",
             "amount > 0",
             "status IN ('a') AND amount > 0",
             "status IN (other_column)",
