@@ -45,6 +45,7 @@ from alembic_pg_autogen.ops import (
     ReplaceTriggerOp,
     ReplaceViewOp,
 )
+from alembic_pg_autogen.rewriters import skip_drop_index_for_dropped_tables
 from alembic_pg_autogen.sentinels import IGNORED, Ignored
 
 _Plugin.setup_plugin_from_module(_compare_mod, "alembic_pg_autogen.compare")
@@ -89,4 +90,5 @@ __all__: Final[Sequence[str]] = [
     "inspect_triggers",
     "inspect_views",
     "setup",
+    "skip_drop_index_for_dropped_tables",
 ]

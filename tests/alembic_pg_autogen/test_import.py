@@ -141,3 +141,17 @@ def test_ignored_exports_importable():
 
     assert IGNORED is not None
     assert Ignored is not None
+
+
+def test_rewriter_export_present():
+    import alembic_pg_autogen
+
+    assert "skip_drop_index_for_dropped_tables" in alembic_pg_autogen.__all__
+
+
+def test_rewriter_export_importable():
+    from alembic.autogenerate.rewriter import Rewriter
+
+    from alembic_pg_autogen import skip_drop_index_for_dropped_tables
+
+    assert isinstance(skip_drop_index_for_dropped_tables, Rewriter)

@@ -256,3 +256,21 @@ both cases. An exclusion of Alembic's plugin stops the detection of added constr
 duplicate operation exists to avoid.
 
 Requires Alembic 1.19 or newer. That release added check constraints to default autogenerate.
+
+7. Skip ``drop_index`` for dropped tables
+-----------------------------------------
+
+Alembic emits ``op.drop_index()`` for each index of a table that the same migration drops. The `Alembic cookbook
+<https://alembic.sqlalchemy.org/en/latest/cookbook.html#don-t-emit-drop-index-when-the-table-is-to-be-dropped-as-well>`_
+hook that removes those calls ships here as an opt-in ``Rewriter``:
+
+.. code-block:: python
+
+   from alembic_pg_autogen import skip_drop_index_for_dropped_tables
+
+   context.configure(
+       ...,
+       process_revision_directives=skip_drop_index_for_dropped_tables,
+   )
+
+Use ``skip_drop_index_for_dropped_tables.chain(my_hook)`` if you already pass a hook.
