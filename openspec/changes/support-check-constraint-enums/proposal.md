@@ -41,8 +41,8 @@ costs 1 ms under `ACCESS EXCLUSIVE`. A separate `VALIDATE CONSTRAINT` then costs
 - Add a classifier that parses both expressions with postgast and reports `WIDENING`, `NARROWING`, `DISJOINT`, or
   `UNKNOWN`
 - Emit a changed value set as `create_check_constraint(..., postgresql_not_valid=True)`
-- Add `ValidateConstraintOp` and a renderer for it, emitted whenever the catalog holds a matching constraint with
-  `convalidated = false`
+- Add `ValidateConstraintOp` and a renderer for it, emitted when the catalog holds a matching constraint with
+  `convalidated = false` and the metadata constraint does not set `postgresql_not_valid`
 - Render a comment on a `NARROWING` or `DISJOINT` change, stating that rows holding a removed value need a backfill
   before the validation revision
 - Keep the current drop and add path for every expression that is not a value set
@@ -55,6 +55,11 @@ to `CheckConstraint`, so the flag reaches the DDL. Alembic defines no validate o
 A changed value set spans two revisions. The first revision adds the new constraint, which PostgreSQL enforces for new
 rows at once. The second revision validates it. The comparator converges on its own, because it reads `convalidated` on
 every run. Whether `"deferred"` is the right default is the open question for the design document.
+
+Metadata decides whether a constraint ends up validated. A user who wants a constraint to stay `NOT VALID` declares
+`postgresql_not_valid=True` on it. The comparator then emits no validation, because the catalog already matches the
+declared state. SQLAlchemy carries the flag on both sides. It sets `dialect_options["postgresql"]["not_valid"]` on a
+declared constraint. Reflection sets the same key for a catalog constraint that reads `NOT VALID`.
 
 ## Non-goals
 
@@ -87,8 +92,12 @@ every run. Whether `"deferred"` is the right default is the open question for th
   `"immediate"` value keeps the current single validating statement.
 - **Behavior**: **BREAKING** for a configuration that declares non-native `Enum` columns. This package compares those
   constraints for the first time. The next run may emit a migration that closes existing drift.
-- **Types**: `CheckConstraintInfo` gains an appended field. **BREAKING** for positional destructuring.
-- **Downgrade**: `ValidateConstraintOp` reverses to nothing. PostgreSQL offers no statement that marks a validated
-  constraint unvalidated.
+- **Types**: `CheckConstraintInfo` gains an appended field. **BREAKING** for positional destructuring, and for direct
+  construction with the current four fields. A default value for `validated` keeps construction working. The design
+  document decides whether to add one.
+- **Downgrade**: `ValidateConstraintOp` reverses to nothing, because PostgreSQL offers no statement that marks a
+  validated constraint unvalidated. A downgrade of the validation revision therefore leaves the constraint valid. That
+  state is stricter than the state the revision started from, and the preceding revision drops the constraint anyway.
+  The operation does not raise on downgrade. Raising would make every revision chain that contains one irreversible.
 - **Dependencies**: none new. postgast already parses both expression forms.
 - **Public API**: new exports for `ValidateConstraintOp` and the classifier.
