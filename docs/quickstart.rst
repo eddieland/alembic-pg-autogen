@@ -184,7 +184,9 @@ This package augments Alembic
 
 Check constraints are the one area where this package and Alembic both run a comparator. The division of work
 therefore deserves a precise description. This package fills a gap in Alembic's coverage. This package does not
-replace Alembic for check constraints. Keep ``alembic.autogenerate.checkconstraint_byname`` enabled.
+replace Alembic for check constraints. Keep ``alembic.autogenerate.checkconstraint_byname`` enabled. Alembic 1.19.2
+renamed that plugin to ``alembic.ext.checkconstraint_byname`` and no longer enables it through the
+``alembic.autogenerate.*`` wildcard, so list it explicitly in ``autogenerate_plugins``.
 
 .. list-table::
    :header-rows: 1
@@ -202,6 +204,13 @@ replace Alembic for check constraints. Keep ``alembic.autogenerate.checkconstrai
    * - Name on **both** sides, expression possibly changed
      - ``alembic_pg_autogen.checkconstraints``
      - ``drop_constraint`` and ``create_check_constraint``
+   * - Name on **both** sides, set of allowed values changed
+     - ``alembic_pg_autogen.checkconstraints``
+     - ``drop_constraint`` and ``create_check_constraint(..., postgresql_not_valid=True)``, then
+       ``VALIDATE CONSTRAINT`` on the next run
+   * - Name on **both** sides, database holds ``NOT VALID``
+     - ``alembic_pg_autogen.checkconstraints``
+     - ``ALTER TABLE ... VALIDATE CONSTRAINT``
 
 Alembic's comparator matches constraints by name. For a name that exists on both sides, it always reports the two
 constraints as equal: ``DefaultImpl.compare_check_constraint`` returns ``Equal()``, and the PostgreSQL dialect does not
@@ -227,8 +236,9 @@ difference for that pair. It does report a difference for ``amount > 0``.
 Four details are worth knowing:
 
 - The comparator only compares **named** constraints on tables that exist in ``target_metadata``. It cannot match an
-  unnamed constraint by name. It leaves each constraint that a type generates (such as ``Enum(native_enum=False)``) to
-  Alembic.
+  unnamed constraint by name. It compares the constraint that ``Enum(native_enum=False)`` generates, because
+  PostgreSQL holds that constraint. It skips the constraint that ``Boolean(create_constraint=True)`` generates, because
+  PostgreSQL has a native boolean type and SQLAlchemy never creates it there.
 - The comparator adds each probe constraint as ``NOT VALID``. PostgreSQL therefore runs no table scan. Existing rows
   that violate a newly tightened constraint do not turn autogenerate into an error.
 - Each added constraint takes a brief ``ACCESS EXCLUSIVE`` lock. PostgreSQL holds the lock until the autogenerate
@@ -236,6 +246,39 @@ Four details are worth knowing:
   database instead of a production database.
 - The comparator reports a constraint that it cannot compile or apply as unchanged, and it logs a warning. It never
   raises an error for such a constraint.
+
+Non-native enums and value sets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``Enum(Status, native_enum=False, create_constraint=True, name="ck_orders_status")`` stores the column as ``varchar``
+and derives a named ``CHECK`` constraint from the Python enum. This package compares that constraint. Alembic's plugin
+skips every constraint that a type generates, and it therefore reports the database copy as removed. This package runs
+after that plugin, discards that drop, and adds the constraint when the database lacks it. A changed set of members
+produces a migration here and nowhere else.
+
+A changed value set spans two revisions:
+
+1. The first revision drops the old constraint and adds the new one with ``postgresql_not_valid=True``. PostgreSQL
+   enforces the new constraint for new rows at once and skips the scan of existing rows. The ``ACCESS EXCLUSIVE`` lock
+   lasts about one millisecond.
+2. The next ``alembic revision --autogenerate`` reads ``pg_constraint.convalidated`` and emits
+   ``op.execute("ALTER TABLE orders VALIDATE CONSTRAINT ck_orders_status")``. The scan runs under
+   ``SHARE UPDATE EXCLUSIVE``, which blocks no reads and no writes.
+
+A removed member needs a backfill between the two revisions. The first migration carries a comment that names the
+removed values and the constraint. The validation revision fails with a check violation until every row holds an
+allowed value. Write the backfill yourself.
+
+The downgrade of a validation revision renders ``pass`` and a comment. PostgreSQL offers no statement that marks a
+validated constraint as ``NOT VALID`` again.
+
+Only ``col IN (...)`` and ``col = ANY (ARRAY[...])`` classify as value sets. Every other changed expression keeps the
+single validating statement. Two settings change this behavior:
+
+- ``pg_check_constraint_validation="immediate"`` in ``context.configure()`` keeps one validating statement for every
+  change. The default is ``"deferred"``. Any other value raises ``ValueError``.
+- ``postgresql_not_valid=True`` on a ``CheckConstraint`` in your models keeps that constraint ``NOT VALID``. The
+  comparator then emits no validation for it, and the rendered ``create_check_constraint`` call carries the flag.
 
 This comparison is a separate Alembic plugin. You can disable it and keep support for functions, triggers, and views:
 

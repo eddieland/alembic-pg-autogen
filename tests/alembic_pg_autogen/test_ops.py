@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from alembic.operations.ops import MigrateOperation
+from alembic.operations.ops import CreateCheckConstraintOp, DropConstraintOp, MigrateOperation
+from sqlalchemy import CheckConstraint, Column, MetaData, String, Table
 
 from alembic_pg_autogen import (
+    CreateCheckConstraintNotValidOp,
     CreateFunctionOp,
     CreateTriggerOp,
     CreateViewOp,
@@ -10,10 +12,12 @@ from alembic_pg_autogen import (
     DropTriggerOp,
     DropViewOp,
     FunctionInfo,
+    NoOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
     ReplaceViewOp,
     TriggerInfo,
+    ValidateConstraintOp,
     ViewInfo,
 )
 
@@ -280,3 +284,89 @@ class TestNoOperationRegistration:
         from alembic.operations.base import Operations
 
         assert not hasattr(Operations, "create_view")
+
+
+class TestValidateConstraintOp:
+    def test_stores_fields(self):
+        op = ValidateConstraintOp("ck_orders_status", "orders", schema="sales")
+        assert op.constraint_name == "ck_orders_status"
+        assert op.table_name == "orders"
+        assert op.schema == "sales"
+
+    def test_schema_defaults_to_none(self):
+        assert ValidateConstraintOp("ck_orders_status", "orders").schema is None
+
+    def test_reverse_is_a_noop_that_names_the_constraint(self):
+        rev = ValidateConstraintOp("ck_orders_status", "orders", schema="sales").reverse()
+        assert isinstance(rev, NoOp)
+        assert "ck_orders_status" in rev.reason
+        assert "sales.orders" in rev.reason
+        assert "NOT VALID" in rev.reason
+
+    def test_to_diff_tuple(self):
+        op = ValidateConstraintOp("ck_orders_status", "orders", schema="public")
+        assert op.to_diff_tuple() == ("validate_constraint", "public", "orders", "ck_orders_status")
+
+    def test_extends_migrate_operation(self):
+        assert issubclass(ValidateConstraintOp, MigrateOperation)
+
+
+class TestCreateCheckConstraintNotValidOp:
+    def test_forces_the_not_valid_keyword(self):
+        op = CreateCheckConstraintNotValidOp("ck_orders_status", "orders", "status IN ('a')")
+        assert op.kw["postgresql_not_valid"] is True
+        assert op.to_constraint().dialect_options["postgresql"]["not_valid"] is True
+
+    def test_overrides_an_explicit_false(self):
+        op = CreateCheckConstraintNotValidOp("ck", "orders", "status IN ('a')", postgresql_not_valid=False)
+        assert op.kw["postgresql_not_valid"] is True
+
+    def test_defaults(self):
+        op = CreateCheckConstraintNotValidOp("ck", "orders", "status IN ('a')")
+        assert op.column is None
+        assert op.removed_values == ()
+        assert op.schema is None
+
+    def test_removed_values_become_a_tuple(self):
+        op = CreateCheckConstraintNotValidOp("ck", "orders", "status IN ('a')", column="status", removed_values=["b"])
+        assert op.column == "status"
+        assert op.removed_values == ("b",)
+
+    def test_from_constraint(self):
+        table = Table("orders", MetaData(schema="sales"), Column("status", String(16)))
+        constraint = CheckConstraint("status IN ('a')", name="ck_orders_status", table=table)
+
+        op = CreateCheckConstraintNotValidOp.from_constraint(constraint, column="status", removed_values=("b", "c"))
+
+        assert isinstance(op, CreateCheckConstraintNotValidOp)
+        assert op.constraint_name == "ck_orders_status"
+        assert op.table_name == "orders"
+        assert op.schema == "sales"
+        assert op.kw["postgresql_not_valid"] is True
+        assert op.column == "status"
+        assert op.removed_values == ("b", "c")
+
+    def test_reverse_is_a_drop(self):
+        rev = CreateCheckConstraintNotValidOp("ck_orders_status", "orders", "status IN ('a')").reverse()
+        assert isinstance(rev, DropConstraintOp)
+        assert rev.constraint_name == "ck_orders_status"
+        assert rev.table_name == "orders"
+
+    def test_extends_alembics_op(self):
+        assert issubclass(CreateCheckConstraintNotValidOp, CreateCheckConstraintOp)
+
+
+class TestNoOp:
+    def test_stores_reason(self):
+        assert NoOp("nothing to undo").reason == "nothing to undo"
+
+    def test_reverse_keeps_the_reason(self):
+        rev = NoOp("nothing to undo").reverse()
+        assert isinstance(rev, NoOp)
+        assert rev.reason == "nothing to undo"
+
+    def test_to_diff_tuple(self):
+        assert NoOp("nothing to undo").to_diff_tuple() == ("noop", "nothing to undo")
+
+    def test_extends_migrate_operation(self):
+        assert issubclass(NoOp, MigrateOperation)

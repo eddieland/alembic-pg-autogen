@@ -35,17 +35,27 @@ from alembic_pg_autogen.inspect import (
     inspect_views,
 )
 from alembic_pg_autogen.ops import (
+    CreateCheckConstraintNotValidOp,
     CreateFunctionOp,
     CreateTriggerOp,
     CreateViewOp,
     DropFunctionOp,
     DropTriggerOp,
     DropViewOp,
+    NoOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
     ReplaceViewOp,
+    ValidateConstraintOp,
 )
 from alembic_pg_autogen.sentinels import IGNORED, Ignored
+from alembic_pg_autogen.value_sets import (
+    ValueSet,
+    ValueSetChange,
+    classify_value_set_change,
+    compare_value_sets,
+    parse_value_set,
+)
 
 _Plugin.setup_plugin_from_module(_compare_mod, "alembic_pg_autogen.compare")
 _Plugin.setup_plugin_from_module(_compare_check_constraints_mod, "alembic_pg_autogen.checkconstraints")
@@ -58,6 +68,7 @@ __all__: Final[Sequence[str]] = [
     "Action",
     "CanonicalState",
     "CheckConstraintInfo",
+    "CreateCheckConstraintNotValidOp",
     "CreateFunctionOp",
     "CreateTriggerOp",
     "CreateViewOp",
@@ -69,12 +80,16 @@ __all__: Final[Sequence[str]] = [
     "FunctionOp",
     "IGNORED",
     "Ignored",
+    "NoOp",
     "ReplaceFunctionOp",
     "ReplaceTriggerOp",
     "ReplaceViewOp",
     "SQLCreatable",
     "TriggerInfo",
     "TriggerOp",
+    "ValidateConstraintOp",
+    "ValueSet",
+    "ValueSetChange",
     "ViewInfo",
     "ViewOp",
     "canonicalize",
@@ -82,11 +97,14 @@ __all__: Final[Sequence[str]] = [
     "canonicalize_functions",
     "canonicalize_triggers",
     "canonicalize_views",
+    "classify_value_set_change",
+    "compare_value_sets",
     "current_schema",
     "diff",
     "inspect_check_constraints",
     "inspect_functions",
     "inspect_triggers",
     "inspect_views",
+    "parse_value_set",
     "setup",
 ]

@@ -4,12 +4,18 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from alembic.operations.ops import MigrateOperation
+from alembic.operations.ops import CreateCheckConstraintOp, MigrateOperation
 from typing_extensions import override
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from alembic.operations.ops import DropConstraintOp
+    from sqlalchemy import Constraint
+    from sqlalchemy.sql.elements import ColumnElement, TextClause
+
     from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
 
 
@@ -188,3 +194,106 @@ class DropViewOp(MigrateOperation):
     def to_diff_tuple(self) -> tuple[str, str, str]:
         """Return a hashable tuple for debugging and comparison."""
         return ("drop_view", self.current.schema, self.current.name)
+
+
+class ValidateConstraintOp(MigrateOperation):
+    """Validate a ``NOT VALID`` check constraint with ``ALTER TABLE ... VALIDATE CONSTRAINT``.
+
+    PostgreSQL scans the table under ``SHARE UPDATE EXCLUSIVE``, which blocks neither reads nor writes.  The comparator
+    emits this operation when the catalog holds a constraint as ``NOT VALID`` and the metadata constraint does not
+    declare ``postgresql_not_valid=True``.
+    """
+
+    constraint_name: str
+    table_name: str
+    schema: str | None
+
+    def __init__(self, constraint_name: str, table_name: str, schema: str | None = None) -> None:
+        self.constraint_name = constraint_name
+        self.table_name = table_name
+        self.schema = schema
+
+    @override
+    def reverse(self) -> NoOp:
+        """Reverse is nothing.  PostgreSQL cannot mark a validated constraint as ``NOT VALID`` again."""
+        table = self.table_name if self.schema is None else f"{self.schema}.{self.table_name}"
+        return NoOp(
+            f"Constraint {self.constraint_name} on {table} stays validated. "
+            "PostgreSQL cannot mark a validated constraint as NOT VALID."
+        )
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, str | None, str, str]:
+        """Return a hashable tuple for debugging and comparison."""
+        return ("validate_constraint", self.schema, self.table_name, self.constraint_name)
+
+
+class CreateCheckConstraintNotValidOp(CreateCheckConstraintOp):
+    """Create a check constraint as ``NOT VALID``, so PostgreSQL skips the scan of existing rows.
+
+    Alembic's own renderer drops ``postgresql_not_valid`` from ``op.kw``.  This subclass forces the flag into ``kw``, so
+    ``to_constraint()`` and ``reverse()`` work unchanged, and registers a renderer that appends the keyword to the
+    rendered ``op.create_check_constraint(...)`` call.
+
+    ``column`` and ``removed_values`` describe a narrowed value set.  When ``removed_values`` is not empty, the renderer
+    writes a comment above the call that asks for a backfill before the validation revision.
+    """
+
+    column: str | None
+    removed_values: tuple[str, ...]
+
+    def __init__(
+        self,
+        constraint_name: Any,
+        table_name: str,
+        condition: str | TextClause | ColumnElement[Any],
+        *,
+        schema: str | None = None,
+        column: str | None = None,
+        removed_values: Sequence[str] = (),
+        **kw: Any,
+    ) -> None:
+        kw["postgresql_not_valid"] = True
+        super().__init__(constraint_name, table_name, condition, schema=schema, **kw)
+        self.column = column
+        self.removed_values = tuple(removed_values)
+
+    @classmethod
+    @override
+    def from_constraint(
+        cls, constraint: Constraint, *, column: str | None = None, removed_values: Sequence[str] = ()
+    ) -> CreateCheckConstraintNotValidOp:
+        """Build the operation from a metadata ``CheckConstraint``, recording the values the change removes."""
+        op = super().from_constraint(constraint)
+        assert isinstance(op, CreateCheckConstraintNotValidOp)
+        op.column = column
+        op.removed_values = tuple(removed_values)
+        return op
+
+    @override
+    def reverse(self) -> DropConstraintOp:
+        """Reverse is dropping the constraint, exactly as for a validated one."""
+        return super().reverse()
+
+
+class NoOp(MigrateOperation):
+    """An operation that executes nothing.
+
+    It renders as ``pass`` followed by a comment that holds ``reason``, so a migration body that contains nothing else
+    stays valid Python and tells the reader why.  :meth:`ValidateConstraintOp.reverse` returns one.
+    """
+
+    reason: str
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    @override
+    def reverse(self) -> NoOp:
+        """Reverse of nothing is nothing."""
+        return NoOp(self.reason)
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, str]:
+        """Return a hashable tuple for debugging and comparison."""
+        return ("noop", self.reason)

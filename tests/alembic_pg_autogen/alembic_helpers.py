@@ -98,6 +98,7 @@ target_metadata = config.attributes.get("target_metadata") or MetaData()
 # Forward only the pg_* attributes the test actually set, so a test can express a genuinely
 # absent key (and a misspelled one) rather than always passing all three.
 pg_opts = {k: v for k, v in config.attributes.items() if k.startswith("pg_")}
+autogenerate_plugins = config.attributes.get("autogenerate_plugins") or ["alembic.autogenerate.*", "alembic_pg_autogen.*"]
 
 
 def run_migrations_online() -> None:
@@ -105,7 +106,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=conn,
             target_metadata=target_metadata,
-            autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+            autogenerate_plugins=autogenerate_plugins,
             **pg_opts,
         )
         with context.begin_transaction():
