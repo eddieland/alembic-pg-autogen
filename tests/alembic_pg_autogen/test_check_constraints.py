@@ -439,8 +439,10 @@ class TestTypeBoundOwnership(TestComparatorSkips):
             _jsonb_comparison(), name="ck_orders_payload", _type_bound=True, _create_rule=_always_created
         )
         table = _orders_table(constraint)
+        # The reflected table holds the column, so the constraint reaches the compile step and fails there.
+        reflected = Table("orders", MetaData(), Column("id", Integer, primary_key=True), Column("payload", JSONB()))
 
-        assert self._run(table).is_empty()
+        assert self._run(table, conn_table=reflected).is_empty()
 
     def test_name_filter_vetoes_the_missing_add(self, catalog: Any):
         catalog({}, {})
