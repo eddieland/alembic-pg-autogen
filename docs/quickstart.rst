@@ -256,18 +256,20 @@ skips every constraint that a type generates, and it therefore reports the datab
 after that plugin, discards that drop, and adds the constraint when the database lacks it. A changed set of members
 produces a migration here and nowhere else.
 
-A changed value set spans two revisions:
+An added member is one migration with one validating ``create_check_constraint``. No existing row can violate a wider
+set.
+
+A removed member spans two revisions, because rows that hold the removed value need a backfill first:
 
 1. The first revision drops the old constraint and adds the new one with ``postgresql_not_valid=True``. PostgreSQL
    enforces the new constraint for new rows at once and skips the scan of existing rows. The ``ACCESS EXCLUSIVE`` lock
-   lasts about one millisecond.
+   lasts about one millisecond. The migration carries a comment that names the removed values and the constraint.
 2. The next ``alembic revision --autogenerate`` reads ``pg_constraint.convalidated`` and emits
    ``op.execute("ALTER TABLE orders VALIDATE CONSTRAINT ck_orders_status")``. The scan runs under
    ``SHARE UPDATE EXCLUSIVE``, which blocks no reads and no writes.
 
-A removed member needs a backfill between the two revisions. The first migration carries a comment that names the
-removed values and the constraint. The validation revision fails with a check violation until every row holds an
-allowed value. Write the backfill yourself.
+The validation revision fails with a check violation until every row holds an allowed value. Write the backfill
+yourself.
 
 The downgrade of a validation revision renders ``pass`` and a comment. PostgreSQL offers no statement that marks a
 validated constraint as ``NOT VALID`` again.

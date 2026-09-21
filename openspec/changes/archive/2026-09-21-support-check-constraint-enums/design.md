@@ -27,7 +27,7 @@ its dependencies shape this design:
 **Goals:**
 
 - Compare the constraint that a non-native `Enum` produces, without a new declaration channel
-- Emit a changed value set in two revisions: one `NOT VALID` addition, one validation
+- Emit a value set that loses values in two revisions: one `NOT VALID` addition, one validation
 - Converge on the validation state from the catalog alone, so a missed revision heals on the next run
 - Keep every other expression on the current drop and add path
 
@@ -99,9 +99,12 @@ parent class, then rewrites the trailing `)` to `, postgresql_not_valid=True)`. 
 `op.create_check_constraint(...)` with one extra keyword, and it works inside `batch_alter_table` because the parent
 renderer handles the batch prefix.
 
-The comparator builds this operation when the classification is `WIDENING`, `NARROWING`, or `DISJOINT` and the
-validation mode is `"deferred"`. It also builds it when the metadata constraint declares `postgresql_not_valid=True`,
-whatever the expression, because that flag would otherwise vanish in the rendered migration.
+The comparator builds this operation when the classification is `NARROWING` or `DISJOINT` and the validation mode is
+`"deferred"`. A `WIDENING` keeps one validating statement. Every existing row already satisfies a superset, so the
+validation cannot fail, and the second revision would only buy a lighter lock that Alembic's single upgrade transaction
+holds anyway. Adding a value is the common change, and it stays one migration. It also builds it when the metadata
+constraint declares `postgresql_not_valid=True`, whatever the expression, because that flag would otherwise vanish in
+the rendered migration.
 
 Every add operation the comparator emits, this one and Alembic's plain `CreateCheckConstraintOp`, is built from the
 compiled expression text rather than through `from_constraint()`. The `Enum` constraint holds a bound column expression.

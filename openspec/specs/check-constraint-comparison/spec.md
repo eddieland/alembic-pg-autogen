@@ -41,10 +41,10 @@ named check constraint whose name appears on both sides. It SHALL NOT consider c
   appended, in that order
 - **AND** the generated migration renders `op.drop_constraint(...)` followed by `op.create_check_constraint(...)`
 
-#### Scenario: Changed value set produces drop and NOT VALID add
+#### Scenario: Narrowed value set produces drop and NOT VALID add
 
-- **WHEN** the database has `CHECK (status IN ('a', 'b'))` named `ck_orders_status` and the model declares the same name
-  over `('a', 'b', 'c')`
+- **WHEN** the database has `CHECK (status IN ('a', 'b', 'c'))` named `ck_orders_status` and the model declares the same
+  name over `('a', 'b')`
 - **AND** `pg_check_constraint_validation` is `"deferred"` or absent
 - **THEN** a `DropConstraintOp` and a `CreateCheckConstraintNotValidOp` are appended, in that order
 - **AND** the generated migration renders `op.create_check_constraint(..., postgresql_not_valid=True)`
@@ -187,15 +187,16 @@ expression.
 ### Requirement: Deferred validation of changed value sets
 
 The comparator SHALL classify each changed expression with `classify_value_set_change(current, desired)`. When the
-result is `WIDENING`, `NARROWING`, or `DISJOINT` and the validation mode is `"deferred"`, it SHALL emit
-`CreateCheckConstraintNotValidOp` in place of `AddConstraintOp`. It SHALL also emit `CreateCheckConstraintNotValidOp`
+result is `NARROWING` or `DISJOINT` and the validation mode is `"deferred"`, it SHALL emit
+`CreateCheckConstraintNotValidOp` in place of `AddConstraintOp`. A `WIDENING` SHALL keep the validating
+`AddConstraintOp`, because no existing row can violate a superset. It SHALL also emit `CreateCheckConstraintNotValidOp`
 when the metadata constraint declares `postgresql_not_valid=True`, whatever the classification.
 
-#### Scenario: Widening carries no removed values
+#### Scenario: Widening keeps the validating path
 
 - **WHEN** the value set widens from `('a', 'b')` to `('a', 'b', 'c')`
-- **THEN** the emitted operation has `removed_values == ()`
-- **AND** the rendered migration holds no backfill comment
+- **THEN** a `DropConstraintOp` and a plain `AddConstraintOp` are emitted
+- **AND** the rendered migration holds no `postgresql_not_valid` and no backfill comment
 
 #### Scenario: Narrowing carries the removed values
 

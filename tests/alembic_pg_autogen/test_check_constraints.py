@@ -391,10 +391,10 @@ class TestTypeBoundOwnership(TestComparatorSkips):
         assert drop in ops
 
     def test_discarded_drop_still_lets_a_changed_expression_through(self, catalog: Any):
-        catalog({"ck_orders_status": CURRENT_STATUS}, {"ck_orders_status": WIDER_STATUS})
+        catalog({"ck_orders_status": WIDER_STATUS}, {"ck_orders_status": CURRENT_STATUS})
         spurious = DropConstraintOp("ck_orders_status", "orders", type_="check")
 
-        ops = self._run(_enum_orders_table(WiderStatus), existing=[spurious]).ops
+        ops = self._run(_enum_orders_table(Status), existing=[spurious]).ops
 
         assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintNotValidOp]
         assert ops[0] is not spurious
@@ -558,19 +558,15 @@ SHIFTED_STATUS = "(status)::text = ANY ((ARRAY['done'::character varying, 'shipp
 
 
 class TestValueSetChanges(TestComparatorSkips):
-    """A changed value set is added ``NOT VALID`` in deferred mode; everything else keeps the validating add."""
+    """A value set that loses values is added ``NOT VALID`` in deferred mode; everything else keeps the validating add."""
 
-    def test_widening_emits_not_valid_add(self, catalog: Any):
+    def test_widening_keeps_the_validating_add(self, catalog: Any):
+        """No existing row can violate a wider set, so adding a value needs no second revision."""
         catalog({"ck_orders_status": CURRENT_STATUS}, {"ck_orders_status": WIDER_STATUS})
 
         ops = self._run(_enum_orders_table(WiderStatus)).ops
 
-        assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintNotValidOp]
-        add = ops[1]
-        assert isinstance(add, CreateCheckConstraintNotValidOp)
-        assert add.column == "status"
-        assert add.removed_values == ()
-        assert add.kw["postgresql_not_valid"] is True
+        assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintOp]
 
     def test_narrowing_records_removed_values(self, catalog: Any):
         catalog({"ck_orders_status": CURRENT_STATUS}, {"ck_orders_status": NARROWER_STATUS})
@@ -599,8 +595,8 @@ class TestValueSetChanges(TestComparatorSkips):
         next run in the same process then saw that copy, believed the model wanted ``NOT VALID``, and emitted no
         validation.
         """
-        catalog({"ck_orders_status": CURRENT_STATUS}, {"ck_orders_status": WIDER_STATUS})
-        table = _enum_orders_table(WiderStatus)
+        catalog({"ck_orders_status": WIDER_STATUS}, {"ck_orders_status": CURRENT_STATUS})
+        table = _enum_orders_table(Status)
 
         # Alembic reflects the database into its own Table; the stub must not hand the comparator the model's.
         for op in self._run(table, conn_table=_orders_table()).ops:
@@ -631,9 +627,9 @@ class TestValueSetChanges(TestComparatorSkips):
         assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintOp]
 
     def test_immediate_mode_keeps_the_validating_add(self, catalog: Any):
-        catalog({"ck_orders_status": CURRENT_STATUS}, {"ck_orders_status": WIDER_STATUS})
+        catalog({"ck_orders_status": WIDER_STATUS}, {"ck_orders_status": CURRENT_STATUS})
 
-        ops = self._run(_enum_orders_table(WiderStatus), opts={VALIDATION_MODE_KEY: "immediate"}).ops
+        ops = self._run(_enum_orders_table(Status), opts={VALIDATION_MODE_KEY: "immediate"}).ops
 
         assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintOp]
 
@@ -771,16 +767,17 @@ class TestCheckConstraintAutogenerateIntegration:
 
         assert "drop_constraint" not in content
 
-    def test_non_native_enum_widening_renders_not_valid(self, alembic_project: AlembicProject):
+    def test_non_native_enum_widening_renders_one_validating_statement(self, alembic_project: AlembicProject):
         _create_status_table(alembic_project, "'new', 'done'")
 
-        content = _autogenerate(alembic_project, target_metadata=_enum_orders_table(WiderStatus).metadata)
+        content = _autogenerate_and_upgrade(alembic_project, _enum_orders_table(WiderStatus).metadata)
 
         assert "drop_constraint" in content
-        assert "postgresql_not_valid=True" in content
+        assert "create_check_constraint" in content
         assert "'shipped'" in content
+        assert "postgresql_not_valid" not in content
         assert "Backfill" not in content
-        assert "VALIDATE CONSTRAINT" not in content
+        assert _status_constraint(alembic_project).validated is True
 
     def test_non_native_enum_narrowing_renders_backfill_comment(self, alembic_project: AlembicProject):
         _create_status_table(alembic_project, "'new', 'done', 'shipped'")
@@ -799,11 +796,10 @@ class TestCheckConstraintAutogenerateIntegration:
         assert "ck_orders_status" not in content
 
     def test_immediate_mode_keeps_one_validating_statement(self, alembic_project: AlembicProject):
-        _create_status_table(alembic_project, "'new', 'done'")
-
+        _create_status_table(alembic_project, "'new', 'done', 'shipped'")
         content = _autogenerate(
             alembic_project,
-            target_metadata=_enum_orders_table(WiderStatus).metadata,
+            target_metadata=_enum_orders_table(Status).metadata,
             pg_check_constraint_validation="immediate",
         )
 
@@ -837,8 +833,8 @@ class TestCheckConstraintAutogenerateIntegration:
 
     def test_three_runs_converge(self, alembic_project: AlembicProject):
         """Run one adds NOT VALID, run two validates, run three has nothing left to do."""
-        _create_status_table(alembic_project, "'new', 'done'")
-        metadata = _enum_orders_table(WiderStatus).metadata
+        _create_status_table(alembic_project, "'new', 'done', 'shipped'")
+        metadata = _enum_orders_table(Status).metadata
 
         first = _autogenerate_and_upgrade(alembic_project, metadata)
         assert "postgresql_not_valid=True" in first

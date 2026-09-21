@@ -6,11 +6,12 @@ in a backend-agnostic way.  This module closes that gap for PostgreSQL by asking
 expression is round-tripped through the server and compared against the catalog's own deparsed form, so a changed
 ``CHECK`` expression produces a ``DROP CONSTRAINT`` / ``ADD CONSTRAINT`` pair instead of silently drifting.
 
-A changed set of allowed values, such as the constraint a non-native ``Enum`` produces, gets a different pair.  The new
-constraint is added ``NOT VALID``, which PostgreSQL enforces for new rows at once but does not scan the table for.  The
-next autogenerate run reads ``convalidated`` from the catalog and emits the ``VALIDATE CONSTRAINT``, which scans under
-a lock that blocks neither reads nor writes.  Set ``pg_check_constraint_validation="immediate"`` to keep one
-validating statement instead.
+A set of allowed values that loses a value, such as the constraint a non-native ``Enum`` produces when a member goes
+away, gets a different pair.  The new constraint is added ``NOT VALID``, which PostgreSQL enforces for new rows at once
+but does not scan the table for, so rows that hold a removed value can be backfilled first.  The next autogenerate run
+reads ``convalidated`` from the catalog and emits the ``VALIDATE CONSTRAINT``.  Adding a value keeps one validating
+statement, because no existing row can violate a wider set.  Set ``pg_check_constraint_validation="immediate"`` to keep
+one validating statement for every change.
 
 This comparator complements Alembic's ``alembic.autogenerate.checkconstraint_byname`` rather than replacing it, and
 both are needed: that plugin owns names present on only one side (added and removed constraints), while this one owns
@@ -60,8 +61,12 @@ VALIDATION_MODE_KEY: Final = "pg_check_constraint_validation"
 VALIDATION_MODES: Final = ("deferred", "immediate")
 """Accepted values for :data:`VALIDATION_MODE_KEY`.  The first entry is the default."""
 
-_VALUE_SET_CHANGES: Final = frozenset({ValueSetChange.WIDENING, ValueSetChange.NARROWING, ValueSetChange.DISJOINT})
-"""Classifications that describe a value set change and therefore qualify for a ``NOT VALID`` addition."""
+_DEFERRED_CHANGES: Final = frozenset({ValueSetChange.NARROWING, ValueSetChange.DISJOINT})
+"""Value set changes that remove values and therefore qualify for a ``NOT VALID`` addition.
+
+A ``WIDENING`` is left out on purpose.  Every existing row already satisfies a superset, so its validation cannot fail,
+and one validating statement spares the user a second revision.
+"""
 
 
 def setup(plugin: Plugin) -> None:
@@ -348,9 +353,9 @@ def _add_constraint_op(
 ) -> MigrateOperation:
     """Build the operation that adds the changed constraint.
 
-    A value set change in ``"deferred"`` mode, or a constraint that declares ``postgresql_not_valid=True``, is added as
-    :class:`CreateCheckConstraintNotValidOp`.  Every other change keeps Alembic's own validating
-    ``CreateCheckConstraintOp``.  Both are built from ``expression``, the compiled metadata text, for the reason given in
+    A value set that loses values in ``"deferred"`` mode, or a constraint that declares ``postgresql_not_valid=True``,
+    is added as :class:`CreateCheckConstraintNotValidOp`.  Every other change, a widening included, keeps Alembic's own
+    validating ``CreateCheckConstraintOp``.  Both are built from ``expression``, the compiled metadata text, for the reason given in
     :func:`_create_check_constraint_op`.
     """
     current_set = parse_value_set(current_expression)
@@ -358,14 +363,14 @@ def _add_constraint_op(
     change = ValueSetChange.UNKNOWN
     if current_set is not None and desired_set is not None:
         change = compare_value_sets(current_set, desired_set)
-    is_value_set_change = change in _VALUE_SET_CHANGES
+    removes_values = change in _DEFERRED_CHANGES
 
-    if not _declares_not_valid(constraint) and not (defer_validation and is_value_set_change):
+    if not _declares_not_valid(constraint) and not (defer_validation and removes_values):
         return _create_check_constraint_op(constraint, table_name, schema, expression)
 
     column: str | None = None
     removed: list[str] = []
-    if is_value_set_change:
+    if removes_values:
         assert current_set is not None and desired_set is not None
         column = desired_set.column
         removed = sorted(current_set.values - desired_set.values)

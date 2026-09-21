@@ -207,16 +207,24 @@ every constraint that a type generates, and it therefore reports the database co
 that plugin, discards that drop, and adds the constraint when the database lacks it. A changed set of members therefore
 produces a migration here and nowhere else.
 
-A changed value set spans two revisions. The first revision replaces the constraint as `NOT VALID`. PostgreSQL enforces
-the new constraint for every new row at once, and it holds `ACCESS EXCLUSIVE` for one millisecond instead of a full
-table scan:
+An added member is one migration. No existing row can violate a wider set, so the new constraint validates at once:
 
 ```python
 def upgrade() -> None:
     op.drop_constraint("ck_orders_status", "orders", type_="check")
-    op.create_check_constraint(
-        "ck_orders_status", "orders", "status IN ('new', 'done', 'shipped')", postgresql_not_valid=True
-    )
+    op.create_check_constraint("ck_orders_status", "orders", "status IN ('new', 'done', 'shipped')")
+```
+
+A removed member spans two revisions, because rows that hold the removed value need a backfill first. The first revision
+replaces the constraint as `NOT VALID`. PostgreSQL enforces the new constraint for every new row at once, and it holds
+`ACCESS EXCLUSIVE` for one millisecond instead of a full table scan. The migration says which values went away:
+
+```python
+def upgrade() -> None:
+    op.drop_constraint("ck_orders_status", "orders", type_="check")
+    # ck_orders_status no longer allows status IN ('shipped'). Rows that hold a removed value fail validation.
+    # Backfill those rows before the revision that validates ck_orders_status.
+    op.create_check_constraint("ck_orders_status", "orders", "status IN ('new', 'done')", postgresql_not_valid=True)
 ```
 
 The next `alembic revision --autogenerate` reads `convalidated` from the catalog and emits the validation. The scan runs
@@ -225,17 +233,6 @@ under `SHARE UPDATE EXCLUSIVE`, which blocks no reads and no writes:
 ```python
 def upgrade() -> None:
     op.execute("ALTER TABLE orders VALIDATE CONSTRAINT ck_orders_status")
-```
-
-A removed member needs a backfill before that validation. The first migration says so in a comment that names the
-removed values:
-
-```python
-def upgrade() -> None:
-    op.drop_constraint("ck_orders_status", "orders", type_="check")
-    # ck_orders_status no longer allows status IN ('shipped'). Rows that hold a removed value fail validation.
-    # Backfill those rows before the revision that validates ck_orders_status.
-    op.create_check_constraint("ck_orders_status", "orders", "status IN ('new', 'done')", postgresql_not_valid=True)
 ```
 
 The validation revision fails with a check violation until every row holds an allowed value. Write the backfill
