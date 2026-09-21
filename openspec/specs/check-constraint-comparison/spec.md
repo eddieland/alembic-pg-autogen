@@ -167,6 +167,12 @@ expression.
   holds no constraint by that name
 - **THEN** an `AddConstraintOp` for the constraint is appended, honoring `include_name` and `include_object`
 
+#### Scenario: Missing constraint that declares NOT VALID is added NOT VALID
+
+- **WHEN** a type-bound constraint that PostgreSQL creates is absent from the catalog and its model declaration carries
+  `postgresql_not_valid=True`
+- **THEN** a `CreateCheckConstraintNotValidOp` is appended, so the rendered migration keeps the flag
+
 #### Scenario: Missing plain constraint stays Alembic's job
 
 - **WHEN** a constraint that is not type-bound exists in the model only

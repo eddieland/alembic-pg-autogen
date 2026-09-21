@@ -318,7 +318,14 @@ def _create_check_constraint_op(
     new ``CheckConstraint`` to the table those columns belong to, which is the user's metadata table.  A second
     constraint under the same name then shadows the declared one on the next run in the same process.  Text has no
     columns, so nothing attaches, and Alembic renders the same ``create_check_constraint(...)`` call either way.
+
+    A constraint that declares ``postgresql_not_valid=True`` becomes a :class:`CreateCheckConstraintNotValidOp`, because
+    Alembic's renderer would otherwise drop the flag and the migration would validate existing rows at once.
     """
+    if _declares_not_valid(constraint):
+        return CreateCheckConstraintNotValidOp(
+            constraint.name, table_name, expression, schema=schema, **constraint.dialect_kwargs
+        )
     return ops.CreateCheckConstraintOp(
         constraint.name, table_name, expression, schema=schema, **constraint.dialect_kwargs
     )

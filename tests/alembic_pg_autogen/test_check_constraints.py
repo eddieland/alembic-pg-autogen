@@ -408,6 +408,23 @@ class TestTypeBoundOwnership(TestComparatorSkips):
         assert op.constraint_name == "ck_orders_status"
         assert probed == []
 
+    def test_missing_constraint_declaring_not_valid_is_added_not_valid(self, catalog: Any):
+        """Alembic's renderer drops ``postgresql_not_valid``; the subclass keeps the declared state in the migration."""
+        catalog({}, {})
+        constraint = CheckConstraint(
+            "amount >= 0",
+            name="ck_orders_amount",
+            _type_bound=True,
+            _create_rule=_always_created,
+            postgresql_not_valid=True,
+        )
+
+        (op,) = self._run(_orders_table(constraint)).ops
+
+        assert isinstance(op, CreateCheckConstraintNotValidOp)
+        assert op.constraint_name == "ck_orders_amount"
+        assert op.removed_values == ()
+
     def test_missing_add_of_an_uncompilable_constraint_is_skipped(self, catalog: Any):
         """A type-bound constraint whose expression has no literal renderer is treated as unchanged, as elsewhere."""
         catalog({}, {})
