@@ -249,6 +249,23 @@ Two settings change this behavior:
 - `postgresql_not_valid=True` on a `CheckConstraint` in your models keeps that constraint `NOT VALID`. The comparator
   then emits no validation for it.
 
+## Skipping `drop_index` for dropped tables
+
+Alembic emits `op.drop_index()` for each index of a table that the same migration drops. The
+[Alembic cookbook](https://alembic.sqlalchemy.org/en/latest/cookbook.html#don-t-emit-drop-index-when-the-table-is-to-be-dropped-as-well)
+hook that removes those calls ships here as an opt-in `Rewriter`:
+
+```python
+from alembic_pg_autogen import skip_drop_index_for_dropped_tables
+
+context.configure(
+    ...,
+    process_revision_directives=skip_drop_index_for_dropped_tables,
+)
+```
+
+Use `skip_drop_index_for_dropped_tables.chain(my_hook)` if you already pass a hook.
+
 ## Installation
 
 ```bash

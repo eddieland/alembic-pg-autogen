@@ -48,6 +48,7 @@ from alembic_pg_autogen.ops import (
     ReplaceViewOp,
     ValidateConstraintOp,
 )
+from alembic_pg_autogen.rewriters import skip_drop_index_for_dropped_tables
 from alembic_pg_autogen.sentinels import IGNORED, Ignored
 from alembic_pg_autogen.value_sets import (
     ValueSet,
@@ -107,4 +108,5 @@ __all__: Final[Sequence[str]] = [
     "inspect_views",
     "parse_value_set",
     "setup",
+    "skip_drop_index_for_dropped_tables",
 ]

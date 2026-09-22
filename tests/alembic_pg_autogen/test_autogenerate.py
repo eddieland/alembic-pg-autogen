@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 from alembic.command import revision
+from sqlalchemy import Column, Index, Integer, MetaData, Table
 
-from alembic_pg_autogen import IGNORED
+from alembic_pg_autogen import IGNORED, skip_drop_index_for_dropped_tables
 
 if TYPE_CHECKING:
     from .alembic_helpers import AlembicProject
@@ -517,3 +518,78 @@ FOR EACH ROW EXECUTE FUNCTION {schema}.touch_order()"""
         assert "touch_order_trg" in content
         assert "order_ids" in content
         assert "left unmanaged" not in caplog.text
+
+
+@pytest.mark.integration
+class TestSkipDropIndexForDroppedTables:
+    """The opt-in rewriter removes ``drop_index`` for tables the same migration drops."""
+
+    def test_default_emits_drop_index_before_drop_table(self, alembic_project: AlembicProject):
+        """Baseline: without the rewriter, Alembic writes the redundant ``drop_index``."""
+        schema = alembic_project.schema
+        alembic_project.execute(f"CREATE TABLE {schema}.orders (id int, customer_id int)")
+        alembic_project.execute(f"CREATE INDEX ix_orders_customer ON {schema}.orders (customer_id)")
+
+        content = _autogenerate(alembic_project, target_metadata=MetaData())
+
+        assert "op.drop_index(" in content
+        assert "ix_orders_customer" in content
+        assert "op.drop_table('orders')" in content
+
+    def test_rewriter_removes_drop_index_for_dropped_table(self, alembic_project: AlembicProject):
+        schema = alembic_project.schema
+        alembic_project.execute(f"CREATE TABLE {schema}.orders (id int, customer_id int)")
+        alembic_project.execute(f"CREATE INDEX ix_orders_customer ON {schema}.orders (customer_id)")
+
+        content = _autogenerate(
+            alembic_project,
+            target_metadata=MetaData(),
+            process_revision_directives=skip_drop_index_for_dropped_tables,
+        )
+
+        assert "op.drop_table('orders')" in content
+        assert "op.drop_index(" not in content
+        # The downgrade recreates the table and its index.
+        assert "op.create_table('orders'" in content
+        assert "op.create_index(" in content
+
+    def test_rewriter_keeps_drop_index_for_surviving_table(self, alembic_project: AlembicProject):
+        schema = alembic_project.schema
+        alembic_project.execute(f"CREATE TABLE {schema}.orders (id int, customer_id int)")
+        alembic_project.execute(f"CREATE INDEX ix_orders_customer ON {schema}.orders (customer_id)")
+        alembic_project.execute(f"CREATE TABLE {schema}.obsolete (id int)")
+
+        metadata = MetaData()
+        Table("orders", metadata, Column("id", Integer), Column("customer_id", Integer))
+
+        content = _autogenerate(
+            alembic_project,
+            target_metadata=metadata,
+            process_revision_directives=skip_drop_index_for_dropped_tables,
+        )
+
+        assert "op.drop_table('obsolete')" in content
+        assert "op.drop_index(" in content
+        assert "ix_orders_customer" in content
+
+    def test_rewriter_trims_downgrade_of_created_table(self, alembic_project: AlembicProject):
+        """A new table with an index is dropped in ``downgrade()``; that ``drop_index`` is redundant as well."""
+        metadata = MetaData()
+        Table(
+            "orders",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("customer_id", Integer),
+            Index("ix_orders_customer", "customer_id"),
+        )
+
+        content = _autogenerate(
+            alembic_project,
+            target_metadata=metadata,
+            process_revision_directives=skip_drop_index_for_dropped_tables,
+        )
+
+        assert "op.create_table('orders'" in content
+        assert "op.create_index(" in content
+        assert "op.drop_table('orders')" in content
+        assert "op.drop_index(" not in content
