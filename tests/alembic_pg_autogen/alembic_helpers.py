@@ -98,6 +98,7 @@ target_metadata = config.attributes.get("target_metadata") or MetaData()
 # Forward only the pg_* attributes the test actually set, so a test can express a genuinely
 # absent key (and a misspelled one) rather than always passing all three.
 pg_opts = {k: v for k, v in config.attributes.items() if k.startswith("pg_")}
+autogenerate_plugins = config.attributes.get("autogenerate_plugins") or ["alembic.autogenerate.*", "alembic_pg_autogen.*"]
 # ``None`` is Alembic's default, so a test that sets no hook gets the stock behaviour.
 process_revision_directives = config.attributes.get("process_revision_directives")
 
@@ -107,7 +108,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=conn,
             target_metadata=target_metadata,
-            autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+            autogenerate_plugins=autogenerate_plugins,
             process_revision_directives=process_revision_directives,
             **pg_opts,
         )

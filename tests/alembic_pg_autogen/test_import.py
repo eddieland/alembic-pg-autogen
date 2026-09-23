@@ -48,6 +48,44 @@ def test_check_constraint_plugin_registered():
     assert "alembic_pg_autogen.checkconstraints" in _all_plugins
 
 
+def test_check_constraint_validation_exports_present():
+    import alembic_pg_autogen
+
+    for name in (
+        "ValidateConstraintOp",
+        "CreateCheckConstraintNotValidOp",
+        "NoOp",
+        "ValueSet",
+        "ValueSetChange",
+        "parse_value_set",
+        "compare_value_sets",
+        "classify_value_set_change",
+    ):
+        assert name in alembic_pg_autogen.__all__, name
+
+
+def test_check_constraint_validation_exports_importable():
+    from alembic_pg_autogen import (
+        CreateCheckConstraintNotValidOp,
+        NoOp,
+        ValidateConstraintOp,
+        ValueSet,
+        ValueSetChange,
+        classify_value_set_change,
+        compare_value_sets,
+        parse_value_set,
+    )
+
+    assert ValidateConstraintOp is not None
+    assert CreateCheckConstraintNotValidOp is not None
+    assert NoOp is not None
+    assert ValueSet is not None
+    assert ValueSetChange is not None
+    assert parse_value_set is not None
+    assert compare_value_sets is not None
+    assert classify_value_set_change is not None
+
+
 def test_view_exports_present():
     import alembic_pg_autogen
 
@@ -94,6 +132,7 @@ def test_importing_package_registers_renderers():
         import alembic_pg_autogen
         from alembic.autogenerate.render import renderers
         from alembic_pg_autogen import (
+            CreateCheckConstraintNotValidOp,
             CreateFunctionOp,
             CreateTriggerOp,
             CreateViewOp,
@@ -101,10 +140,12 @@ def test_importing_package_registers_renderers():
             DropTriggerOp,
             DropViewOp,
             FunctionInfo,
+            NoOp,
             ReplaceFunctionOp,
             ReplaceTriggerOp,
             ReplaceViewOp,
             TriggerInfo,
+            ValidateConstraintOp,
             ViewInfo,
         )
 
@@ -122,6 +163,9 @@ def test_importing_package_registers_renderers():
             CreateViewOp(view),
             ReplaceViewOp(view, view),
             DropViewOp(view),
+            ValidateConstraintOp("ck", "t"),
+            CreateCheckConstraintNotValidOp("ck", "t", "x IN ('a')"),
+            NoOp("nothing"),
         ]
         for op in ops:
             assert renderers.dispatch(op) is not None, type(op).__name__

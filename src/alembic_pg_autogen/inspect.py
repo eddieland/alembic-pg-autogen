@@ -47,16 +47,20 @@ class ViewInfo(NamedTuple):
 class CheckConstraintInfo(NamedTuple):
     """A PostgreSQL ``CHECK`` constraint as loaded from the system catalog.
 
-    Identity is ``(schema, table_name, name)``.  Unlike the other catalog types, the trailing payload field is
+    Identity is ``(schema, table_name, name)``, or ``info[:3]``.  Unlike the other catalog types, the payload field is
     ``expression`` rather than ``definition``: check constraints are rendered by Alembic's own
     ``op.create_check_constraint()`` / ``op.drop_constraint()`` operations, so what matters here is the normalized
     expression text that PostgreSQL deparses from the stored parse tree, not an executable ``ALTER TABLE`` statement.
+
+    ``validated`` mirrors ``pg_constraint.convalidated``.  A constraint added with ``NOT VALID`` reads ``False`` until
+    ``ALTER TABLE ... VALIDATE CONSTRAINT`` runs.  The default keeps four-field construction working.
     """
 
     schema: str
     table_name: str
     name: str
     expression: str
+    validated: bool = True
 
 
 def inspect_functions(conn: Connection, schemas: Sequence[str] | None = None) -> Sequence[FunctionInfo]:
@@ -165,7 +169,9 @@ def inspect_check_constraints(
     query = text(_CHECK_CONSTRAINTS_QUERY.format(schema_filter=schema_filter, table_filter=table_filter))
     rows = conn.execute(query, params)
     result = [
-        CheckConstraintInfo(schema=r.schema, table_name=r.table_name, name=r.name, expression=r.expression)
+        CheckConstraintInfo(
+            schema=r.schema, table_name=r.table_name, name=r.name, expression=r.expression, validated=r.validated
+        )
         for r in rows
     ]
     log.debug("Inspected %d check constraints (schemas=%s, tables=%s)", len(result), schemas, table_names)
@@ -199,7 +205,8 @@ SELECT
     n.nspname AS schema,
     c.relname AS table_name,
     con.conname AS name,
-    pg_catalog.pg_get_expr(con.conbin, con.conrelid, true) AS expression
+    pg_catalog.pg_get_expr(con.conbin, con.conrelid, true) AS expression,
+    con.convalidated AS validated
 FROM pg_catalog.pg_constraint con
 JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace

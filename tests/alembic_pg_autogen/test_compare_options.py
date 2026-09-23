@@ -47,6 +47,8 @@ class TestWarnUnrecognizedOptions:
             ("pg_trigger", "pg_triggers"),
             ("pg_functons", "pg_functions"),
             ("pg_veiws", "pg_views"),
+            ("pg_check_constraint_validaton", "pg_check_constraint_validation"),
+            ("pg_check_constraints_validation", "pg_check_constraint_validation"),
         ],
     )
     def test_close_match_warns_with_intended_key(self, typo: str, intended: str, caplog: pytest.LogCaptureFixture):
@@ -67,7 +69,12 @@ class TestWarnUnrecognizedOptions:
 
     def test_recognized_keys_are_silent(self, caplog: pytest.LogCaptureFixture):
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            _warn_unrecognized_options({"pg_functions": [], "pg_triggers": [], "pg_views": []})
+            _warn_unrecognized_options({
+                "pg_functions": [],
+                "pg_triggers": [],
+                "pg_views": [],
+                "pg_check_constraint_validation": "immediate",
+            })
 
         assert caplog.records == []
 

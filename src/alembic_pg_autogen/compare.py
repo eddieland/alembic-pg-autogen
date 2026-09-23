@@ -42,6 +42,9 @@ log = logging.getLogger(__name__)
 _DESIRED_STATE_KEYS: Final = ("pg_functions", "pg_triggers", "pg_views")
 """Configuration keys this comparator reads from ``autogen_context.opts``."""
 
+_RECOGNIZED_KEYS: Final = (*_DESIRED_STATE_KEYS, "pg_check_constraint_validation")
+"""Every ``pg_*`` option this package reads, including the check constraint comparator's validation mode."""
+
 _TYPO_CUTOFF: Final = 0.8
 """Similarity above which an unrecognized ``pg_*`` option is reported as a probable misspelling."""
 
@@ -152,9 +155,9 @@ def _warn_unrecognized_options(opts: Mapping[str, object]) -> None:
     not a typo and is left alone.
     """
     for key in opts:
-        if key in _DESIRED_STATE_KEYS or not key.startswith("pg_"):
+        if key in _RECOGNIZED_KEYS or not key.startswith("pg_"):
             continue
-        matches = difflib.get_close_matches(key, _DESIRED_STATE_KEYS, n=1, cutoff=_TYPO_CUTOFF)
+        matches = difflib.get_close_matches(key, _RECOGNIZED_KEYS, n=1, cutoff=_TYPO_CUTOFF)
         if matches:
             log.warning("Unrecognized autogenerate option %r — did you mean %r?", key, matches[0])
 

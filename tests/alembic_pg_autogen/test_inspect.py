@@ -89,7 +89,17 @@ class TestCheckConstraintInfoUnit:
 
     def test_identity_is_schema_table_and_name(self):
         info = CheckConstraintInfo("myschema", "orders", "ck_orders_amount", "expression text")
-        assert info[:-1] == ("myschema", "orders", "ck_orders_amount")
+        assert info[:3] == ("myschema", "orders", "ck_orders_amount")
+
+    def test_validated_defaults_to_true(self):
+        """Four-field construction predates ``validated`` and must keep working."""
+        info = CheckConstraintInfo("s", "t", "n", "e")
+        assert info.validated is True
+
+    def test_validated_can_be_false(self):
+        info = CheckConstraintInfo("s", "t", "n", "e", validated=False)
+        assert info.validated is False
+        assert info[:3] == ("s", "t", "n")
 
 
 class TestBuildSchemaFilterUnit:
@@ -428,6 +438,37 @@ class TestInspectCheckConstraintsIntegration:
 
     def test_no_constraints_returns_empty(self, pg_conn: Connection):
         assert inspect_check_constraints(pg_conn, schemas=["nonexistent"]) == []
+
+    def test_validated_constraint_reads_true(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ck_valid (status varchar(16))"))
+        pg_conn.execute(text("ALTER TABLE public.test_ck_valid ADD CONSTRAINT ck_test_valid CHECK (status IN ('a'))"))
+
+        (info,) = inspect_check_constraints(pg_conn, table_names=["test_ck_valid"])
+
+        assert info.validated is True
+
+    def test_not_valid_constraint_reads_false(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ck_nv (status varchar(16))"))
+        pg_conn.execute(
+            text("ALTER TABLE public.test_ck_nv ADD CONSTRAINT ck_test_nv CHECK (status IN ('a', 'b')) NOT VALID")
+        )
+
+        (info,) = inspect_check_constraints(pg_conn, table_names=["test_ck_nv"])
+
+        assert info.validated is False
+        assert "NOT VALID" not in info.expression
+        assert "ANY" in info.expression
+
+    def test_validate_constraint_flips_to_true(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ck_flip (status varchar(16))"))
+        pg_conn.execute(
+            text("ALTER TABLE public.test_ck_flip ADD CONSTRAINT ck_test_flip CHECK (status IN ('a')) NOT VALID")
+        )
+        pg_conn.execute(text("ALTER TABLE public.test_ck_flip VALIDATE CONSTRAINT ck_test_flip"))
+
+        (info,) = inspect_check_constraints(pg_conn, table_names=["test_ck_flip"])
+
+        assert info.validated is True
 
 
 @pytest.mark.integration

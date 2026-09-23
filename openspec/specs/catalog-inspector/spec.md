@@ -245,12 +245,18 @@ loaded from the catalog.
   - `table_name` (`str`): the constrained table from `pg_class.relname`
   - `name` (`str`): the constraint name from `pg_constraint.conname`
   - `expression` (`str`): the normalized check expression from `pg_get_expr(conbin, conrelid, true)`
+  - `validated` (`bool`, default `True`): the value of `pg_constraint.convalidated`
+
+#### Scenario: Four-field construction keeps working
+
+- **WHEN** `CheckConstraintInfo("s", "t", "n", "e")` is constructed
+- **THEN** `validated` is `True`
 
 #### Scenario: CheckConstraintInfo identity
 
 - **WHEN** two `CheckConstraintInfo` instances have the same `schema`, `table_name`, and `name`
 - **THEN** they represent the same database constraint
-- **AND** `info[:-1]` yields that identity, consistent with the other catalog types
+- **AND** `info[:3]` yields that identity
 
 #### Scenario: Payload is an expression, not executable DDL
 
@@ -317,3 +323,18 @@ resolving Alembic's `None` schema share one implementation.
 
 - **WHEN** the connection's `search_path` is set to another schema
 - **THEN** `current_schema(conn)` returns that schema
+
+### Requirement: Check constraint validation state is loaded
+
+`inspect_check_constraints` SHALL read `pg_constraint.convalidated` into `CheckConstraintInfo.validated`.
+
+#### Scenario: Validated constraint
+
+- **WHEN** a constraint was added without `NOT VALID`, or was validated with `VALIDATE CONSTRAINT`
+- **THEN** its `validated` field is `True`
+
+#### Scenario: NOT VALID constraint
+
+- **WHEN** a constraint was added with `ALTER TABLE ... ADD CONSTRAINT ... CHECK (...) NOT VALID`
+- **THEN** its `validated` field is `False`
+- **AND** its `expression` field holds the deparsed expression without the `NOT VALID` suffix

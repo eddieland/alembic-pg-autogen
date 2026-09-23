@@ -1,4 +1,6 @@
-## ADDED Requirements
+# Spec Delta
+
+## MODIFIED Requirements
 
 ### Requirement: Plugin registration
 
@@ -126,21 +128,7 @@ every other type-bound constraint.
 - **WHEN** `include_name` or `include_object` excludes a constraint with type `"check_constraint"`
 - **THEN** no operation is emitted for it
 
-### Requirement: Failure degrades to "unchanged"
-
-The comparator SHALL treat any constraint it cannot compile or normalize as unchanged, logging a warning rather than
-raising.
-
-#### Scenario: Uncompilable metadata expression
-
-- **WHEN** a metadata constraint's expression cannot be compiled to PostgreSQL SQL
-- **THEN** a warning is logged and no operation is emitted for that constraint
-- **AND** other constraints on the table are still compared
-
-#### Scenario: Expression that will not apply
-
-- **WHEN** the normalization probe fails, for example because the expression references a column that does not exist yet
-- **THEN** a warning is logged and no operation is emitted for that constraint
+## ADDED Requirements
 
 ### Requirement: Type-bound constraints are owned end to end
 

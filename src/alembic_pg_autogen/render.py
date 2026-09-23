@@ -7,17 +7,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from alembic.autogenerate.render import renderers
+from alembic.operations.ops import CreateCheckConstraintOp
 
 from alembic_pg_autogen.ops import (
+    CreateCheckConstraintNotValidOp,
     CreateFunctionOp,
     CreateTriggerOp,
     CreateViewOp,
     DropFunctionOp,
     DropTriggerOp,
     DropViewOp,
+    NoOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
     ReplaceViewOp,
+    ValidateConstraintOp,
 )
 
 if TYPE_CHECKING:
@@ -91,6 +95,52 @@ def _render_drop_view(autogen_context: AutogenContext, op: DropViewOp) -> str:
     preparer = autogen_context.dialect.identifier_preparer
     qualified = f"{preparer.quote_schema(op.current.schema)}.{preparer.quote(op.current.name)}"
     return _render_execute(f"DROP VIEW {qualified}")
+
+
+@renderers.dispatch_for(ValidateConstraintOp)
+def _render_validate_constraint(autogen_context: AutogenContext, op: ValidateConstraintOp) -> str:
+    """Render an ALTER TABLE ... VALIDATE CONSTRAINT via op.execute().
+
+    The identifiers come from the catalog, so they go through the dialect's identifier preparer as in
+    :func:`_render_drop_view`.  The schema qualifier is omitted when the operation carries no schema.
+    """
+    preparer = autogen_context.dialect.identifier_preparer
+    table = preparer.quote(op.table_name)
+    if op.schema is not None:
+        table = f"{preparer.quote_schema(op.schema)}.{table}"
+    return _render_execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {preparer.quote(op.constraint_name)}")
+
+
+@renderers.dispatch_for(CreateCheckConstraintNotValidOp)
+def _render_create_check_constraint_not_valid(
+    autogen_context: AutogenContext, op: CreateCheckConstraintNotValidOp
+) -> list[str]:
+    """Render Alembic's own ``create_check_constraint(...)`` call with ``postgresql_not_valid=True`` appended.
+
+    Alembic's renderer for the parent class handles naming conventions, expression rendering, the schema argument, and
+    the ``batch_op.`` prefix, but it ignores dialect keywords.  Delegating to it and rewriting the closing parenthesis
+    keeps every one of those behaviors.  A narrowed value set also gets a comment that asks for a backfill.
+    """
+    render_parent = renderers.dispatch(CreateCheckConstraintOp)
+    call = render_parent(autogen_context, op)
+    assert isinstance(call, str) and call.endswith(")"), call
+    call = f"{call[:-1]}, postgresql_not_valid=True)"
+    if not op.removed_values:
+        return [call]
+
+    name = str(op.constraint_name)
+    values = ", ".join(repr(value) for value in op.removed_values)
+    return [
+        f"# {name} no longer allows {op.column} IN ({values}). Rows that hold a removed value fail validation.",
+        f"# Backfill those rows before the revision that validates {name}.",
+        call,
+    ]
+
+
+@renderers.dispatch_for(NoOp)
+def _render_noop(_autogen_context: AutogenContext, op: NoOp) -> str:
+    """Render ``pass`` with the reason as a trailing comment, so a body that holds nothing else stays valid."""
+    return f"pass  # {op.reason}"
 
 
 def _render_execute(ddl: str) -> str:

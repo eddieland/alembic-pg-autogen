@@ -134,13 +134,17 @@ constraints with the same name as equal, because it cannot normalize SQL express
 `amount >= 0` to `amount > 0` therefore generates no migration, and the schema drifts.
 
 This package closes that gap for PostgreSQL, and **the gap is all that it closes**. Our comparator augments Alembic's
-comparator. Keep `alembic.autogenerate.checkconstraint_byname` enabled, so that it continues its own work:
+comparator. Keep `alembic.autogenerate.checkconstraint_byname` enabled, so that it continues its own work. Alembic
+1.19.2 renamed that plugin to `alembic.ext.checkconstraint_byname` and no longer enables it through the
+`alembic.autogenerate.*` wildcard, so list it explicitly:
 
-| Situation                                           | Who handles it                                | Result                                          |
-| --------------------------------------------------- | --------------------------------------------- | ----------------------------------------------- |
-| Name in your models only                            | `alembic.autogenerate.checkconstraint_byname` | `create_check_constraint`                       |
-| Name in the database only                           | `alembic.autogenerate.checkconstraint_byname` | `drop_constraint`                               |
-| Name on **both** sides, expression possibly changed | `alembic_pg_autogen.checkconstraints`         | `drop_constraint` and `create_check_constraint` |
+| Situation                                             | Who handles it                                | Result                                                                                                                      |
+| ----------------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Name in your models only                              | `alembic.autogenerate.checkconstraint_byname` | `create_check_constraint`                                                                                                   |
+| Name in the database only                             | `alembic.autogenerate.checkconstraint_byname` | `drop_constraint`                                                                                                           |
+| Name on **both** sides, expression possibly changed   | `alembic_pg_autogen.checkconstraints`         | `drop_constraint` and `create_check_constraint`                                                                             |
+| Name on **both** sides, set of allowed values changed | `alembic_pg_autogen.checkconstraints`         | `drop_constraint` and `create_check_constraint(..., postgresql_not_valid=True)`, then `VALIDATE CONSTRAINT` on the next run |
+| Name on **both** sides, database holds `NOT VALID`    | `alembic_pg_autogen.checkconstraints`         | `ALTER TABLE ... VALIDATE CONSTRAINT`                                                                                       |
 
 The two sets of names are disjoint by construction. No operation is ever emitted twice, so you gain nothing when you
 disable Alembic's comparator. You lose the detection of added constraints and removed constraints, and our comparator
@@ -172,10 +176,78 @@ def upgrade() -> None:
     op.create_check_constraint("ck_orders_amount", "orders", "amount > 0")
 ```
 
-The plugin list above is the only configuration. The comparator sends each expression through PostgreSQL. It adds the
-expression to the table as a throwaway `NOT VALID` constraint. It works inside a savepoint, and it reverts that
-savepoint. PostgreSQL therefore reports `amount >= 0` and the catalog form `amount >= 0::numeric` as one constraint. A
-real change still appears as a change.
+The comparator sends each expression through PostgreSQL. It adds the expression to the table as a throwaway `NOT VALID`
+constraint. It works inside a savepoint, and it reverts that savepoint. PostgreSQL therefore reports `amount >= 0` and
+the catalog form `amount >= 0::numeric` as one constraint. A real change still appears as a change.
+
+### Non-native enums
+
+A native PostgreSQL enum resists expand and contract deployment. `ALTER TYPE ... DROP VALUE` does not exist, and a value
+added inside a transaction is unusable until that transaction commits. SQLAlchemy offers a replacement.
+`Enum(Status, native_enum=False, create_constraint=True)` stores the column as `varchar` and derives a named `CHECK`
+constraint from the Python enum:
+
+```python
+class Status(enum.Enum):
+    new = "new"
+    done = "done"
+
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    status: Mapped[Status] = mapped_column(
+        Enum(Status, native_enum=False, create_constraint=True, name="ck_orders_status", length=16)
+    )
+```
+
+This package compares that constraint like any other named constraint. Alembic's `checkconstraint_byname` plugin skips
+every constraint that a type generates, and it therefore reports the database copy as removed. This package runs after
+that plugin, discards that drop, and adds the constraint when the database lacks it. A changed set of members therefore
+produces a migration here and nowhere else.
+
+An added member is one migration. No existing row can violate a wider set, so the new constraint validates at once:
+
+```python
+def upgrade() -> None:
+    op.drop_constraint("ck_orders_status", "orders", type_="check")
+    op.create_check_constraint("ck_orders_status", "orders", "status IN ('new', 'done', 'shipped')")
+```
+
+A removed member spans two revisions, because rows that hold the removed value need a backfill first. The first revision
+replaces the constraint as `NOT VALID`. PostgreSQL enforces the new constraint for every new row at once, and it holds
+`ACCESS EXCLUSIVE` for one millisecond instead of a full table scan. The migration says which values went away:
+
+```python
+def upgrade() -> None:
+    op.drop_constraint("ck_orders_status", "orders", type_="check")
+    # ck_orders_status no longer allows status IN ('shipped'). Rows that hold a removed value fail validation.
+    # Backfill those rows before the revision that validates ck_orders_status.
+    op.create_check_constraint("ck_orders_status", "orders", "status IN ('new', 'done')", postgresql_not_valid=True)
+```
+
+The next `alembic revision --autogenerate` reads `convalidated` from the catalog and emits the validation. The scan runs
+under `SHARE UPDATE EXCLUSIVE`, which blocks no reads and no writes:
+
+```python
+def upgrade() -> None:
+    op.execute("ALTER TABLE orders VALIDATE CONSTRAINT ck_orders_status")
+```
+
+The validation revision fails with a check violation until every row holds an allowed value. Write the backfill
+yourself. The package states the need and nothing more.
+
+The downgrade of a validation revision does nothing, and it says why. PostgreSQL offers no statement that marks a
+validated constraint as `NOT VALID` again. Every other check constraint change keeps the single validating statement
+shown above, because only `col IN (...)` and `col = ANY (ARRAY[...])` classify as value sets.
+
+Two settings change this behavior:
+
+- `pg_check_constraint_validation="immediate"` in `context.configure()` keeps one validating statement for every change.
+  The default is `"deferred"`.
+- `postgresql_not_valid=True` on a `CheckConstraint` in your models keeps that constraint `NOT VALID`. The comparator
+  then emits no validation for it.
 
 ## Skipping `drop_index` for dropped tables
 

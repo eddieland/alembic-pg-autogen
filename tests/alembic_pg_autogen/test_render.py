@@ -5,22 +5,31 @@ import re
 from unittest.mock import MagicMock
 
 import pytest
+from alembic.autogenerate.api import AutogenContext
+from alembic.autogenerate.render import _render_cmd_body
+from alembic.operations.ops import ModifyTableOps, UpgradeOps
+from alembic.runtime.migration import MigrationContext
+from sqlalchemy import CheckConstraint, Column, MetaData, String, Table
 from sqlalchemy.dialects.postgresql.base import PGDialect
 
 from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
 from alembic_pg_autogen.ops import (
+    CreateCheckConstraintNotValidOp,
     CreateFunctionOp,
     CreateTriggerOp,
     CreateViewOp,
     DropFunctionOp,
     DropTriggerOp,
     DropViewOp,
+    NoOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
     ReplaceViewOp,
+    ValidateConstraintOp,
 )
 from alembic_pg_autogen.render import (
     _quote_ddl,
+    _render_create_check_constraint_not_valid,
     _render_create_function,
     _render_create_trigger,
     _render_create_view,
@@ -28,9 +37,11 @@ from alembic_pg_autogen.render import (
     _render_drop_trigger,
     _render_drop_view,
     _render_execute,
+    _render_noop,
     _render_replace_function,
     _render_replace_trigger,
     _render_replace_view,
+    _render_validate_constraint,
 )
 
 
@@ -40,6 +51,21 @@ def _ctx() -> MagicMock:
     ctx.imports = set()
     ctx.dialect = PGDialect()
     return ctx
+
+
+def _autogen_context(**opts: object) -> AutogenContext:
+    """Return a real AutogenContext, which Alembic's own check constraint renderer needs for its prefixes."""
+    migration_context = MigrationContext.configure(dialect=PGDialect(), opts={"as_sql": True})
+    ctx = AutogenContext(migration_context, autogenerate=False)
+    ctx.opts.update({"alembic_module_prefix": "op.", "sqlalchemy_module_prefix": "sa.", "user_module_prefix": None})
+    ctx.opts.update(opts)
+    return ctx
+
+
+def _render_body(ops: list[object], *, render_as_batch: bool = False) -> str:
+    """Render a table's operations the way Alembic renders an upgrade or downgrade body."""
+    table_ops = ModifyTableOps("orders", ops)  # pyright: ignore[reportArgumentType]
+    return _render_cmd_body(UpgradeOps(ops=[table_ops]), _autogen_context(render_as_batch=render_as_batch))
 
 
 class TestRenderCreateFunction:
@@ -330,3 +356,107 @@ class TestNoImportsInjected:
         op = DropViewOp(ViewInfo("public", "v", "CREATE OR REPLACE VIEW …"))
         _render_drop_view(ctx, op)
         assert len(ctx.imports) == 0
+
+
+class TestRenderValidateConstraint:
+    def test_with_schema(self):
+        op = ValidateConstraintOp("ck_orders_status", "orders", schema="sales")
+        assert (
+            _render_validate_constraint(_ctx(), op)
+            == "op.execute('ALTER TABLE sales.orders VALIDATE CONSTRAINT ck_orders_status')"
+        )
+
+    def test_without_schema(self):
+        op = ValidateConstraintOp("ck_orders_status", "orders")
+        assert (
+            _render_validate_constraint(_ctx(), op)
+            == "op.execute('ALTER TABLE orders VALIDATE CONSTRAINT ck_orders_status')"
+        )
+
+    def test_quotes_identifiers_that_need_it(self):
+        op = ValidateConstraintOp("CK Status", "Order Items", schema="Sales")
+        result = _render_validate_constraint(_ctx(), op)
+        assert _execute_rendered(result) == ['ALTER TABLE "Sales"."Order Items" VALIDATE CONSTRAINT "CK Status"']
+
+    def test_no_imports(self):
+        ctx = _ctx()
+        _render_validate_constraint(ctx, ValidateConstraintOp("ck", "orders"))
+        assert len(ctx.imports) == 0
+
+
+class TestRenderCreateCheckConstraintNotValid:
+    def test_widening_renders_one_line_with_the_keyword(self):
+        op = CreateCheckConstraintNotValidOp("ck_orders_status", "orders", "status IN ('a', 'b')")
+
+        lines = _render_create_check_constraint_not_valid(_autogen_context(), op)
+
+        assert lines == [
+            """op.create_check_constraint('ck_orders_status', 'orders', "status IN ('a', 'b')", postgresql_not_valid=True)"""
+        ]
+
+    def test_schema_precedes_the_keyword(self):
+        op = CreateCheckConstraintNotValidOp("ck", "orders", "status IN ('a')", schema="sales")
+
+        (line,) = _render_create_check_constraint_not_valid(_autogen_context(), op)
+
+        assert line.endswith("schema='sales', postgresql_not_valid=True)")
+
+    def test_narrowing_renders_a_backfill_comment(self):
+        op = CreateCheckConstraintNotValidOp(
+            "ck_orders_status", "orders", "status IN ('a')", column="status", removed_values=("b", "c")
+        )
+
+        lines = _render_create_check_constraint_not_valid(_autogen_context(), op)
+
+        assert lines[-1].startswith("op.create_check_constraint(")
+        comments = lines[:-1]
+        assert comments and all(line.startswith("# ") for line in comments)
+        joined = " ".join(comments)
+        assert "status" in joined
+        assert "'b', 'c'" in joined
+        assert "ck_orders_status" in joined
+        assert "Backfill" in joined
+
+    def test_naming_convention_name_renders_through_op_f(self):
+        metadata = MetaData(naming_convention={"ck": "ck_%(table_name)s_%(constraint_name)s"})
+        table = Table("orders", metadata, Column("status", String(16)))
+        constraint = CheckConstraint("status IN ('a')", name="status", table=table)
+
+        (line,) = _render_create_check_constraint_not_valid(
+            _autogen_context(), CreateCheckConstraintNotValidOp.from_constraint(constraint)
+        )
+
+        assert line.startswith("op.create_check_constraint(op.f('ck_orders_status'), 'orders'")
+        assert line.endswith("postgresql_not_valid=True)")
+
+    def test_batch_mode_keeps_the_batch_prefix(self):
+        op = CreateCheckConstraintNotValidOp("ck", "orders", "status IN ('a')")
+
+        body = _render_body([op], render_as_batch=True)
+
+        assert "with op.batch_alter_table('orders', schema=None) as batch_op:" in body
+        assert "batch_op.create_check_constraint('ck', \"status IN ('a')\", postgresql_not_valid=True)" in body
+
+    def test_rendered_body_is_valid_python(self):
+        op = CreateCheckConstraintNotValidOp("ck", "orders", "status IN ('a')", column="status", removed_values=("b",))
+
+        body = _render_body([op])
+
+        compile(body, "<migration>", "exec")
+
+
+class TestRenderNoOp:
+    def test_renders_pass_with_the_reason(self):
+        assert _render_noop(_ctx(), NoOp("ck_orders_status on orders stays validated")) == (
+            "pass  # ck_orders_status on orders stays validated"
+        )
+
+    def test_downgrade_body_holding_only_a_noop_compiles(self):
+        body = _render_body([ValidateConstraintOp("ck", "orders").reverse()])
+
+        assert "pass  # Constraint ck on orders stays validated." in body
+        compile(f"def downgrade() -> None:\n{_indent(body)}", "<migration>", "exec")
+
+
+def _indent(body: str) -> str:
+    return "".join(f"    {line}\n" for line in body.splitlines())
