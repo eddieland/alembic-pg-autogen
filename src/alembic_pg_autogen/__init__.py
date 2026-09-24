@@ -8,6 +8,7 @@ from alembic.runtime.plugins import Plugin as _Plugin
 
 import alembic_pg_autogen.compare as _compare_mod
 import alembic_pg_autogen.compare_check_constraints as _compare_check_constraints_mod
+import alembic_pg_autogen.compare_indexes as _compare_indexes_mod
 
 # Imported for its side effect: the module body registers the ``renderers.dispatch_for`` handlers for every op in
 # ``alembic_pg_autogen.ops``.  Without it Alembic raises "no dispatch function for object" while rendering the
@@ -18,6 +19,7 @@ from alembic_pg_autogen.canonicalize import (
     canonicalize,
     canonicalize_check_constraints,
     canonicalize_functions,
+    canonicalize_indexes,
     canonicalize_triggers,
     canonicalize_views,
 )
@@ -26,20 +28,24 @@ from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, TriggerOp, V
 from alembic_pg_autogen.inspect import (
     CheckConstraintInfo,
     FunctionInfo,
+    IndexInfo,
     TriggerInfo,
     ViewInfo,
     current_schema,
     inspect_check_constraints,
     inspect_functions,
+    inspect_indexes,
     inspect_triggers,
     inspect_views,
 )
 from alembic_pg_autogen.ops import (
     CreateCheckConstraintNotValidOp,
     CreateFunctionOp,
+    CreateIndexConcurrentlyOp,
     CreateTriggerOp,
     CreateViewOp,
     DropFunctionOp,
+    DropIndexConcurrentlyOp,
     DropTriggerOp,
     DropViewOp,
     NoOp,
@@ -60,6 +66,7 @@ from alembic_pg_autogen.value_sets import (
 
 _Plugin.setup_plugin_from_module(_compare_mod, "alembic_pg_autogen.compare")
 _Plugin.setup_plugin_from_module(_compare_check_constraints_mod, "alembic_pg_autogen.checkconstraints")
+_Plugin.setup_plugin_from_module(_compare_indexes_mod, "alembic_pg_autogen.indexes")
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -71,16 +78,19 @@ __all__: Final[Sequence[str]] = [
     "CheckConstraintInfo",
     "CreateCheckConstraintNotValidOp",
     "CreateFunctionOp",
+    "CreateIndexConcurrentlyOp",
     "CreateTriggerOp",
     "CreateViewOp",
     "DiffResult",
     "DropFunctionOp",
+    "DropIndexConcurrentlyOp",
     "DropTriggerOp",
     "DropViewOp",
     "FunctionInfo",
     "FunctionOp",
     "IGNORED",
     "Ignored",
+    "IndexInfo",
     "NoOp",
     "ReplaceFunctionOp",
     "ReplaceTriggerOp",
@@ -96,6 +106,7 @@ __all__: Final[Sequence[str]] = [
     "canonicalize",
     "canonicalize_check_constraints",
     "canonicalize_functions",
+    "canonicalize_indexes",
     "canonicalize_triggers",
     "canonicalize_views",
     "classify_value_set_change",
@@ -104,6 +115,7 @@ __all__: Final[Sequence[str]] = [
     "diff",
     "inspect_check_constraints",
     "inspect_functions",
+    "inspect_indexes",
     "inspect_triggers",
     "inspect_views",
     "parse_value_set",

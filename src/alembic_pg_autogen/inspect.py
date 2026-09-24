@@ -1,4 +1,4 @@
-"""Catalog inspection for PostgreSQL functions, triggers, views, and check constraints."""
+"""Catalog inspection for PostgreSQL functions, triggers, views, check constraints, and indexes."""
 
 from __future__ import annotations
 
@@ -61,6 +61,31 @@ class CheckConstraintInfo(NamedTuple):
     name: str
     expression: str
     validated: bool = True
+
+
+class IndexInfo(NamedTuple):
+    """A PostgreSQL index as stored in the system catalog.
+
+    The identity is ``(schema, table_name, name)``. The payload is ``(unique, shape)``, not one ``definition`` field.
+    ``UNIQUE`` is in the start of the ``CREATE INDEX`` statement, next to the name and the table of the identity. A
+    separate field keeps *shape* as one fragment that compares as a plain string.
+
+    ``shape`` is the ``pg_get_indexdef()`` output from ``USING`` to the end. It contains the access method, the key
+    expressions and their operator classes, ``INCLUDE``, ``NULLS NOT DISTINCT``, the storage parameters, and the
+    ``WHERE`` predicate::
+
+        USING btree (lower(email)) INCLUDE (name) WHERE (deleted_at IS NULL)
+
+    The shape contains no index name and no table. Thus two shapes compare correctly when they come from different
+    tables. :func:`canonicalize_indexes <alembic_pg_autogen.canonicalize.canonicalize_indexes>` needs this property,
+    because it reads each index back from an empty copy of the table.
+    """
+
+    schema: str
+    table_name: str
+    name: str
+    unique: bool
+    shape: str
 
 
 def inspect_functions(conn: Connection, schemas: Sequence[str] | None = None) -> Sequence[FunctionInfo]:
@@ -178,6 +203,57 @@ def inspect_check_constraints(
     return result
 
 
+def inspect_indexes(
+    conn: Connection,
+    schemas: Sequence[str] | None = None,
+    table_names: Sequence[str] | None = None,
+) -> Sequence[IndexInfo]:
+    """Load all index definitions from the PostgreSQL system catalogs in one query.
+
+    The query joins ``pg_index`` with ``pg_class`` and ``pg_namespace``. It uses ``pg_get_indexdef()`` to get the
+    canonical ``CREATE INDEX`` statement from PostgreSQL. SQL removes the identity prefix of the statement,
+    ``CREATE [UNIQUE] INDEX <name> ON <schema>.<table>``. Thus :attr:`IndexInfo.shape` holds only the definition of the
+    index.
+
+    The query checks the prefix before it removes it. It builds the prefix with ``quote_ident()`` and compares it with
+    the first characters of the definition. If the definition does not start with the prefix, the function omits the
+    index. An unstripped shape can never match a canonical shape, so it causes a permanent false difference.
+
+    The result omits indexes that implement a constraint. A primary key, unique, or exclusion constraint owns its
+    index, and Alembic compares the constraint. The result also omits indexes that an extension owns, as for functions
+    and triggers.
+
+    Args:
+        conn: An open SQLAlchemy connection.
+        schemas: Schemas to inspect. When *None*, every schema except ``pg_catalog`` and ``information_schema``.
+        table_names: Tables to inspect. When *None*, the query includes all tables.
+
+    Returns:
+        A sequence of :class:`IndexInfo` instances, one per index.
+    """
+    schema_filter, params = _build_schema_filter(schemas)
+    if table_names is not None:
+        table_filter = "tc.relname = ANY(:table_names)"
+        params["table_names"] = list(table_names)
+    else:
+        table_filter = "true"
+    query = text(_INDEXES_QUERY.format(schema_filter=schema_filter, table_filter=table_filter))
+    rows = conn.execute(query, params)
+    result: list[IndexInfo] = []
+    for r in rows:
+        if r.shape is None:
+            log.warning(
+                "Could not normalize the definition of index %r on %r.%r; skipping it",
+                r.name,
+                r.schema,
+                r.table_name,
+            )
+            continue
+        result.append(IndexInfo(schema=r.schema, table_name=r.table_name, name=r.name, unique=r.unique, shape=r.shape))
+    log.debug("Inspected %d indexes (schemas=%s, tables=%s)", len(result), schemas, table_names)
+    return result
+
+
 def current_schema(conn: Connection) -> str:
     """Return the connection's current schema, i.e. the first entry of its ``search_path``."""
     schema = conn.execute(text("SELECT current_schema()")).scalar()
@@ -220,6 +296,48 @@ WHERE con.contype = 'c'
         AND d.deptype = 'e'
   )
 ORDER BY n.nspname, c.relname, con.conname
+"""
+
+_INDEXES_QUERY = """\
+SELECT
+    n.nspname AS schema,
+    tc.relname AS table_name,
+    ic.relname AS name,
+    i.indisunique AS unique,
+    CASE
+        WHEN left(d.definition, length(d.prefix)) = d.prefix
+        THEN substr(d.definition, length(d.prefix) + 1)
+    END AS shape
+FROM pg_catalog.pg_index i
+JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+JOIN pg_catalog.pg_class tc ON tc.oid = i.indrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = tc.relnamespace
+CROSS JOIN LATERAL (
+    SELECT
+        pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,
+        'CREATE '
+            || CASE WHEN i.indisunique THEN 'UNIQUE ' ELSE '' END
+            || 'INDEX '
+            || pg_catalog.quote_ident(ic.relname)
+            || ' ON '
+            || pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(tc.relname)
+            || ' ' AS prefix
+) d
+WHERE tc.relkind IN ('r', 'm', 'p')
+  AND ({schema_filter})
+  AND ({table_filter})
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_constraint con
+      WHERE con.conindid = i.indexrelid
+        AND con.contype IN ('p', 'u', 'x')
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_depend dep
+      WHERE dep.classid = 'pg_catalog.pg_class'::regclass
+        AND dep.objid = i.indexrelid
+        AND dep.deptype = 'e'
+  )
+ORDER BY n.nspname, tc.relname, ic.relname
 """
 
 _FUNCTIONS_QUERY = """\
