@@ -319,3 +319,119 @@ hook that removes those calls ships here as an opt-in ``Rewriter``:
    )
 
 Use ``skip_drop_index_for_dropped_tables.chain(my_hook)`` if you already pass a hook.
+
+8. Index definitions
+--------------------
+
+You do not declare indexes to this package. Indexes stay in your SQLAlchemy metadata, and Alembic decides if an index
+exists. This package adds a comparison of the index definition.
+
+Alembic compares the columns, the expressions, uniqueness, and ``NULLS NOT DISTINCT`` of an index. Alembic does not
+compare these parts:
+
+- the ``WHERE`` predicate of a partial index
+- the access method (``USING gin``, ``USING gist``, ``USING brin``)
+- the ``INCLUDE`` columns
+- the operator classes
+
+If you change one of these parts in a model, Alembic emits no operation. Alembic emits no operation on later runs too.
+For example, this model adds a predicate to an existing index:
+
+.. code-block:: python
+
+   class User(Base):
+       __tablename__ = "users"
+
+       id: Mapped[int] = mapped_column(primary_key=True)
+       email: Mapped[str]
+       deleted_at: Mapped[datetime | None]
+
+       __table_args__ = (
+           Index("ix_users_email", "email", postgresql_where=text("deleted_at IS NULL")),
+       )
+
+With this package, autogenerate emits this migration:
+
+.. code-block:: python
+
+   def upgrade() -> None:
+       op.drop_index(op.f("ix_users_email"), table_name="users")
+       op.create_index(
+           "ix_users_email",
+           "users",
+           ["email"],
+           unique=False,
+           postgresql_where=sa.text("deleted_at IS NULL"),
+       )
+
+How the comparison works
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The comparator creates each desired index in the database and reads it back. It first makes an empty ``TEMP`` copy of
+the table inside a savepoint. It creates the index on that copy. Then it compares the ``pg_get_indexdef()`` output for
+the copy with the output for the real index. The savepoint rollback removes the copy.
+
+PostgreSQL writes both definitions in one canonical form. Thus ``WHERE status IN ('a', 'b')`` in your model and
+``WHERE (status = ANY (ARRAY['a'::text, 'b'::text]))`` in the catalog compare as equal. A changed predicate compares as
+different.
+
+The comparator uses a copy because ``CREATE INDEX`` builds the index. On a large table, a build takes seconds and holds
+a lock. On an empty copy, a build takes less than one millisecond. The comparator never changes your table.
+
+These rules apply:
+
+- The comparator compares only **named** indexes on tables in ``target_metadata``.
+- The comparator skips indexes that implement a primary key, unique, or exclusion constraint. The constraint owns such
+  an index.
+- The comparator runs *after* the Alembic comparator. It skips each index that already has an Alembic operation. Thus
+  one index never gets two ``drop_index`` and ``create_index`` pairs.
+- If PostgreSQL cannot create an index on the copy, the comparator logs a warning. It reports that index as unchanged.
+  The comparator still compares the other indexes on the table.
+
+Build indexes concurrently
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``CREATE INDEX`` takes a lock that blocks writes to the table. ``CREATE INDEX CONCURRENTLY`` does not block writes.
+PostgreSQL cannot run ``CONCURRENTLY`` inside a transaction, and Alembic runs each migration in a transaction. Set
+``pg_index_concurrently`` to get a migration that runs the index operations outside the transaction:
+
+.. code-block:: python
+
+   context.configure(
+       connection=connection,
+       target_metadata=target_metadata,
+       autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+       pg_index_concurrently=True,
+   )
+
+.. code-block:: python
+
+   def upgrade() -> None:
+       with op.get_context().autocommit_block():
+           op.create_index(
+               "ix_users_email",
+               "users",
+               ["email"],
+               unique=False,
+               postgresql_where=sa.text("deleted_at IS NULL"),
+               postgresql_concurrently=True,
+           )
+
+This option changes only the rendered migration. Autogenerate always creates an ordinary index on the copy. A
+concurrent build can fail and leave an invalid index. This behavior comes from PostgreSQL, not from this package.
+
+Index comparison is a separate Alembic plugin. To disable it, exclude the plugin:
+
+.. code-block:: python
+
+   context.configure(
+       connection=connection,
+       target_metadata=target_metadata,
+       autogenerate_plugins=[
+           "alembic.autogenerate.*",
+           "alembic_pg_autogen.*",
+           "~alembic_pg_autogen.indexes",
+       ],
+   )
+
+Requires Alembic 1.19 or newer.
