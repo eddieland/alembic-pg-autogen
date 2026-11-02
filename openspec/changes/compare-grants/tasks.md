@@ -76,4 +76,5 @@
 - [x] 8.6 Render the implicit revoke comment through `repr()`
 - [x] 8.7 Warn when `pg_grants` declares a grant on a table or view that the migration drops
 - [x] 8.8 Document that user-added grants on extension objects are managed
-- [x] 8.9 Add a test for each item above
+- [x] 8.9 Skip the table filters for views, materialized views, and relations that do not exist yet
+- [x] 8.10 Add a test for each item above

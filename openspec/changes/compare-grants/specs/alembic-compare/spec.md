@@ -54,7 +54,9 @@ It SHALL append `GrantPrivilegesOp` instances after the function, view, and trig
 
 The comparator SHALL skip grants on the Alembic version table. It SHALL apply `include_name` to each table with type
 `"table"` and to each schema with type `"schema"`, with `None` for the default schema. It SHALL apply `include_object`
-to each table with type `"table"`. It SHALL log a warning for each declared object that these rules remove.
+to each table with type `"table"`. A table here is a table in `target_metadata`, or an existing relation with `relkind`
+in `('r', 'p', 'f')`. Views, materialized views, and relations that do not exist yet SHALL skip the table filters. The
+comparator SHALL log a warning for each declared object that these rules remove.
 
 #### Scenario: include_object excludes a table
 
@@ -71,6 +73,12 @@ to each table with type `"table"`. It SHALL log a warning for each declared obje
 
 - **WHEN** `target_metadata` holds `Table("o", md, schema="public")` and `public` is the default schema
 - **THEN** autogenerate does not fail, and `include_object` receives that `Table` with `reflected=False`
+
+#### Scenario: Views skip the table filters
+
+- **WHEN** `include_object` returns `False` for every reflected table, and `pg_grants` declares a grant on an existing
+  view and on a view that `pg_views` creates
+- **THEN** the comparator emits both grants
 
 #### Scenario: Version table
 

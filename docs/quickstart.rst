@@ -467,8 +467,9 @@ These rules apply:
   that a user added on an extension object.
 - Autogenerate inspects the default schema only, unless you set ``include_schemas=True``. A declared grant in another
   schema gives a warning and no operation.
-- ``include_name`` and ``include_object`` apply to grants. The default schema reaches ``include_name`` as ``None``. The
-  Alembic version table is skipped. A declared grant that a filter removes gives a warning.
+- ``include_name`` and ``include_object`` apply to grants on tables and schemas, not on views. The default schema
+  reaches ``include_name`` as ``None``. The Alembic version table is skipped. A declared grant that a filter removes
+  gives a warning.
 - The extension reads the statements without executing them. A name without a schema finds an existing table through
   the ``search_path``.
 - A declared ``GRANT ALL`` renders as ``GRANT ALL``. Privileges named one by one render as a list.

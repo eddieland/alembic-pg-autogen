@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, NamedTuple, Protocol
 from alembic.operations.ops import DropTableOp
 from alembic.runtime.plugins import Plugin
 from alembic.util import PriorityDispatchResult
-from sqlalchemy import Connection, MetaData, Table
+from sqlalchemy import Connection, MetaData, Table, text
 
 from alembic_pg_autogen.canonicalize import CanonicalState, all_grant_privileges, canonicalize, parse_grants
 from alembic_pg_autogen.diff import Action, diff, diff_grants
@@ -413,7 +413,9 @@ def _grant_states(
         or not (grant[:-1] in unmanaged or _is_public_schema_default(grant, public_defaults))
     ]
 
-    included = _included_objects(autogen_context, {grant[:3] for grant in (*current, *desired)}, default_schema)
+    objects = {grant[:3] for grant in (*current, *desired)}
+    tables = _existing_tables(conn, {(schema, name) for schema, object_type, name in objects if object_type == "TABLE"})
+    included = _included_objects(autogen_context, objects, default_schema, tables)
     for schema, object_type, name in sorted({g[:3] for g in desired if g[:3] not in included}):
         log.warning(
             "pg_grants declares grants on %s %s, but include_name, include_object, or the version table rule excludes "
@@ -475,14 +477,21 @@ def _included_objects(
     autogen_context: AutogenContext,
     objects: AbstractSet[tuple[str, str, str]],
     default_schema: str,
+    tables: AbstractSet[tuple[str, str]],
 ) -> set[tuple[str, str, str]]:
     """Return the ``(schema, object_type, name)`` objects that the Alembic filters and the version table allow.
+
+    The table filters apply only to the relations that Alembic's table comparator also sees: the tables in
+    ``target_metadata``, and the tables, partitioned tables, and foreign tables in *tables* (from
+    :func:`_existing_tables`). Alembic never sends a view through ``include_object``, so a filter that rejects every
+    reflected relation must not remove the grants of a view. Views, materialized views, and relations that do not exist
+    yet, such as a view that ``pg_views`` creates in the same migration, therefore skip the table filters.
 
     A table goes through ``include_name`` with type ``"table"``, as Alembic's table comparator does. The default schema
     is ``None`` in ``parent_names``. A table then goes through ``include_object``. The object is the metadata
     ``Table`` when ``target_metadata`` has one, with ``reflected=False``. Otherwise it is a ``Table`` with a name and a
-    schema but no columns, with ``reflected=True``. A view is a table here, as in ``GRANT ... ON TABLE``. A schema
-    goes through ``include_name`` with type ``"schema"``, with ``None`` for the default schema, as Alembic passes it.
+    schema but no columns, with ``reflected=True``. A schema goes through ``include_name`` with type ``"schema"``, with
+    ``None`` for the default schema, as Alembic passes it.
     """
     migration_context = autogen_context.migration_context
     version_table = (migration_context.version_table_schema or default_schema, migration_context.version_table)
@@ -497,18 +506,44 @@ def _included_objects(
         if (schema, name) == version_table:
             continue
         schema_name = None if schema == default_schema else schema
-        if not autogen_context.run_name_filters(name, "table", {"schema_name": schema_name}):
-            continue
         # ``Table`` defines no truth value, so the lookups test for ``None`` and never use ``or``.
         table = metadata_tables.get(f"{schema}.{name}")
         if table is None and schema_name is None:
             table = metadata_tables.get(name)
+        if table is None and (schema, name) not in tables:
+            included.add((schema, object_type, name))
+            continue
+        if not autogen_context.run_name_filters(name, "table", {"schema_name": schema_name}):
+            continue
         reflected = table is None
         if table is None:
             table = Table(name, MetaData(), schema=schema_name)
         if autogen_context.run_object_filters(table, name, "table", reflected, None):
             included.add((schema, object_type, name))
     return included
+
+
+def _existing_tables(conn: Connection, relations: AbstractSet[tuple[str, str]]) -> frozenset[tuple[str, str]]:
+    """Return the ``(schema, name)`` pairs in *relations* that exist as a table, a partitioned table, or a foreign table.
+
+    Views and materialized views are not in the result, because Alembic's table comparator does not see them.
+    """
+    if not relations:
+        return frozenset()
+    pairs = sorted(relations)
+    params = {"schemas": [schema for schema, _ in pairs], "names": [name for _, name in pairs]}
+    rows = conn.execute(text(_EXISTING_TABLES_QUERY), params)
+    return frozenset((row.schema, row.name) for row in rows)
+
+
+_EXISTING_TABLES_QUERY = """\
+SELECT n.nspname AS schema, c.relname AS name
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+JOIN unnest(CAST(:schemas AS text[]), CAST(:names AS text[])) AS r(schema, name)
+  ON n.nspname = r.schema AND c.relname = r.name
+WHERE c.relkind IN ('r', 'p', 'f')
+"""
 
 
 def _dropped_relations(

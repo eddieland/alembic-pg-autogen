@@ -109,11 +109,17 @@ compared as usual. An undeclared one stays, and a user who revoked one by hand d
 ### D5: Respect the Alembic filters and the version table
 
 Alembic's table comparator skips the version table and applies `include_name` and `include_object`. The grant comparator
-does the same for each table and view:
+does the same for each relation that Alembic's table comparator also sees. That is a table in `target_metadata`, or an
+existing table, partitioned table, or foreign table:
 
 - `include_name` with type `"table"` and `schema_name=None` for the default schema, as Alembic passes it.
 - `include_object` with the metadata `Table` and `reflected=False` when `target_metadata` has the table. Otherwise the
   object is a `Table` with a name and a schema but no columns, with `reflected=True`.
+
+Views, materialized views, and relations that do not exist yet skip the table filters. Alembic never sends a view
+through `include_object`, so the common filter `not (type_ == "table" and reflected and compare_to is None)` would
+otherwise remove the grants of every view. A view that `pg_views` creates in the same migration does not exist yet, and
+it skips the filters for the same reason.
 
 A schema goes through `include_name` with type `"schema"`. The default schema reaches the filter as `None`, as Alembic
 passes it, so the cookbook filter `name in [None, ...]` keeps it. The metadata lookups test for `None`, because `Table`

@@ -373,7 +373,7 @@ class TestGrantMigrationOps:
             ("public", "TABLE", "alembic_version"),
         }
 
-        included = _included_objects(ctx, objects, "public")
+        included = _included_objects(ctx, objects, "public", frozenset({("public", "dropped")}))
 
         assert included == {("shown", "SCHEMA", "shown"), ("public", "TABLE", "orders"), ("public", "TABLE", "dropped")}
         by_name = {name: (obj, reflected) for obj, name, reflected in seen}
@@ -403,7 +403,8 @@ class TestGrantMigrationOps:
 
         ctx: Any = Ctx()
 
-        assert _included_objects(ctx, {("public", "TABLE", "orders")}, "public") == {("public", "TABLE", "orders")}
+        objects = {("public", "TABLE", "orders")}
+        assert _included_objects(ctx, objects, "public", frozenset()) == objects
         assert seen == [(orders, False)]
 
     def test_default_schema_name_filter_gets_none(self):
@@ -425,10 +426,30 @@ class TestGrantMigrationOps:
         ctx: Any = Ctx()
         objects = {("public", "SCHEMA", "public"), ("s1", "SCHEMA", "s1"), ("s2", "SCHEMA", "s2")}
 
-        included = _included_objects(ctx, objects, "public")
+        included = _included_objects(ctx, objects, "public", frozenset())
 
         assert included == {("public", "SCHEMA", "public"), ("s1", "SCHEMA", "s1")}
         assert sorted(names, key=str) == [None, "s1", "s2"]
+
+    def test_views_and_new_relations_skip_table_filters(self):
+        """Alembic never sends a view through ``include_object``, so a filter for reflected tables must not drop it."""
+
+        class Ctx:
+            migration_context: Any = MagicMock(version_table="alembic_version", version_table_schema=None)
+            metadata: object = None
+
+            def run_name_filters(self, *_args: object) -> bool:
+                return False
+
+            def run_object_filters(self, *_args: object) -> bool:
+                return False
+
+        ctx: Any = Ctx()
+        objects = {("public", "TABLE", "a_view"), ("public", "TABLE", "new_view"), ("public", "TABLE", "a_table")}
+
+        included = _included_objects(ctx, objects, "public", frozenset({("public", "a_table")}))
+
+        assert included == {("public", "TABLE", "a_view"), ("public", "TABLE", "new_view")}
 
     def test_group_grants_splits_by_object(self):
         groups = _group_grants([_grant(name="b"), _grant(name="a"), _grant("INSERT", name="a")])
@@ -1134,3 +1155,53 @@ def _orders_new() -> MetaData:
     metadata = MetaData()
     Table("orders", metadata, Column("id", Integer, primary_key=True))
     return metadata
+
+
+@pytest.mark.integration
+class TestAutogenerateViewGrants:
+    """Views must keep their grants under an ``include_object`` that rejects reflected tables."""
+
+    @staticmethod
+    def _skip_reflected(_obj: object, _name: str | None, type_: str, reflected: bool, compare_to: object) -> bool:
+        return not (type_ == "table" and reflected and compare_to is None)
+
+    def test_existing_view(self, alembic_project: AlembicProject, roles: tuple[str, str]):
+        schema = alembic_project.schema
+        reader, _ = roles
+        alembic_project.execute(f"CREATE VIEW {schema}.answer AS SELECT 42 AS value")
+
+        content = _autogenerate(
+            alembic_project,
+            MetaData(),
+            pg_grants=[f"GRANT SELECT ON answer TO {reader}"],
+            include_object=self._skip_reflected,
+        )
+
+        assert f"GRANT SELECT ON TABLE {schema}.answer TO {reader}" in _upgrade_body(content)
+
+    def test_new_view(self, alembic_project: AlembicProject, roles: tuple[str, str]):
+        schema = alembic_project.schema
+        reader, _ = roles
+
+        content = _autogenerate(
+            alembic_project,
+            MetaData(),
+            pg_views=[f"CREATE VIEW {schema}.answer AS SELECT 42 AS value"],
+            pg_grants=[f"GRANT SELECT ON {schema}.answer TO {reader}"],
+            include_object=self._skip_reflected,
+        )
+
+        upgrade_body = _upgrade_body(content)
+        assert upgrade_body.index("CREATE OR REPLACE VIEW") < upgrade_body.index(
+            f"GRANT SELECT ON TABLE {schema}.answer"
+        )
+
+    def test_reflected_table_is_still_filtered(self, alembic_project: AlembicProject, roles: tuple[str, str]):
+        schema = alembic_project.schema
+        reader, _ = roles
+        alembic_project.execute(f"CREATE TABLE {schema}.legacy (id int)")
+        alembic_project.execute(f"GRANT SELECT ON {schema}.legacy TO {reader}")
+
+        content = _autogenerate(alembic_project, MetaData(), pg_grants=[], include_object=self._skip_reflected)
+
+        assert "REVOKE" not in content

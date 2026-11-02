@@ -400,9 +400,10 @@ These rules apply:
 - Autogenerate inspects the default schema only, unless you set `include_schemas=True`. The extension logs a warning for
   each declared grant in a schema that it does not inspect, and emits nothing for it.
 
-- `include_name` and `include_object` apply to grants, with type `"table"` for tables and views and type `"schema"` for
-  schemas. The default schema reaches `include_name` as `None`, as in Alembic. The Alembic version table is skipped. The
-  extension logs a warning for each declared grant that a filter removes.
+- `include_name` and `include_object` apply to grants on tables, with type `"table"`, and to schemas, with type
+  `"schema"`. The default schema reaches `include_name` as `None`, as in Alembic. Views skip these filters, because
+  Alembic never sends a view through them. The Alembic version table is skipped. The extension logs a warning for each
+  declared grant that a filter removes.
 
 - The extension reads the declared statements without executing them. A grant can name a table that the same migration
   creates. A name without a schema finds an existing table through the `search_path`, as `GRANT` does.
