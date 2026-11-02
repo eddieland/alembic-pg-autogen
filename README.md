@@ -445,11 +445,15 @@ target, so these databases need no `stamp`. A database older than the target can
 
 The squash builds the schema in a scratch database with your old chain. The body of the new revision is the
 `pg_dump --schema-only` output of that database. Before the squash changes a file, it builds the schema with both chains
-and compares the `pg_dump` output at the target and at the heads. Any difference stops the squash.
+and compares the two databases at the target and at the heads. The comparison covers the dump text with owners, the
+column order, materialized view population, and the roles and settings of the server. At the target, it also covers row
+counts and sequences. Any difference stops the squash.
 
 The squash needs a `pg_dump` binary and a role that can create databases. Your `env.py` must read the `sqlalchemy.url`
-option or use `config.attributes["connection"]`. A schema-only dump holds no rows, so add seed rows to the new revision
-yourself. Read the [squash guide](https://alembic-pg-autogen.readthedocs.io/en/latest/squash.html) before the first run.
+option or use `config.attributes["connection"]`. A preflight checks this before the first migration runs. A schema-only
+dump holds no rows, so a squash that loses rows stops unless you pass `--allow-data-loss`. Then add the rows to the new
+revision yourself. Read the [squash guide](https://alembic-pg-autogen.readthedocs.io/en/latest/squash.html) before the
+first run.
 
 ## Installation
 

@@ -4,8 +4,8 @@ The caller names a revision ``TARGET``.  :func:`squash` replaces ``TARGET`` and 
 revision file.  The new revision keeps the ID of ``TARGET``, so a database at or after ``TARGET`` needs no ``stamp``.
 
 The body of the new revision is the ``pg_dump --schema-only`` output of a scratch database that the old chain builds to
-``TARGET``.  Before the squash changes a file, it builds the schema with both chains and compares the ``pg_dump``
-output, at ``TARGET`` and at the heads.
+``TARGET``.  Before the squash changes a file, it builds the schema with both chains and compares them at ``TARGET``
+and at the heads.  :func:`squash` lists the properties that the comparison checks.
 
 Run it from the command line::
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import graphlib
 import logging
 import os
 import re
@@ -37,11 +38,11 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.script.revision import Revision
 from alembic.util import CommandError
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from typing import Final
 
     from alembic.script import Script
@@ -53,7 +54,7 @@ __all__ = ["SquashError", "SquashResult", "main", "squash"]
 
 
 class SquashError(Exception):
-    """A check failed, so the squash changed no file."""
+    """A check failed.  Unless the message says otherwise, the squash changed no file."""
 
 
 class SquashResult(NamedTuple):
@@ -67,8 +68,8 @@ class SquashResult(NamedTuple):
         server_version: The ``server_version`` setting of the PostgreSQL server.
         pg_dump_version: The first line of ``pg_dump --version``.
         source: The text of the new revision file.
-        warnings: One message for each replaced file that holds data statements or global objects.  The dump
-            comparison does not see these.
+        warnings: One message for each table or sequence whose data differs at ``TARGET``.  Only
+            ``allow_data_loss=True`` turns these differences into warnings.
     """
 
     revision_path: Path
@@ -89,15 +90,28 @@ def squash(
     version_table_schema: str = "public",
     pg_dump: str = "pg_dump",
     pg_dump_args: Sequence[str] = (),
+    allow_data_loss: bool = False,
     dry_run: bool = False,
 ) -> SquashResult:
     """Replace ``target`` and its ancestors with one revision.
 
-    The function creates two scratch databases on the server that ``server_url`` names, and drops them at the end.
-    The role in ``server_url`` must be allowed to create databases.
+    The function creates scratch databases on the server that ``server_url`` names, and drops them at the end.  The
+    role in ``server_url`` must be allowed to create databases.
 
     ``env.py`` must connect to the scratch database.  The function sets the ``sqlalchemy.url`` option, and it puts an
-    open connection into ``config.attributes["connection"]``.  An ``env.py`` must use one of the two.
+    open connection without a transaction into ``config.attributes["connection"]``.  Before the first real upgrade,
+    a preflight runs ``env.py`` with one sentinel revision.  The sentinel fails unless ``current_database()`` is the
+    scratch database.
+
+    The squash compares the two chains at ``TARGET`` and at the heads.  The comparison checks these properties:
+
+    - the ``pg_dump --schema-only`` text, with owners
+    - the column order of each table
+    - whether each materialized view is populated
+    - the rows of the Alembic version table
+    - roles, role memberships, tablespaces, and database and role settings on the server
+
+    At ``TARGET`` only, it also compares the row count of each table and the state of each sequence.
 
     Args:
         config: The Alembic configuration of the project.
@@ -108,62 +122,90 @@ def squash(
         version_table_schema: The ``version_table_schema`` that ``env.py`` gives to Alembic.
         pg_dump: The ``pg_dump`` binary.
         pg_dump_args: More arguments for every ``pg_dump`` call.
+        allow_data_loss: Report a row count or sequence difference at ``TARGET`` as a warning, not as an error.
         dry_run: Run every check, but write and delete no file.
 
     Returns:
         The paths, the statement count, the versions, and the text of the new revision.
 
     Raises:
-        SquashError: A check failed.  The function changed no file.
+        SquashError: A check failed.
     """
     script_dir = ScriptDirectory.from_config(config)
     plan = _plan(script_dir, target)
-    warnings = tuple(_scan_replaced_files(plan.replaced))
+    target_rev = plan.target.revision
+    pg_dump_version = _pg_dump_version(pg_dump)
+    version = _VersionTable(version_table, version_table_schema)
+    dumper = _Dumper(pg_dump, tuple(pg_dump_args))
+
+    admin = sa.create_engine(server_url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    try:
+        server = _ScratchServer(admin)
+    except DBAPIError as e:
+        admin.dispose()
+        raise SquashError(f"Cannot connect to the server: {e.orig}") from e
+    warnings: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="alembic_pg_autogen_squash_") as tmp:
+            _preflight(config, script_dir, server.create("pre"), Path(tmp) / "pre")
+            old_url, new_url = server.create("old"), server.create("new")
+
+            _upgrade(config, old_url, target_rev, version, expected=frozenset({target_rev}))
+            server.check_globals("the replaced revisions")
+            statements = clean_dump(
+                dumper.dump(old_url, f"--exclude-table={version.pattern}"),
+                known_settings=server.settings,
+                owner=server.role,
+                version_schema=version.schema,
+            )
+            statements.extend(_refresh_statements(old_url))
+            source = render_revision(plan.target, [s.revision for s in plan.replaced], statements)
+
+            copy = _ScriptCopy(config, script_dir, Path(tmp) / "new")
+            for script in plan.replaced:
+                copy.map(Path(script.path)).unlink()
+            revision_copy = copy.map(Path(plan.target.path)).with_name(f"{target_rev}_squashed.py")
+            revision_copy.write_text(source, encoding="utf-8")
+            _check_copy(copy.config, plan, revision_copy)
+
+            _upgrade(copy.config, new_url, target_rev, version, expected=frozenset({target_rev}))
+            _compare(dumper, old_url, new_url, f"at {target_rev}")
+            differences = _data_differences(old_url, new_url, version)
+            if differences and not allow_data_loss:
+                raise SquashError(
+                    f"The new revision loses data at {target_rev}:\n"
+                    + "\n".join(f"  {d}" for d in differences)
+                    + "\nRun again with allow_data_loss=True (--allow-data-loss), then add the rows to the new "
+                    "revision by hand."
+                )
+            warnings.extend(differences)
+
+            old_heads = _upgrade(config, old_url, "heads", version)
+            server.check_globals("the revisions after the target")
+            new_heads = _upgrade(copy.config, new_url, "heads", version)
+            if old_heads != new_heads:
+                raise SquashError(
+                    f"At the heads, the old chain holds versions {sorted(old_heads)} and the new chain holds "
+                    f"{sorted(new_heads)}."
+                )
+            _compare(dumper, old_url, new_url, "at the heads")
+    finally:
+        server.close()
+
     for message in warnings:
         log.warning("%s", message)
-
-    pg_dump_version = _pg_dump_version(pg_dump)
-    admin = sa.create_engine(server_url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
-    scratch = _ScratchServer(admin)
-    try:
-        with admin.connect() as conn:
-            server_version = str(conn.execute(sa.text("SHOW server_version")).scalar_one())
-        old_url = scratch.create("old")
-        new_url = scratch.create("new")
-        version = _VersionTable(version_table, version_table_schema)
-        dumper = _Dumper(pg_dump, tuple(pg_dump_args))
-
-        _upgrade(config, old_url, plan.target.revision, version)
-        statements = clean_dump(dumper.dump(old_url, f"--exclude-table={version.qualified}"))
-        source = render_revision(plan.target, [s.revision for s in plan.replaced], statements)
-
-        with tempfile.TemporaryDirectory(prefix="alembic_pg_autogen_squash_") as tmp:
-            new_config, revision_copy = _new_chain_config(config, script_dir, plan, Path(tmp))
-            revision_copy.write_text(source, encoding="utf-8")
-            _upgrade(new_config, new_url, plan.target.revision, version)
-            _compare(dumper.dump(old_url), dumper.dump(new_url), f"at {plan.target.revision}")
-            _upgrade(config, old_url, "heads", version, expected=plan.heads)
-            _upgrade(new_config, new_url, "heads", version, expected=plan.heads)
-            _compare(dumper.dump(old_url), dumper.dump(new_url), "at the heads")
-    finally:
-        scratch.drop_all()
-        admin.dispose()
-
-    revision_path = Path(plan.target.path).with_name(f"{plan.target.revision}_squashed.py")
+    revision_path = Path(plan.target.path).with_name(f"{target_rev}_squashed.py")
     removed_paths = tuple(Path(s.path) for s in plan.replaced)
     if not dry_run:
-        for path in removed_paths:
-            path.unlink()
-        revision_path.write_text(source, encoding="utf-8")
-        log.info("Wrote %s and removed %d revision files", revision_path, len(removed_paths))
+        _write(revision_path, source, removed_paths)
     return SquashResult(
         revision_path=revision_path,
         removed_paths=removed_paths,
         statement_count=len(statements),
-        server_version=server_version,
+        server_version=server.version,
         pg_dump_version=pg_dump_version,
         source=source,
-        warnings=warnings,
+        warnings=tuple(warnings),
     )
 
 
@@ -180,8 +222,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="python -m alembic_pg_autogen.squash",
         description="Replace a revision and its ancestors with one revision that builds the same schema.",
     )
-    parser.add_argument("-c", "--config", default="alembic.ini", help="the Alembic configuration file")
-    parser.add_argument("-n", "--name", default="alembic", help="the section of the configuration file")
+    parser.add_argument(
+        "-c",
+        "--config",
+        action="append",
+        default=[],
+        help="an Alembic ini file or pyproject.toml, as for the alembic command; give it twice for both",
+    )
+    parser.add_argument("-n", "--name", default="alembic", help="the section of the ini file")
     parser.add_argument("--target", required=True, help="the last revision to replace")
     parser.add_argument("--server-url", required=True, help="a SQLAlchemy URL of the PostgreSQL server")
     parser.add_argument("--version-table", default="alembic_version")
@@ -190,22 +238,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--pg-dump-arg", action="append", default=[], dest="pg_dump_args", help="one more pg_dump argument"
     )
+    parser.add_argument(
+        "--allow-data-loss", action="store_true", help="report lost rows and sequence state as warnings"
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the new revision and change no file")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
+        ini, toml = _config_files(args.config)
         result = squash(
-            Config(args.config, ini_section=args.name),
+            Config(ini, toml_file=toml, ini_section=args.name),
             args.target,
             server_url=args.server_url,
             version_table=args.version_table,
             version_table_schema=args.version_table_schema,
             pg_dump=args.pg_dump,
             pg_dump_args=args.pg_dump_args,
+            allow_data_loss=args.allow_data_loss,
             dry_run=args.dry_run,
         )
-    except (SquashError, CommandError) as e:
+    except (SquashError, CommandError, SQLAlchemyError, OSError) as e:
         print(f"squash failed: {e}", file=sys.stderr)
         return 1
 
@@ -219,24 +272,58 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def clean_dump(dump: str) -> list[str]:
+def clean_dump(
+    dump: str,
+    *,
+    known_settings: Iterable[str] | None = None,
+    owner: str | None = None,
+    version_schema: str | None = None,
+) -> list[str]:
     r"""Turn ``pg_dump`` output into the statements of the new revision.
 
-    The function removes the ``\restrict`` and ``\unrestrict`` lines, splits the text with ``postgast.split()``,
-    removes the comment lines before each statement, and removes ``SET client_encoding``.  The text is a Python
-    ``str``, so the driver controls the encoding.
+    The function removes the ``\restrict`` and ``\unrestrict`` pair, splits the text with ``postgast.split()``, and
+    removes the comment lines before each statement.  It then removes these statements:
+
+    - ``SET client_encoding``.  The text is a Python ``str``, so the driver controls the encoding.
+    - ``SET`` and ``set_config()`` of a setting outside ``known_settings``.  A newer ``pg_dump`` sets
+      ``transaction_timeout``, which an older server does not know.
+    - ``COMMENT ON EXTENSION``.  Only the owner of the extension can run it.
+    - ``ALTER ... OWNER TO`` the role ``owner``.  The role that runs the migration owns new objects already.
+
+    A ``CREATE SCHEMA`` of ``version_schema`` becomes ``CREATE SCHEMA IF NOT EXISTS``, because ``env.py`` often
+    creates that schema before Alembic creates the version table.
 
     Args:
         dump: The output of ``pg_dump --schema-only``.
+        known_settings: The setting names that the server knows.  ``None`` keeps every setting.
+        owner: The role that ran the replaced revisions.
+        version_schema: The schema of the Alembic version table.
 
     Returns:
         The statements, in dump order.
+
+    Raises:
+        SquashError: ``postgast`` cannot split the dump.
     """
+    known = frozenset(known_settings) if known_settings is not None else None
+    try:
+        raw_statements = postgast.split(_strip_restrict(dump))
+    except postgast.PgQueryError as e:
+        raise SquashError(f"postgast cannot split the pg_dump output: {e}") from e
+
     statements: list[str] = []
-    for raw in postgast.split(_strip_restrict(dump)):
+    for raw in raw_statements:
         statement = _strip_leading_comments(raw)
-        if statement and not _CLIENT_ENCODING.match(statement):
-            statements.append(statement)
+        if not statement or _CLIENT_ENCODING.match(statement) or _COMMENT_ON_EXTENSION.match(statement):
+            continue
+        if known is not None and (setting := _setting_name(statement)) and setting not in known:
+            continue
+        if owner is not None and (match := _OWNER_TO.match(statement)) and _unquote(match.group(1)) == owner:
+            continue
+        if version_schema is not None and (match := _CREATE_SCHEMA.match(statement)):
+            if _unquote(match.group(1)) == version_schema:
+                statement = f"CREATE SCHEMA IF NOT EXISTS {match.group(1)}"
+        statements.append(statement)
     return statements
 
 
@@ -251,8 +338,8 @@ def changed_settings(statements: Sequence[str]) -> list[str]:
     """
     names: dict[str, None] = {}
     for statement in statements:
-        if match := _SETTING.match(statement):
-            names[match.group(1) or match.group(2)] = None
+        if name := _setting_name(statement):
+            names[name] = None
     return list(names)
 
 
@@ -260,14 +347,14 @@ def render_revision(target: Script, replaced: Sequence[str], statements: Sequenc
     """Render the text of the new revision file.
 
     Args:
-        target: The script of ``TARGET``.  The new revision takes its ID and its branch labels.
+        target: The script of ``TARGET``.  The new revision takes its ID and the branch labels that it declares.
         replaced: The IDs of the replaced revisions, from base to ``TARGET``.
         statements: The output of :func:`clean_dump`.
 
     Returns:
         The text of a revision file that imports nothing from this package.
     """
-    labels = tuple(sorted(target.branch_labels)) or None
+    labels = _declared_labels(target) or None
     body = "".join(f"    {statement!r},\n" for statement in statements)
     return _REVISION_TEMPLATE.format(
         first=replaced[0],
@@ -284,7 +371,6 @@ def render_revision(target: Script, replaced: Sequence[str], statements: Sequenc
 class _Plan(NamedTuple):
     target: Script
     replaced: list[Script]
-    heads: frozenset[str]
 
 
 def _plan(script_dir: ScriptDirectory, target: str) -> _Plan:
@@ -315,12 +401,17 @@ def _plan(script_dir: ScriptDirectory, target: str) -> _Plan:
 
     replaced = [s for s in reversed(list(script_dir.walk_revisions())) if s.revision in replaced_ids]
     for s in replaced:
-        if s.revision != script.revision and s.branch_labels:
+        if s.revision != script.revision and (labels := _declared_labels(s)):
             raise SquashError(
-                f"Revision {s.revision} has branch labels {sorted(s.branch_labels)}. Only the labels of "
+                f"Revision {s.revision} declares branch labels {list(labels)}. Only the labels of "
                 f"{script.revision} carry over to the new revision."
             )
-    return _Plan(script, replaced, frozenset(script_dir.get_heads()))
+    return _Plan(script, replaced)
+
+
+def _declared_labels(script: Script) -> tuple[str, ...]:
+    """Return the branch labels that the revision file declares, without the labels that Alembic propagates."""
+    return tuple(sorted(_as_tuple(getattr(script.module, "branch_labels", None))))
 
 
 def _references(script_dir: ScriptDirectory, script: Script) -> set[str]:
@@ -340,53 +431,87 @@ def _as_tuple(value: str | Sequence[str] | None) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _scan_replaced_files(replaced: Sequence[Script]) -> Iterator[str]:
-    """Yield one message for each replaced file whose effect the dump comparison cannot see."""
-    for script in replaced:
-        text = Path(script.path).read_text(encoding="utf-8")
-        if _DATA_STATEMENT.search(text):
-            yield (
-                f"{script.path} holds a data statement. A schema-only dump keeps no rows, so add the rows that "
-                f"later revisions need to the new revision by hand."
-            )
-        if _GLOBAL_OBJECT.search(text):
-            yield f"{script.path} changes a role, a tablespace, or a database setting. pg_dump does not dump these."
-
-
 class _VersionTable(NamedTuple):
     name: str
     schema: str
 
     @property
-    def qualified(self) -> str:
-        return f"{self.schema}.{self.name}"
+    def pattern(self) -> str:
+        """Return a ``pg_dump`` pattern that matches the table literally, without case folding."""
+        return f"{_quote_pattern(self.schema)}.{_quote_pattern(self.name)}"
+
+
+def _quote_pattern(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
 
 
 class _ScratchServer:
-    """Create scratch databases on one server and drop them all at the end."""
+    """Create scratch databases on one server, watch its global objects, and clean up at the end."""
 
     def __init__(self, admin: Engine) -> None:
         self._admin: Final = admin
         self._token: Final = uuid.uuid4().hex[:12]
         self._created: list[str] = []
+        with admin.connect() as conn:
+            self.version: Final = str(conn.execute(sa.text("SHOW server_version")).scalar_one())
+            self.role: Final = str(conn.execute(sa.text("SELECT current_user")).scalar_one())
+            self.settings: Final = frozenset(conn.execute(sa.text("SELECT name FROM pg_settings")).scalars())
+        self._before: Final = self._global_state()
 
     def create(self, suffix: str) -> URL:
         name = f"squash_{self._token}_{suffix}"
-        quoted = self._admin.dialect.identifier_preparer.quote(name)
         try:
             with self._admin.connect() as conn:
-                conn.execute(sa.text(f"CREATE DATABASE {quoted} TEMPLATE template0"))
+                conn.execute(sa.text(f"CREATE DATABASE {self._quote(name)} TEMPLATE template0"))
         except DBAPIError as e:
             raise SquashError(f"Cannot create the scratch database {name}: {e.orig}") from e
         self._created.append(name)
         return self._admin.url.set(database=name)
 
-    def drop_all(self) -> None:
+    def check_globals(self, source: str) -> None:
+        """Raise when the server's global objects differ from the state before the squash started."""
+        after = self._global_state()
+        added = sorted(after.rows - self._before.rows)
+        removed = sorted(self._before.rows - after.rows)
+        if added or removed:
+            lines = [f"  + {row}" for row in added] + [f"  - {row}" for row in removed]
+            raise SquashError(
+                f"Running {source} changed objects that belong to the whole server:\n"
+                + "\n".join(lines)
+                + "\npg_dump does not dump these, so the new revision cannot recreate them. The squash drops the "
+                "roles and tablespaces that this run created. It cannot undo other changes."
+            )
+
+    def close(self) -> None:
+        """Drop the scratch databases, then the roles and tablespaces that the run created."""
+        try:
+            with self._admin.connect() as conn:
+                for name in self._created:
+                    conn.execute(sa.text(f"DROP DATABASE IF EXISTS {self._quote(name)} WITH (FORCE)"))
+                self._created.clear()
+                after = self._global_state()
+                for tablespace in sorted(after.tablespaces - self._before.tablespaces):
+                    conn.execute(sa.text(f"DROP TABLESPACE IF EXISTS {self._quote(tablespace)}"))
+                for role in sorted(after.roles - self._before.roles):
+                    conn.execute(sa.text(f"DROP ROLE IF EXISTS {self._quote(role)}"))
+        finally:
+            self._admin.dispose()
+
+    def _quote(self, name: str) -> str:
+        return self._admin.dialect.identifier_preparer.quote(name)
+
+    def _global_state(self) -> _GlobalState:
         with self._admin.connect() as conn:
-            for name in self._created:
-                quoted = self._admin.dialect.identifier_preparer.quote(name)
-                conn.execute(sa.text(f"DROP DATABASE IF EXISTS {quoted} WITH (FORCE)"))
-        self._created.clear()
+            rows = frozenset(conn.execute(sa.text(_GLOBAL_STATE_QUERY)).scalars())
+            roles = frozenset(conn.execute(sa.text("SELECT rolname FROM pg_roles")).scalars())
+            tablespaces = frozenset(conn.execute(sa.text("SELECT spcname FROM pg_tablespace")).scalars())
+        return _GlobalState(rows, roles, tablespaces)
+
+
+class _GlobalState(NamedTuple):
+    rows: frozenset[str]
+    roles: frozenset[str]
+    tablespaces: frozenset[str]
 
 
 class _Dumper(NamedTuple):
@@ -394,18 +519,19 @@ class _Dumper(NamedTuple):
     extra: tuple[str, ...]
 
     def dump(self, url: URL, *args: str) -> str:
-        """Return ``pg_dump --schema-only --no-owner`` output for the database that ``url`` names."""
-        argv = [self.binary, "--schema-only", "--no-owner", *self.extra, *args, f"--dbname={_libpq_uri(url)}"]
-        env = dict(os.environ)
+        """Return ``pg_dump --schema-only`` output for the database that ``url`` names, with owners."""
+        argv = [self.binary, "--schema-only", *self.extra, *args, f"--dbname={_libpq_uri(url)}"]
+        env = dict(os.environ, PGCLIENTENCODING="UTF8")
         if url.password is not None:
             env["PGPASSWORD"] = str(url.password)
         try:
-            done = subprocess.run(argv, check=False, capture_output=True, text=True, env=env)
+            done = subprocess.run(argv, check=False, capture_output=True, env=env)
         except OSError as e:
             raise SquashError(f"Cannot run {self.binary}: {e}") from e
         if done.returncode != 0:
-            raise SquashError(f"{self.binary} failed with status {done.returncode}: {done.stderr.strip()}")
-        return done.stdout
+            stderr = done.stderr.decode("utf-8", errors="replace").strip()
+            raise SquashError(f"{self.binary} failed with status {done.returncode}: {stderr}")
+        return done.stdout.decode("utf-8")
 
 
 def _libpq_uri(url: URL) -> str:
@@ -424,40 +550,120 @@ def _pg_dump_version(binary: str) -> str:
     return done.stdout.strip().splitlines()[0]
 
 
+class _ScriptCopy:
+    """A copy of the script directory and of each version location, with a configuration that loads the copy."""
+
+    def __init__(self, config: Config, script_dir: ScriptDirectory, tmp: Path) -> None:
+        root = Path(script_dir.dir).resolve()
+        copy_root = tmp / "script"
+        shutil.copytree(root, copy_root, ignore=shutil.ignore_patterns("__pycache__"))
+        self._places: list[tuple[Path, Path]] = []
+        locations: list[Path] = []
+        for index, location in enumerate(script_dir.version_locations or [str(root / "versions")]):
+            source = Path(location).resolve()
+            if source.is_relative_to(root):
+                copied = copy_root / source.relative_to(root)
+            else:
+                copied = tmp / f"versions_{index}"
+                shutil.copytree(source, copied, ignore=shutil.ignore_patterns("__pycache__"))
+            self._places.append((source, copied))
+            locations.append(copied)
+        self._places.append((root, copy_root))
+        self._places.sort(key=lambda place: len(place[0].parts), reverse=True)
+        self.locations: Final = tuple(locations)
+
+        self.config: Final = _scratch_config(config, None)
+        _set_raw(self.config, "script_location", str(copy_root))
+        if config.get_version_locations_list() is not None:
+            _set_raw(self.config, "path_separator", "newline")
+            _set_raw(self.config, "version_locations", "\n".join(str(p) for p in locations))
+            prepend = config.get_prepend_sys_paths_list()
+            if prepend:
+                _set_raw(self.config, "prepend_sys_path", "\n".join(prepend))
+
+    def map(self, path: Path) -> Path:
+        """Return the copy of ``path``, through the version location or script directory that holds it."""
+        resolved = path.resolve()
+        for source, copied in self._places:
+            if resolved.is_relative_to(source):
+                return copied / resolved.relative_to(source)
+        raise SquashError(f"{path} is outside the script directory and every version location")
+
+
+def _check_copy(config: Config, plan: _Plan, revision_copy: Path) -> None:
+    """Check that the copied chain loads the new revision as the base and no replaced revision."""
+    script_dir = ScriptDirectory.from_config(config)
+    loaded = {s.revision: s for s in script_dir.walk_revisions()}
+    target = loaded.get(plan.target.revision)
+    leftover = sorted(s.revision for s in plan.replaced if s.revision != plan.target.revision and s.revision in loaded)
+    if (
+        target is None
+        or target.down_revision is not None
+        or Path(target.path).resolve() != revision_copy.resolve()
+        or leftover
+    ):
+        raise SquashError(
+            f"The copy of the script directory does not load the new revision as expected. Leftover revisions: "
+            f"{leftover}. Report this as a bug."
+        )
+
+
+def _preflight(config: Config, script_dir: ScriptDirectory, url: URL, tmp: Path) -> None:
+    """Run ``env.py`` with one sentinel revision that fails outside the scratch database."""
+    copy = _ScriptCopy(config, script_dir, tmp)
+    for script in script_dir.walk_revisions():
+        copy.map(Path(script.path)).unlink()
+    (copy.locations[0] / "alembic_pg_autogen_squash_preflight.py").write_text(
+        _PREFLIGHT_TEMPLATE.format(expected=repr(url.database)), encoding="utf-8"
+    )
+    try:
+        _run_upgrade(copy.config, url, "heads")
+    except Exception as e:
+        raise SquashError(
+            f"The preflight failed, so the squash ran no migration: {e}\nenv.py must connect to the scratch database. "
+            f"It must read the sqlalchemy.url option or use config.attributes['connection']."
+        ) from e
+
+
 def _upgrade(
     config: Config, url: URL, revision: str, version: _VersionTable, *, expected: frozenset[str] | None = None
-) -> None:
-    """Run ``alembic upgrade`` against one scratch database and check that ``env.py`` used that database."""
+) -> frozenset[str]:
+    """Run ``alembic upgrade`` against one scratch database and return the rows of its version table."""
+    found = _run_upgrade(config, url, revision, version)
+    if expected is not None and found != expected:
+        raise SquashError(
+            f"After 'upgrade {revision}', the scratch database {url.database} holds versions {sorted(found)}, not "
+            f"{sorted(expected)}. version_table and version_table_schema must match the arguments of squash(), and "
+            f"the target must be the only head after the upgrade."
+        )
+    return found
+
+
+def _run_upgrade(config: Config, url: URL, revision: str, version: _VersionTable | None = None) -> frozenset[str]:
     engine = sa.create_engine(url, poolclass=NullPool)
     try:
         scratch_config = _scratch_config(config, url)
-        with engine.begin() as conn:
+        with engine.connect() as conn:
             scratch_config.attributes["connection"] = conn
             command.upgrade(scratch_config, revision)
-        found = _read_versions(engine, version)
+            conn.commit()
+        return _read_versions(engine, version) if version is not None else frozenset()
     finally:
         engine.dispose()
-    want = expected if expected is not None else frozenset({revision})
-    if found != want:
-        raise SquashError(
-            f"After 'upgrade {revision}', the scratch database {url.database} holds versions {sorted(found)}, not "
-            f"{sorted(want)}. env.py must read the sqlalchemy.url option or use config.attributes['connection'], and "
-            f"version_table and version_table_schema must match the arguments of squash()."
-        )
 
 
 def _read_versions(engine: Engine, version: _VersionTable) -> frozenset[str]:
     quote = engine.dialect.identifier_preparer.quote
+    qualified = f"{quote(version.schema)}.{quote(version.name)}"
     with engine.connect() as conn:
-        exists = conn.execute(sa.text("SELECT to_regclass(:name)"), {"name": f'"{version.schema}"."{version.name}"'})
+        exists = conn.execute(sa.text("SELECT to_regclass(:name)"), {"name": version.pattern})
         if exists.scalar() is None:
             return frozenset()
-        rows = conn.execute(sa.text(f"SELECT version_num FROM {quote(version.schema)}.{quote(version.name)}"))
-        return frozenset(rows.scalars())
+        return frozenset(conn.execute(sa.text(f"SELECT version_num FROM {qualified}")).scalars())
 
 
-def _scratch_config(config: Config, url: URL) -> Config:
-    """Return a copy of ``config`` whose ``sqlalchemy.url`` names the scratch database."""
+def _scratch_config(config: Config, url: URL | None) -> Config:
+    """Return a copy of ``config``.  With ``url``, its ``sqlalchemy.url`` names that database."""
     copy = Config(
         config.config_file_name,
         toml_file=config.toml_file_name,
@@ -471,54 +677,92 @@ def _scratch_config(config: Config, url: URL) -> Config:
     section = config.config_ini_section
     if not copy.file_config.has_section(section):
         copy.file_config.add_section(section)
-    for key, value in config.file_config.items(section, raw=True):
-        copy.file_config.set(section, key, value)
-    copy.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False).replace("%", "%%"))
+    if config.file_config.has_section(section):
+        for key, value in config.file_config.items(section, raw=True):
+            copy.file_config.set(section, key, value)
+    if url is not None:
+        _set_raw(copy, "sqlalchemy.url", url.render_as_string(hide_password=False))
     return copy
-
-
-def _new_chain_config(config: Config, script_dir: ScriptDirectory, plan: _Plan, tmp: Path) -> tuple[Config, Path]:
-    """Copy the script directory into ``tmp`` without the replaced files.
-
-    Returns:
-        A configuration that loads the copy, and the path where the new revision belongs in the copy.
-    """
-    root = Path(script_dir.dir).resolve()
-    copy_root = tmp / "script"
-    shutil.copytree(root, copy_root, ignore=shutil.ignore_patterns("__pycache__"))
-    mapping: dict[Path, Path] = {}
-
-    def mapped(directory: Path) -> Path:
-        directory = directory.resolve()
-        if directory.is_relative_to(root):
-            return copy_root / directory.relative_to(root)
-        if directory not in mapping:
-            mapping[directory] = tmp / f"versions_{len(mapping)}"
-            shutil.copytree(directory, mapping[directory], ignore=shutil.ignore_patterns("__pycache__"))
-        return mapping[directory]
-
-    locations = [mapped(Path(location)) for location in script_dir.version_locations]
-    for script in plan.replaced:
-        (mapped(Path(script.path).parent) / Path(script.path).name).unlink()
-
-    new_config = _scratch_config(config, sa.make_url("postgresql://"))
-    _set_raw(new_config, "script_location", str(copy_root))
-    if config.get_version_locations_list() is not None:
-        _set_raw(new_config, "path_separator", "newline")
-        _set_raw(new_config, "version_locations", "\n".join(str(p) for p in locations))
-        prepend = config.get_prepend_sys_paths_list()
-        if prepend:
-            _set_raw(new_config, "prepend_sys_path", "\n".join(prepend))
-    target_path = Path(plan.target.path)
-    return new_config, mapped(target_path.parent) / f"{plan.target.revision}_squashed.py"
 
 
 def _set_raw(config: Config, key: str, value: str) -> None:
     config.set_main_option(key, value.replace("%", "%%"))
 
 
-def _compare(old: str, new: str, where: str) -> None:
-    old, new = _strip_restrict(old), _strip_restrict(new)
+def _config_files(names: Sequence[str]) -> tuple[str, str]:
+    """Pick the ini file and the ``pyproject.toml`` file the way the ``alembic`` command does."""
+    env = os.environ.get("ALEMBIC_CONFIG")
+    default_ini, default_toml = "alembic.ini", "pyproject.toml"
+    if env and os.path.basename(env) == "pyproject.toml":
+        default_toml = env
+    elif env:
+        default_ini = env
+    ini = [n for n in names if os.path.basename(n) != "pyproject.toml"]
+    toml = [n for n in names if os.path.basename(n) == "pyproject.toml"]
+    if len(ini) > 1 or len(toml) > 1:
+        raise SquashError("Give at most one ini file and one pyproject.toml")
+    return (ini[0] if ini else default_ini), (toml[0] if toml else default_toml)
+
+
+def _refresh_statements(url: URL) -> list[str]:
+    """Return ``REFRESH MATERIALIZED VIEW`` for each populated materialized view, in dependency order."""
+    engine = sa.create_engine(url, poolclass=NullPool)
+    try:
+        with engine.connect() as conn:
+            names = dict(conn.execute(sa.text(_RELATION_NAMES_QUERY)).tuples().all())
+            populated = set(conn.execute(sa.text(_POPULATED_MATVIEWS_QUERY)).scalars())
+            edges = conn.execute(sa.text(_VIEW_DEPENDENCIES_QUERY)).tuples().all()
+    finally:
+        engine.dispose()
+    graph: dict[int, set[int]] = {oid: set() for oid in names}
+    for view, referenced in edges:
+        graph.setdefault(view, set()).add(referenced)
+    order = graphlib.TopologicalSorter(graph).static_order()
+    return [f"REFRESH MATERIALIZED VIEW {names[oid]}" for oid in order if oid in populated]
+
+
+def _compare(dumper: _Dumper, old: URL, new: URL, where: str) -> None:
+    """Compare the dump text and the catalog properties that the dump does not show."""
+    _raise_on_diff(_strip_restrict(dumper.dump(old)), _strip_restrict(dumper.dump(new)), f"schemas {where}")
+    _raise_on_diff(_catalog_state(old), _catalog_state(new), f"catalog properties {where}")
+
+
+def _catalog_state(url: URL) -> str:
+    engine = sa.create_engine(url, poolclass=NullPool)
+    try:
+        with engine.connect() as conn:
+            return "".join(f"{line}\n" for line in conn.execute(sa.text(_CATALOG_STATE_QUERY)).scalars())
+    finally:
+        engine.dispose()
+
+
+def _data_differences(old: URL, new: URL, version: _VersionTable) -> list[str]:
+    """Compare the row count of each table and the state of each sequence."""
+    old_state, new_state = _data_state(old, version), _data_state(new, version)
+    return [
+        f"{name}: {old_state.get(name, 'absent')} with the old chain, {new_state.get(name, 'absent')} with the new"
+        for name in sorted(old_state.keys() | new_state.keys())
+        if old_state.get(name) != new_state.get(name)
+    ]
+
+
+def _data_state(url: URL, version: _VersionTable) -> Mapping[str, str]:
+    engine = sa.create_engine(url, poolclass=NullPool)
+    state: dict[str, str] = {}
+    try:
+        with engine.connect() as conn:
+            for name, schema, table in conn.execute(sa.text(_TABLES_QUERY)).tuples():
+                if (schema, table) != (version.schema, version.name):
+                    count = conn.execute(sa.text(f"SELECT count(*) FROM {name}")).scalar_one()
+                    state[f"table {name}"] = f"{count} rows"
+            for name, last_value in conn.execute(sa.text(_SEQUENCES_QUERY)).tuples():
+                state[f"sequence {name}"] = f"last_value {last_value}"
+    finally:
+        engine.dispose()
+    return state
+
+
+def _raise_on_diff(old: str, new: str, what: str) -> None:
     if old == new:
         return
     diff = difflib.unified_diff(
@@ -527,28 +771,161 @@ def _compare(old: str, new: str, where: str) -> None:
     lines = list(diff)
     shown = "".join(lines[:_MAX_DIFF_LINES])
     more = f"\n... {len(lines) - _MAX_DIFF_LINES} more diff lines" if len(lines) > _MAX_DIFF_LINES else ""
-    raise SquashError(f"The two chains give different schemas {where}:\n{shown}{more}")
+    raise SquashError(f"The two chains give different {what}:\n{shown}{more}")
+
+
+def _write(revision_path: Path, source: str, removed_paths: Sequence[Path]) -> None:
+    """Write the new revision atomically, then delete the replaced files."""
+    temporary = revision_path.with_name(f".{revision_path.name}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="") as fh:
+            fh.write(source)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, revision_path)
+    except OSError as e:
+        temporary.unlink(missing_ok=True)
+        raise SquashError(f"Cannot write {revision_path}: {e}. No file changed.") from e
+    remaining: list[str] = []
+    for path in removed_paths:
+        if path.resolve() == revision_path.resolve():
+            continue
+        try:
+            path.unlink()
+        except OSError as e:
+            remaining.append(f"{path} ({e})")
+    if remaining:
+        raise SquashError(
+            f"Wrote {revision_path}, but cannot delete these replaced files. Delete them by hand: {', '.join(remaining)}"
+        )
+    log.info("Wrote %s and removed %d revision files", revision_path, len(removed_paths))
 
 
 def _strip_restrict(dump: str) -> str:
-    r"""Remove the ``\restrict`` and ``\unrestrict`` psql meta-commands, whose key changes on every run."""
-    return _RESTRICT_LINE.sub("", dump)
+    r"""Remove the ``\restrict KEY`` line and the matching ``\unrestrict KEY`` line, and no other line."""
+    match = _RESTRICT_LINE.search(dump)
+    if match is None:
+        return dump
+    end = f"\\unrestrict {match.group(1)}"
+    without_start = dump[: match.start()] + dump[match.end() :]
+    position = without_start.rfind(end)
+    if position < 0:
+        return without_start
+    line_end = without_start.find("\n", position)
+    stop = len(without_start) if line_end < 0 else line_end + 1
+    return without_start[:position] + without_start[stop:]
 
 
 def _strip_leading_comments(statement: str) -> str:
     """Remove the blank lines and ``--`` comment lines before a statement, and nothing inside it."""
-    lines = statement.strip().splitlines()
+    lines = statement.strip().split("\n")
     while lines and (not lines[0].strip() or lines[0].lstrip().startswith("--")):
         lines.pop(0)
     return "\n".join(lines).strip()
 
 
+def _setting_name(statement: str) -> str | None:
+    match = _SETTING.match(statement)
+    return (match.group(1) or match.group(2)) if match else None
+
+
+def _unquote(identifier: str) -> str:
+    if identifier.startswith('"') and identifier.endswith('"'):
+        return identifier[1:-1].replace('""', '"')
+    return identifier
+
+
 _MAX_DIFF_LINES: Final = 200
-_RESTRICT_LINE: Final = re.compile(r"^\\(?:un)?restrict\b.*(?:\n|$)", re.MULTILINE)
+_RESTRICT_LINE: Final = re.compile(r"^\\restrict (\S+)[ \t]*(?:\n|$)", re.MULTILINE)
 _CLIENT_ENCODING: Final = re.compile(r"SET\s+client_encoding\b", re.IGNORECASE)
+_COMMENT_ON_EXTENSION: Final = re.compile(r"COMMENT\s+ON\s+EXTENSION\b", re.IGNORECASE)
 _SETTING: Final = re.compile(r"SET\s+(\w+)\s*(?:=|TO)|SELECT\s+pg_catalog\.set_config\('(\w+)'", re.IGNORECASE)
-_DATA_STATEMENT: Final = re.compile(r"\bbulk_insert\b|\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b|\bDELETE\s+FROM\b", re.I)
-_GLOBAL_OBJECT: Final = re.compile(r"\b(?:CREATE|ALTER)\s+(?:ROLE|USER|TABLESPACE)\b|\bALTER\s+DATABASE\b", re.I)
+_IDENTIFIER: Final = r'("(?:[^"]|"")+"|[^\s";]+)'
+_OWNER_TO: Final = re.compile(rf"ALTER\s.+\sOWNER\s+TO\s+{_IDENTIFIER}\s*$", re.IGNORECASE | re.DOTALL)
+_CREATE_SCHEMA: Final = re.compile(rf"CREATE\s+SCHEMA\s+{_IDENTIFIER}\s*$", re.IGNORECASE)
+
+_USER_RELATIONS: Final = """
+    n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_toast%'
+    AND n.nspname NOT LIKE 'pg\\_temp\\_%'
+"""
+_CATALOG_STATE_QUERY: Final = f"""
+    SELECT format('columns %I.%I: %s', n.nspname, c.relname,
+                  (SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) FROM pg_attribute a
+                   WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped))
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND {_USER_RELATIONS}
+    UNION ALL
+    SELECT format('materialized view %I.%I populated %s', n.nspname, c.relname, c.relispopulated)
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'm' AND {_USER_RELATIONS}
+    ORDER BY 1
+"""
+_TABLES_QUERY: Final = f"""
+    SELECT format('%I.%I', n.nspname, c.relname), n.nspname, c.relname
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'm') AND {_USER_RELATIONS} AND (c.relkind <> 'm' OR c.relispopulated)
+    ORDER BY 1
+"""
+_SEQUENCES_QUERY: Final = """
+    SELECT format('%I.%I', schemaname, sequencename), coalesce(last_value::text, 'unused')
+    FROM pg_sequences ORDER BY 1
+"""
+_RELATION_NAMES_QUERY: Final = f"""
+    SELECT c.oid::int, format('%I.%I', n.nspname, c.relname)
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('v', 'm') AND {_USER_RELATIONS}
+"""
+_POPULATED_MATVIEWS_QUERY: Final = f"""
+    SELECT c.oid::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'm' AND c.relispopulated AND {_USER_RELATIONS}
+"""
+_VIEW_DEPENDENCIES_QUERY: Final = """
+    SELECT DISTINCT r.ev_class::int, d.refobjid::int
+    FROM pg_rewrite r
+    JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid AND d.refclassid = 'pg_class'::regclass
+    JOIN pg_class ref ON ref.oid = d.refobjid AND ref.relkind IN ('v', 'm')
+    WHERE d.refobjid <> r.ev_class
+"""
+_GLOBAL_STATE_QUERY: Final = """
+    SELECT format('role %I super=%s inherit=%s createrole=%s createdb=%s login=%s replication=%s bypassrls=%s '
+                  'connlimit=%s', rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin,
+                  rolreplication, rolbypassrls, rolconnlimit)
+    FROM pg_roles
+    UNION ALL
+    SELECT format('member %s of %s', m.member::regrole, m.roleid::regrole) FROM pg_auth_members m
+    UNION ALL
+    SELECT format('tablespace %I', spcname) FROM pg_tablespace
+    UNION ALL
+    SELECT format('setting database=%s role=%s %s', coalesce(d.datname, '*'), coalesce(r.rolname, '*'),
+                  array_to_string(s.setconfig, ', '))
+    FROM pg_db_role_setting s
+    LEFT JOIN pg_database d ON d.oid = s.setdatabase
+    LEFT JOIN pg_roles r ON r.oid = s.setrole
+"""
+
+_PREFLIGHT_TEMPLATE: Final = '''\
+"""Sentinel revision of the alembic_pg_autogen squash preflight."""
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = "squash_preflight"
+down_revision = None
+branch_labels = None
+depends_on = None
+
+EXPECTED = {expected}
+
+
+def upgrade():
+    found = op.get_bind().execute(sa.text("SELECT current_database()")).scalar()
+    if found != EXPECTED:
+        raise RuntimeError(f"env.py connected to the database {{found!r}}, not to the scratch database {{EXPECTED!r}}")
+
+
+def downgrade():
+    pass
+'''
 
 _REVISION_TEMPLATE: Final = '''\
 """Squashed {first}..{target} ({count} revisions).
@@ -575,11 +952,18 @@ STATEMENTS = (
 
 def upgrade():
     for name in SETTINGS:
-        op.execute(sa.DDL(f"SELECT set_config('alembic_pg_autogen.squash_{{name}}', current_setting('{{name}}'), false)"))
+        op.execute(
+            sa.DDL(f"SELECT set_config('alembic_pg_autogen.squash_{{name}}', current_setting('{{name}}', true), false)")
+        )
     for statement in STATEMENTS:
         op.execute(sa.DDL(statement.replace("%", "%%")))
     for name in SETTINGS:
-        op.execute(sa.DDL(f"SELECT set_config('{{name}}', current_setting('alembic_pg_autogen.squash_{{name}}'), false)"))
+        op.execute(
+            sa.DDL(
+                f"SELECT set_config('{{name}}', current_setting('alembic_pg_autogen.squash_{{name}}'), false) "
+                f"WHERE current_setting('{{name}}', true) IS NOT NULL"
+            )
+        )
 
 
 def downgrade():

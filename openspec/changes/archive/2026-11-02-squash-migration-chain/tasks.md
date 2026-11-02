@@ -30,3 +30,25 @@
 - [x] 4.2 Document the squash in `README.md` and `docs/squash.rst`. Verify with
   `uv run mdformat --check README.md CLAUDE.md openspec/`.
 - [x] 4.3 Run `make lint` and the full test suite against PostgreSQL, and verify that every check passes.
+
+## 5. Review of #53
+
+- [x] 5.1 Add the preflight with a sentinel revision before the first upgrade. Verify that an `env.py` with its own URL
+  leaves that database unchanged, also in a dry run.
+- [x] 5.2 Keep owners in the dumps, and remove only `OWNER TO` the role that ran the squash. Verify with a table owned
+  by another role.
+- [x] 5.3 Compare roles, memberships, tablespaces, and settings of the server after each old-chain upgrade, and drop the
+  roles and tablespaces that the run created. Verify with `CREATE ROLE` before and after the target.
+- [x] 5.4 Compare column order and materialized view population, and append `REFRESH MATERIALIZED VIEW` in dependency
+  order. Verify with an inherited table and two dependent materialized views.
+- [x] 5.5 Compare row counts and sequences at the target, and add `allow_data_loss`. Verify that lost rows stop the
+  squash by default.
+- [x] 5.6 Pass a connection without a transaction. Verify with `autocommit_block()` and `transaction_per_migration`.
+- [x] 5.7 Write the new file atomically before the deletes. Verify a failed write and a failed delete.
+- [x] 5.8 Map copied files through their version location, and check the copy. Verify with a recursive version location.
+- [x] 5.9 Remove settings that the server does not know, `COMMENT ON EXTENSION`, and only the matching `\restrict` pair.
+  Quote the version table pattern, and rewrite `CREATE SCHEMA` of the version schema. Verify each with a test.
+- [x] 5.10 Compare the two version tables at the heads, and use the declared branch labels. Verify a
+  dependency-satisfied head and propagated labels.
+- [x] 5.11 Catch connection errors in `main()`, read `pyproject.toml`, and add a CI job that runs the squash tests with
+  `pg_dump` 18 against PostgreSQL 14, 16, 17, and 18. Make a missing `pg_dump` fail CI.

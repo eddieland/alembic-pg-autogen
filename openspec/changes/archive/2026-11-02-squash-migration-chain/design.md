@@ -47,7 +47,7 @@ builds a nine revision chain, squashes `r01` to `r07`, and proves these facts:
 
 - Replace `TARGET` and its ancestors with one revision that builds the same schema
 - Keep every database at or after `TARGET` valid without a `stamp`
-- Prove equivalence before the squash changes a file
+- Compare a stated list of properties of both chains before the squash changes a file
 - Keep the new revision a plain Alembic revision file that runs without this package
 
 **Non-Goals:**
@@ -97,12 +97,12 @@ python -m alembic_pg_autogen.squash --config alembic.ini --target 3f9a1c2b7d4e \
 `server_url` names a server, not a database. The squash connects to it and creates scratch databases from `template0`.
 It drops them at the end, also on failure. Other keyword arguments are `version_table` (default `"alembic_version"`),
 `version_table_schema` (default `"public"`), `pg_dump` (the binary, default `"pg_dump"`), `pg_dump_args` (extra
-arguments), and `dry_run`.
+arguments), `allow_data_loss`, and `dry_run`.
 
 `squash()` returns a `SquashResult` named tuple. It holds the new file path, the removed file paths, the statement
-count, the server version, and the `pg_dump` version. It also holds the text of the new file as `source`, and the
-messages of the risk scan as `warnings` (see Risks). A failed check raises `SquashError`. The command line prints the
-message and exits with status 1.
+count, the server version, and the `pg_dump` version. It also holds the text of the new file as `source`, and the data
+differences that `allow_data_loss=True` accepts as `warnings` (D9). A failed check raises `SquashError`. The command
+line prints the message and exits with status 1.
 
 ### D3: The new revision takes `TARGET`'s ID
 
@@ -125,24 +125,37 @@ Branches and merges inside the replaced set need no check. The squash removes al
 The squash runs `command.upgrade(config, TARGET)` against an empty scratch database. It then runs:
 
 ```text
-pg_dump --schema-only --no-owner --exclude-table=<version_table_schema>.<version_table> <scratch database>
+pg_dump --schema-only --exclude-table='"<version_table_schema>"."<version_table>"' <scratch database>
 ```
 
-The squash never reads a deployed database. A deployed database can hold changes that no revision made. Those changes
-must not enter the chain. The current models are also not a source. They describe head, not `TARGET`.
+The quoted pattern keeps the case of the names. The squash never reads a deployed database. A deployed database can hold
+changes that no revision made. Those changes must not enter the chain. The current models are also not a source. They
+describe head, not `TARGET`.
 
-`--no-owner` removes `ALTER ... OWNER TO`. The role that runs the migrations owns the objects, as with the old chain.
-Privileges stay in the body. A `GRANT` in the old chain is part of the schema.
+The dump keeps owners. The review of #53 showed that `--no-owner` on both compared dumps hides an
+`ALTER TABLE t OWNER TO app_owner` in the chain: the squash passed, and a fresh database got a different owner. D5
+removes only `OWNER TO` the role that ran the squash, because that role owns new objects already. `OWNER TO` another
+role stays in the body. Privileges stay in the body too. A `GRANT` in the old chain is part of the schema.
 
-### D5: The squash cleans the dump in four steps
+### D5: The squash cleans the dump
 
-1. Remove the `\restrict` and `\unrestrict` lines (facts 4 and 5).
-1. Split the text with `postgast.split()`.
-1. Remove the `--` comment lines from each statement. `pg_dump` writes these comments as headers. They do not change the
-   schema.
-1. Remove `SET client_encoding`. The text is a Python `str`, and the driver encodes it.
+1. Remove the `\restrict KEY` line and the matching `\unrestrict KEY` line (facts 4 and 5). Remove no other line,
+   because a function body can hold the same text.
+1. Split the text with `postgast.split()`. A `PgQueryError` becomes `SquashError`.
+1. Remove the `--` comment lines before each statement. `pg_dump` writes these comments as headers. Comment lines inside
+   a statement stay.
+1. Remove `SET client_encoding`. The text is a Python `str`, and the driver encodes it. The squash reads the dump as
+   bytes with `PGCLIENTENCODING=UTF8`, so `\r\n` inside a statement stays.
+1. Remove `SET` and `set_config()` of a setting that the server does not know. `pg_dump` 17 and newer set
+   `transaction_timeout`, which PostgreSQL 16 and older reject.
+1. Remove `COMMENT ON EXTENSION`. Only the owner of the extension can run it.
+1. Remove `ALTER ... OWNER TO` the role that ran the squash (D4).
+1. Rewrite `CREATE SCHEMA` of the version table schema as `CREATE SCHEMA IF NOT EXISTS`. `env.py` often creates that
+   schema before Alembic creates the version table.
 
-The order of the statements does not change. `pg_dump` already orders objects by dependency (fact 2).
+The order of the statements does not change. `pg_dump` already orders objects by dependency (fact 2). A schema-only dump
+creates each materialized view `WITH NO DATA`. The squash appends `REFRESH MATERIALIZED VIEW` for each materialized view
+that is populated in the scratch database, in dependency order.
 
 ### D6: Each statement runs as `sa.DDL` with `%` doubled
 
@@ -204,20 +217,33 @@ The file imports nothing from this package. A project can remove the package lat
 The file name is `<TARGET>_squashed.py`, in the directory of the old `TARGET` file. The squash deletes the replaced
 files only after both checks in D9 pass.
 
-### D9: Two dump comparisons gate the write
+### D9: Comparisons gate the write
 
-The squash writes the new revision into a temporary copy of the script directory. The copy holds `env.py`, the template,
-the new revision, and the revisions after `TARGET`. Then it runs two comparisons:
+The squash writes the new revision into a temporary copy of the script directory and of each version location. The copy
+holds `env.py`, the template, the new revision, and the revisions after `TARGET`. The squash maps each file through the
+version location that holds it, so a subdirectory of a recursive version location stays in the copy. It then loads the
+copy and checks that `TARGET` has `down_revision = None` and that no other replaced revision remains.
 
-1. **At `TARGET`.** A second scratch database runs the new revision. Its dump must equal the dump of the first scratch
-   database.
-1. **At the heads.** Both scratch databases upgrade to `heads`, one with each chain. The two dumps must be equal. This
-   proves that the revisions after `TARGET` apply on top of the new revision.
+Equal dumps do not prove equivalence. The review of #53 found materialized view population, ownership, inherited column
+order, and global objects that all passed a dump comparison while behavior differed. The squash therefore compares a
+list of properties, at `TARGET` and at the heads:
 
-Each comparison removes the `\restrict` lines and does not exclude the version table. Fact 9 shows equal dumps for the
-prototype chain. On a difference, the squash raises `SquashError` with a unified diff and changes no file.
+- the `pg_dump --schema-only` text, with owners and without the `\restrict` pair
+- the column order of each table, view, and materialized view, from `pg_attribute`
+- `relispopulated` of each materialized view
+- the rows of the version table of each chain. These rows are compared with each other, not with
+  `ScriptDirectory.get_heads()`, which lists heads that a dependency already satisfies.
+- roles, role memberships, tablespaces, and `pg_db_role_setting` on the server (D13)
 
-With `dry_run=True`, the squash runs both checks and prints the new revision. It changes no file.
+At `TARGET` only, the squash also compares the row count of each table and the last value of each sequence. A difference
+raises `SquashError` unless the caller passes `allow_data_loss=True`. Then the differences become
+`SquashResult.warnings`.
+
+On a difference, the squash raises `SquashError` with a unified diff and changes no file. With `dry_run=True`, the
+squash runs every check and changes no file.
+
+After every check passes, the squash writes the new file to a temporary name in the target directory, calls `fsync`, and
+renames it with `os.replace`. Only then does it delete the replaced files. A failed write therefore changes no file.
 
 ### D10: `squashed_revisions` lists every replaced ID
 
@@ -237,23 +263,34 @@ A downgrade that drops every object must also keep `alembic_version`, or Alembic
 in reverse dump order is possible. It gives a destructive operation that no deployed database needs. A test that builds
 a fresh database never needs a schema older than `TARGET`.
 
-### D12: The squash points `env.py` at the scratch database in two ways
+### D12: A preflight checks that `env.py` uses the scratch database
 
-The squash sets `sqlalchemy.url` on the `Config`. The generic `env.py` template reads that option. The prototype uses
-this way. The squash also puts an open connection into `config.attributes["connection"]`. The Alembic cookbook recipe
-"Sharing a Connection across one or more programmatic migration commands" reads that attribute. The prototype does not
-test this way.
+The squash sets `sqlalchemy.url` on the `Config`. The generic `env.py` template reads that option. The squash also puts
+an open connection into `config.attributes["connection"]`. The Alembic cookbook recipe "Sharing a Connection across one
+or more programmatic migration commands" reads that attribute. The connection comes from `engine.connect()` and has no
+open transaction, so `autocommit_block()` and `transaction_per_migration` work.
 
-An `env.py` that reads its URL from an environment variable uses neither. After each upgrade, the squash checks that the
-scratch version table holds the expected revision. A failed check raises `SquashError`. The message names the two ways
-that `env.py` must support.
+The first version checked the version table after each upgrade. The review of #53 showed that this check runs after the
+upgrade commits: an `env.py` that reads `DATABASE_URL` migrated the real database first, also in a dry run.
+
+The squash now runs a preflight before the first real upgrade. The preflight copies the script directory without any
+revision and adds one sentinel revision. The sentinel raises unless `current_database()` is the name of a scratch
+database for the preflight. An `env.py` that connects elsewhere then runs no migration there. Alembic stops with
+`Can't locate revision` when that database has a version table. Otherwise the sentinel fails and its transaction rolls
+back.
+
+### D13: Objects of the whole server stop the squash
+
+`pg_dump` does not dump roles, tablespaces, or database and role settings. Both chains run on one server, so a role that
+the old chain creates also exists for the new chain, and the comparison passes. The squash therefore records these
+objects before the run and compares them after each upgrade of the old chain. A difference raises `SquashError`, also
+for a revision after `TARGET`, because the new chain would then fail with `already exists`. At the end, the squash drops
+the roles and tablespaces that the run created. It cannot undo other changes.
 
 ## Risks / Trade-offs
 
-**\[An `env.py` that ignores both ways\]** → The upgrade runs against the database that `env.py` chooses. That database
-can be a developer database. Mitigation: the D12 check stops the squash after the first upgrade. That upgrade only moves
-a database forward to `TARGET`, so a developer database behind `TARGET` changes. The documentation shows the required
-`env.py` lines first.
+**\[An `env.py` that ignores both ways\]** → `env.py` connects to the database that it chooses. Mitigation: the D12
+preflight runs no migration there. Code that `env.py` runs outside the migrations still runs there.
 
 **\[`pg_dump` and server versions\]** → `pg_dump` refuses a server with a newer major version. The body also uses syntax
 of the server that the squash ran against. For example, PostgreSQL 15 adds `NULLS NOT DISTINCT`. Mitigation: the
@@ -263,14 +300,11 @@ versions.
 **\[`pg_dump` output changes between minor versions\]** → `\restrict` arrived in a minor release. Mitigation: both dumps
 in one comparison come from one `pg_dump` binary. D5 removes `\restrict` whether or not it is present.
 
-**[Seed data is not compared]** → The comparisons see schema only. A replaced revision that inserted reference rows
-loses them. A later data migration then updates no rows, and both chains still compare equal. Mitigation: the squash
-logs each replaced file that calls `op.bulk_insert()` or contains `INSERT`, `UPDATE`, or `DELETE`. The caller adds the
-rows by hand.
+**[Lost rows]** → A replaced revision that inserted reference rows loses them. Mitigation: D9 compares row counts and
+sequences at `TARGET` and stops by default. Row contents are not compared.
 
-**[Global objects are not compared]** → `pg_dump` leaves out roles, tablespaces, and `ALTER DATABASE ... SET`.
-Mitigation: the squash logs each replaced file that contains `CREATE ROLE`, `ALTER ROLE`, `CREATE TABLESPACE`, or
-`ALTER DATABASE`.
+**[A shared server]** → Another session that changes roles during the run stops the squash with a false difference.
+Mitigation: the documentation asks for a server that only the caller uses during the run.
 
 **[A large body]** → The revision file grows with the schema, not with the chain. A schema of 500 tables gives a file of
 several thousand lines. Mitigation: none. The file replaces hundreds of files.
