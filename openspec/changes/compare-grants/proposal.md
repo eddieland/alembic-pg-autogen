@@ -18,8 +18,8 @@ invisible to `alembic check`. A rebuilt or squashed schema loses it, and nothing
 - Add `GrantPrivilegesOp`, `RevokePrivilegesOp`, and `AlterGrantOptionOp`, with renderers that emit `op.execute()`.
 - Put revokes before every other operation and grants after every other operation. A revoke on an object that the
   migration drops is implicit.
-- Leave initial privileges, default privileges, `PUBLIC` on the `public` schema, the version table, and objects that the
-  Alembic filters exclude unmanaged.
+- Leave initial privileges, default privileges, and the `initdb` defaults of `PUBLIC` on the `public` schema unmanaged
+  unless declared. Skip the version table and the objects that the Alembic filters exclude.
 
 ## Non-goals
 
@@ -41,17 +41,17 @@ invisible to `alembic check`. A rebuilt or squashed schema loses it, and nothing
 ### Modified Capabilities
 
 - `catalog-inspector`: add `GrantInfo` and `inspect_grants()` with three ACL sources
-- `canonicalization`: add `canonicalize_grants()` and `all_grant_privileges()`
+- `canonicalization`: add `canonicalize_grants()`, `parse_grants()`, and `all_grant_privileges()`
 - `diff`: add `GrantOp` and `diff_grants()`
 - `alembic-compare`: add the `pg_grants` key, the position of grant operations, and the Alembic filters
 
 ## Impact
 
 - **Config**: the new key `pg_grants`. Configurations without the key behave as before.
-- **Behavior**: a configuration that declares `pg_grants` revokes undeclared grants in the inspected schemas. Initial
-  privileges, default privileges, `PUBLIC` on the `public` schema, the privileges of the owner, the version table, and
-  objects that the Alembic filters exclude stay.
+- **Behavior**: a configuration that declares `pg_grants` revokes undeclared grants in the inspected schemas. These
+  stay: undeclared initial and default privileges, the undeclared `initdb` defaults of `PUBLIC` on `public`, the
+  privileges of the owner, the version table, and the objects that the Alembic filters exclude.
 - **Backwards compatibility**: `CanonicalState` and `DiffResult` do not change, so unpacking into three names works.
 - **Dependencies**: none new. postgast already parses `GRANT`.
-- **Public API**: the new exports are `GrantInfo`, `inspect_grants`, `canonicalize_grants`, `GrantOp`, `diff_grants`,
-  `GrantPrivilegesOp`, `RevokePrivilegesOp`, and `AlterGrantOptionOp`.
+- **Public API**: the new exports are `GrantInfo`, `inspect_grants`, `canonicalize_grants`, `parse_grants`,
+  `DeclaredGrants`, `GrantOp`, `diff_grants`, `GrantPrivilegesOp`, `RevokePrivilegesOp`, and `AlterGrantOptionOp`.
