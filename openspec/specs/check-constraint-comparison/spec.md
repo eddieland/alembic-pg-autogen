@@ -190,8 +190,8 @@ expression.
 
 For each table on both sides, the comparator SHALL collect the unnamed metadata check constraints. A constraint is
 unnamed when its name resolves to `None` after naming conventions. The comparator SHALL pair each one with a reflected
-constraint whose canonical expression is equal. Only a reflected constraint whose name no named metadata constraint
-uses, and that `include_name` accepts, SHALL be a candidate.
+constraint whose canonical expression is equal. Only a reflected constraint whose name no named metadata constraint uses
+SHALL be a candidate.
 
 #### Scenario: Alembic's drop of a paired constraint is discarded
 
@@ -234,11 +234,29 @@ uses, and that `include_name` accepts, SHALL be a candidate.
 - **AND** a warning that names both counts is logged when `n` and `m` differ
 - **AND** the remaining metadata copies get adds and the remaining catalog copies keep their drops
 
-#### Scenario: A constraint without a canonical expression is left alone
+#### Scenario: A candidate that include_name excludes still pairs
+
+- **WHEN** `include_name` excludes the reflected `o_amount_check`, and the model declares an unnamed `amount > 0`
+- **THEN** the two pair, and the comparator emits no operation for them
+- **AND** no duplicate `o_amount_check1` is added
+
+#### Scenario: A failed probe keeps the leftover constraints
 
 - **WHEN** candidates exist and the canonicalization probe fails for a metadata constraint
 - **THEN** the comparator emits no add for it
-- **AND** Alembic's drops stay
+- **AND** it discards Alembic's drops of the candidates that no constraint paired with, and logs a warning
+
+#### Scenario: A failed probe does not cost the others their pairs
+
+- **WHEN** the catalog holds `amount >= 0` and the model declares `amount >= 0` and `qty > 0` on a new column `qty`
+- **THEN** the `amount` constraint pairs, and Alembic's drop of it is discarded
+
+#### Scenario: An unnamed enum narrowing is added NOT VALID
+
+- **WHEN** the catalog holds `o_status_check` for `status IN ('a', 'b', 'c')` and the model declares
+  `Enum("a", "b", native_enum=False, create_constraint=True)` without a name
+- **THEN** the comparator emits `DropCheckConstraintOp("o_status_check")` and a `CreateCheckConstraintNotValidOp` under
+  the same name, with the backfill comment for `'c'`
 
 ### Requirement: Missing unnamed constraints are added under the PostgreSQL name
 
@@ -261,6 +279,12 @@ append an add under the returned name.
 - **WHEN** `include_name` rejects the chosen name, or `include_object` rejects the constraint
 - **THEN** no add is appended
 
+#### Scenario: A named add of the same migration is avoided
+
+- **WHEN** the model declares `CheckConstraint("amount > 0", name="o_amount_check")`, which the catalog lacks, and an
+  unnamed `amount < 100`
+- **THEN** the unnamed add uses `o_amount_check1`, and the upgrade succeeds
+
 #### Scenario: A rejected name probe adds nothing
 
 - **WHEN** `choose_check_constraint_names` returns `None` for the expression
@@ -276,6 +300,31 @@ append an add under the returned name.
 - **WHEN** a column-level unnamed `CheckConstraint("qty >= 0")` sits on a column that the database table lacks
 - **THEN** the first run emits `add_column` and no add for the constraint
 - **AND** the next run adds the constraint as `orders_qty_check`
+
+### Requirement: Emitted operations keep the SQL text exactly
+
+Each check constraint add that the comparator emits SHALL be a `CreateCheckConstraintTextOp` or a
+`CreateCheckConstraintNotValidOp`, and each drop SHALL be a `DropCheckConstraintOp`.
+
+#### Scenario: A percent sign renders once
+
+- **WHEN** an add holds `code LIKE 'A%'` and the connection uses psycopg
+- **THEN** the migration renders `"code LIKE 'A%'"`, and the catalog stores `'A%'`
+
+#### Scenario: A colon is escaped for text()
+
+- **WHEN** an add holds `code IN ('a :b', 'c')`
+- **THEN** the migration renders the condition with `\:b`, and the upgrade creates the constraint with `'a :b'`
+
+#### Scenario: The downgrade restores the catalog text
+
+- **WHEN** the comparator drops `ck_o_code`, which holds `code LIKE 'A%' OR code = 'a :b'`
+- **THEN** the downgrade re-creates `ck_o_code` with the same catalog expression
+
+#### Scenario: The NOT VALID keyword appears once
+
+- **WHEN** Alembic 1.20 renders the dialect keywords of the add itself
+- **THEN** the migration holds `postgresql_not_valid=True` once, and a validating add holds no `postgresql_not_valid`
 
 ### Requirement: Deferred validation of changed value sets
 

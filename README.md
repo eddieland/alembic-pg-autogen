@@ -196,7 +196,8 @@ schema that is already in production.
 
 A database constraint that no model constraint matches keeps its `drop_constraint`. This includes a constraint that was
 added in raw SQL and never added to the models. A model constraint that no database constraint matches gets an add. The
-add uses the name that PostgreSQL chooses, because a migration cannot drop a constraint without a name on downgrade:
+add uses the name that PostgreSQL chooses, because a migration cannot drop a constraint without a name on downgrade. The
+name avoids every constraint name in the schema and the named constraints that the same migration adds:
 
 ```python
 def upgrade() -> None:
@@ -207,10 +208,21 @@ def downgrade() -> None:
     op.drop_constraint("orders_amount_check1", "orders", type_="check")
 ```
 
+An unnamed non-native `Enum` whose members change leaves one unmatched constraint on each side. When both restrict the
+same column to a set of values, the comparator treats them as one changed constraint. It drops the database constraint
+and adds the new one under the same name, with the two-revision flow of [Non-native enums](#non-native-enums) for a
+removed member.
+
 An expression can occur more than once on a table. The comparator pairs as many copies as both sides have. It pairs the
 database copies in name order and logs a warning when the counts differ. An unnamed constraint on a column that the same
 migration adds gets its add on the next run, because PostgreSQL cannot test the expression before the column exists.
-This rule does not apply to the constraint of a non-native `Enum`, because `add_column` creates that constraint.
+This rule does not apply to the constraint of a non-native `Enum`, because `add_column` creates that constraint. While a
+model constraint cannot be tested, the comparator also keeps the database constraints that no model constraint matched,
+and it logs a warning. It drops them on the next run.
+
+The comparator tests each expression on an empty `TEMP` copy of the table. The copy takes an `ACCESS SHARE` lock on the
+real table, so autogenerate does not block readers or writers. The emitted migration keeps the expression text exactly,
+including a `%` and a `:` in a string literal.
 
 ### Non-native enums
 

@@ -25,3 +25,19 @@
 - [x] 3.2 Document unnamed constraints in `README.md`, `docs/quickstart.rst`, and the module docstring. Verify with
   `uv run mdformat --check README.md CLAUDE.md openspec/`.
 - [x] 3.3 Run `make lint` and the full test suite against PostgreSQL, and verify that every check passes.
+
+## 4. Review fixes
+
+- [x] 4.1 Run both probe functions on an empty `TEMP` copy in `src/alembic_pg_autogen/canonicalize.py`, with one nested
+  savepoint per probe, escaped colons, and a warning for a connection without a transaction. Verify with integration
+  tests for an open reader under `lock_timeout`, a rejected expression, literals with `:` and `%`, and `AUTOCOMMIT`.
+- [x] 4.2 Choose names against every constraint name in the schema and against `reserved`. Verify with integration tests
+  for a name on another table and for reserved names.
+- [x] 4.3 Undo the `%` doubling in `_compile_check_expression`, and add `CreateCheckConstraintTextOp` and
+  `DropCheckConstraintOp` to `src/alembic_pg_autogen/ops.py` with a renderer in `src/alembic_pg_autogen/render.py`.
+  Verify with render tests on a psycopg dialect and an integration test whose downgrade restores `%` and `:`.
+- [x] 4.4 Pair a candidate that `include_name` excludes, keep the leftover drops after a failed probe, match unpaired
+  value sets on one column, and pass the planned constraint names as `reserved`. Verify with stubbed-catalog unit tests
+  and integration tests for each review scenario.
+- [x] 4.5 Append `postgresql_not_valid` only when Alembic did not render it, and leave the default `False` out of adds.
+  Verify the full suite on Alembic 1.19.1 and 1.20.1.
