@@ -394,13 +394,15 @@ Revokes come first and grants come last. Thus a grant on a new table follows its
 These rules apply:
 
 - `pg_grants` follows the rules of [What gets managed](#what-gets-managed). A declared list revokes every other grant on
-  the tables, views, and schemas in the inspected schemas.
+  the tables, views, and schemas in the inspected schemas. This includes grants that a user added on an extension
+  object. The privileges that `CREATE EXTENSION` gives stay.
 
 - Autogenerate inspects the default schema only, unless you set `include_schemas=True`. The extension logs a warning for
   each declared grant in a schema that it does not inspect, and emits nothing for it.
 
-- `include_name` and `include_object` apply to grants, with type `"table"` for tables and views. The Alembic version
-  table is skipped.
+- `include_name` and `include_object` apply to grants, with type `"table"` for tables and views and type `"schema"` for
+  schemas. The default schema reaches `include_name` as `None`, as in Alembic. The Alembic version table is skipped. The
+  extension logs a warning for each declared grant that a filter removes.
 
 - The extension reads the declared statements without executing them. A grant can name a table that the same migration
   creates. A name without a schema finds an existing table through the `search_path`, as `GRANT` does.
@@ -408,20 +410,24 @@ These rules apply:
 - Each statement must be a `GRANT ... ON [TABLE]` or a `GRANT ... ON SCHEMA`. The extension rejects `REVOKE`,
   `ON ALL TABLES IN SCHEMA`, `GRANTED BY`, sequences, functions, and column privileges with a `ValueError`.
 
-- A statement that holds every privilege renders as `GRANT ALL`, so a migration from a newer server runs on an older
-  one. After a server upgrade that adds a privilege, a declared `GRANT ALL` gives a `GRANT` for the new privilege.
+- A declared `GRANT ALL` renders as `GRANT ALL`, so a migration from a newer server runs on an older one. Privileges
+  that you name one by one render as a list, even when the list holds every privilege, because `ALL` on a newer server
+  holds more. After a server upgrade that adds a privilege, a declared `GRANT ALL` gives a `GRANT` for the new
+  privilege.
 
 - A revoke on a table or view that the same migration drops is implicit. The `DROP` removes the privileges, and
-  `downgrade()` grants them again.
+  `downgrade()` grants them again. The extension logs a warning when `pg_grants` still declares a grant on that object.
 
-- The extension does not manage these privileges:
+- The extension does not manage these privileges unless you declare them:
 
-  - The privileges of the owner of an object, which are implicit.
   - Initial privileges in `pg_init_privs`. For example, `initdb` gives `USAGE` on the `public` schema to `PUBLIC`.
   - Default privileges from `ALTER DEFAULT PRIVILEGES`, which each new table receives.
-  - Privileges of `PUBLIC` on the `public` schema, unless you declare them.
+  - The `initdb` defaults of `PUBLIC` on the `public` schema: `USAGE`, and `CREATE` before PostgreSQL 15. This rule also
+    covers a `public` schema that a script dropped and created again.
 
-  A `pg_grants` list without these privileges does not revoke them.
+  A `pg_grants` list without these privileges does not revoke them. A declared one is compared as usual.
+
+- The privileges of the owner of an object are implicit. The extension does not compare them.
 
 ## Installation
 

@@ -128,12 +128,14 @@ def _render_grant_privileges(_autogen_context: AutogenContext, op: GrantPrivileg
 def _render_revoke_privileges(_autogen_context: AutogenContext, op: RevokePrivilegesOp) -> str:
     """Render a ``REVOKE ... ON ... FROM ...`` via op.execute(), or a comment when the ``DROP`` does the revoke.
 
-    The implicit form renders ``pass`` before the comment, so a body that holds nothing else stays valid Python.
+    The implicit form renders ``pass`` before the comment, so a body that holds nothing else stays valid Python. The
+    statement in the comment goes through ``repr()``. An identifier can hold a line break, and a raw line break would
+    end the comment and turn the rest of the identifier into Python source.
     """
     privileges, target, grantee = _grant_parts(op.grants, all_privileges=op.all_privileges)
     statement = f"REVOKE {privileges} ON {target} FROM {grantee}"
     if op.implicit:
-        return f"pass  # The DROP of {target.split(' ', 1)[1]} in this migration does: {statement}"
+        return f"pass  # The DROP of the object in this migration does: {statement!r}"
     return _render_execute(statement)
 
 

@@ -65,3 +65,15 @@
 - [x] 7.8 Make revokes on dropped tables and views implicit, and keep the grants in `downgrade()`
 - [x] 7.9 Reject `GRANTED BY` and `WITH GRANT OPTION` for `PUBLIC`
 - [x] 7.10 Add a test for each item above in `tests/alembic_pg_autogen/test_grants.py`
+
+## 8. Second Review
+
+- [x] 8.1 Look up metadata tables with `is None` checks, because `Table` defines no truth value
+- [x] 8.2 Remove initial and default privileges from the current grants only, and only when undeclared
+- [x] 8.3 Pass `None` for the default schema to `include_name`, and warn when a filter removes a declared grant
+- [x] 8.4 Render `ALL` only for targets that the declaration grants with `ALL`, through `parse_grants()`
+- [x] 8.5 Leave only `USAGE`, and `CREATE` before PostgreSQL 15, of `PUBLIC` on `public` unmanaged
+- [x] 8.6 Render the implicit revoke comment through `repr()`
+- [x] 8.7 Warn when `pg_grants` declares a grant on a table or view that the migration drops
+- [x] 8.8 Document that user-added grants on extension objects are managed
+- [x] 8.9 Add a test for each item above

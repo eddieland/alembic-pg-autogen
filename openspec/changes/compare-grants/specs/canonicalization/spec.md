@@ -60,3 +60,13 @@ for `"TABLE"` and for `"SCHEMA"`, from `acldefault()`.
 
 - **WHEN** `all_grant_privileges(conn)` runs
 - **THEN** the `"SCHEMA"` entry is `{"USAGE", "CREATE"}`
+
+### Requirement: Targets declared with ALL
+
+The module SHALL provide `parse_grants(conn, ddl)`. It SHALL return a `DeclaredGrants` with the grants of
+`canonicalize_grants()` and the `(schema, object_type, name, grantee)` targets of `GRANT ALL [PRIVILEGES]` statements.
+
+#### Scenario: ALL and a list
+
+- **WHEN** `ddl` holds `GRANT ALL ON a TO x` and `GRANT SELECT, INSERT ON b TO x`
+- **THEN** `all_privileges` holds the target of `a` for `x` and not the target of `b`

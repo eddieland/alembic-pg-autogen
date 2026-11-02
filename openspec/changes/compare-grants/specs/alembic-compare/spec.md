@@ -40,6 +40,11 @@ It SHALL append `GrantPrivilegesOp` instances after the function, view, and trig
 - **AND** the upgrade succeeds when one role passed the privilege on to another
 - **AND** `downgrade()` grants the privileges again after `op.create_table()`
 
+#### Scenario: Declared grant on a dropped table
+
+- **WHEN** a table leaves `target_metadata` and `pg_grants` still declares a grant on it
+- **THEN** the comparator logs a warning that names the table
+
 #### Scenario: Grant on a new view
 
 - **WHEN** `pg_views` declares a new view and `pg_grants` declares a grant on it
@@ -48,12 +53,24 @@ It SHALL append `GrantPrivilegesOp` instances after the function, view, and trig
 ### Requirement: Alembic filters and the version table
 
 The comparator SHALL skip grants on the Alembic version table. It SHALL apply `include_name` to each table with type
-`"table"` and to each schema with type `"schema"`. It SHALL apply `include_object` to each table with type `"table"`.
+`"table"` and to each schema with type `"schema"`, with `None` for the default schema. It SHALL apply `include_object`
+to each table with type `"table"`. It SHALL log a warning for each declared object that these rules remove.
 
 #### Scenario: include_object excludes a table
 
 - **WHEN** a role holds `SELECT` on table `ex`, `pg_grants=[]`, and `include_object` returns `False` for `ex`
 - **THEN** the comparator emits no `REVOKE` for `ex`
+
+#### Scenario: Default schema reaches include_name as None
+
+- **WHEN** `include_name` keeps only the schemas in `[None, "s1"]` and `pg_grants` declares `USAGE` on the default
+  schema
+- **THEN** the comparator emits that `GRANT`
+
+#### Scenario: Schema-qualified metadata table
+
+- **WHEN** `target_metadata` holds `Table("o", md, schema="public")` and `public` is the default schema
+- **THEN** autogenerate does not fail, and `include_object` receives that `Table` with `reflected=False`
 
 #### Scenario: Version table
 

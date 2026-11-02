@@ -40,12 +40,13 @@ privileges in the catalog. It SHALL emit operations for each difference. Postgre
 - **WHEN** `pg_grants=["GRANT USAGE ON SCHEMA sales TO app"]` and `app` has no privilege on `sales`
 - **THEN** `upgrade()` contains `GRANT USAGE ON SCHEMA sales TO app`
 
-### Requirement: Privileges that PostgreSQL added are unmanaged
+### Requirement: Privileges that PostgreSQL added are unmanaged unless declared
 
-The comparator SHALL remove these privileges from both the current and the desired grants: each privilege that
-`pg_init_privs` records for an object, and each privilege that `pg_default_acl` gives to new objects of the owner. It
-SHALL also remove each privilege of `PUBLIC` on the `public` schema from the current grants, unless `pg_grants` declares
-it. The match SHALL use the identity of the grant and ignore `grantable`.
+The comparator SHALL remove these privileges from the current grants when `pg_grants` does not declare them: each
+privilege that `pg_init_privs` records for an object, each privilege that `pg_default_acl` gives to new objects of the
+owner, and the `initdb` defaults of `PUBLIC` on the `public` schema (`USAGE`, and `CREATE` before PostgreSQL 15). The
+match SHALL use the identity of the grant and ignore `grantable`. The desired grants SHALL keep every declared
+privilege.
 
 #### Scenario: Public schema keeps the USAGE privilege of PUBLIC
 
@@ -58,16 +59,32 @@ it. The match SHALL use the identity of the grant and ignore `grantable`.
 - **AND** `pg_grants=[]`
 - **THEN** the comparator does not emit `REVOKE USAGE ON SCHEMA public FROM PUBLIC`
 
+#### Scenario: CREATE on the public schema on PostgreSQL 15 and later
+
+- **WHEN** `PUBLIC` holds `CREATE` on `public`, the server is PostgreSQL 15 or later, and `pg_grants=[]`
+- **THEN** the comparator emits `REVOKE CREATE ON SCHEMA public FROM PUBLIC`
+
 #### Scenario: Default privileges
 
 - **WHEN** the owner ran `ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO rdr` and created a table
 - **AND** `pg_grants=[]`
 - **THEN** the comparator does not emit `REVOKE SELECT ... FROM rdr` for that table
 
+#### Scenario: Declared grant on a table older than the default ACL
+
+- **WHEN** a table exists, the owner then ran `ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO rdr`, and `pg_grants`
+  declares `GRANT SELECT` on that table to `rdr`
+- **THEN** the comparator emits that `GRANT`
+
+#### Scenario: Declared grant option on a default privilege
+
+- **WHEN** `rdr` holds `SELECT` from the default ACL and `pg_grants` declares it `WITH GRANT OPTION`
+- **THEN** the comparator emits `GRANT SELECT ... WITH GRANT OPTION`
+
 #### Scenario: Declared initial privilege
 
-- **WHEN** `pg_grants=["GRANT USAGE ON SCHEMA public TO PUBLIC"]`
-- **THEN** the comparator emits no operation for that grant, whether or not the privilege is present
+- **WHEN** `pg_grants=["GRANT USAGE ON SCHEMA public TO PUBLIC"]` and the privilege is present
+- **THEN** the comparator emits no operation for that grant
 
 ### Requirement: Grant operations
 
@@ -104,8 +121,19 @@ identifier preparer. They SHALL write privileges in the order of the PostgreSQL 
 
 #### Scenario: ALL privileges
 
-- **WHEN** a group holds every privilege of `ALL` for its object type on the autogenerate server
+- **WHEN** the declaration uses `GRANT ALL` for a target and the group holds every privilege of `ALL` on the
+  autogenerate server
 - **THEN** the statement uses `ALL` in place of the privilege list
+
+#### Scenario: Privileges named one by one
+
+- **WHEN** the declaration names every privilege of the object type one by one
+- **THEN** the statement lists the privileges and does not use `ALL`
+
+#### Scenario: Line break in an implicit revoke
+
+- **WHEN** a dropped table has a name with a line break
+- **THEN** the rendered comment holds the statement through `repr()`, and the revision compiles
 
 #### Scenario: Percent sign in an identifier
 

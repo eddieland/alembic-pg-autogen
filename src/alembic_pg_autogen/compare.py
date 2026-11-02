@@ -5,14 +5,14 @@ from __future__ import annotations
 import difflib
 import itertools
 import logging
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 from alembic.operations.ops import DropTableOp
 from alembic.runtime.plugins import Plugin
 from alembic.util import PriorityDispatchResult
 from sqlalchemy import Connection, MetaData, Table
 
-from alembic_pg_autogen.canonicalize import CanonicalState, all_grant_privileges, canonicalize, canonicalize_grants
+from alembic_pg_autogen.canonicalize import CanonicalState, all_grant_privileges, canonicalize, parse_grants
 from alembic_pg_autogen.diff import Action, diff, diff_grants
 from alembic_pg_autogen.inspect import (
     current_schema,
@@ -349,12 +349,28 @@ def _compare_grants(
     *dropped* holds the ``(schema, name)`` of each table and view that this migration drops. See
     :func:`_grant_migration_ops` for the two lists.
     """
-    current, desired = _grant_states(autogen_context, conn, pg_grants, schemas)
-    log.info("Found %d grants in database and %d declared grants", len(current), len(desired))
-    grant_ops = diff_grants(current, desired)
+    states = _grant_states(autogen_context, conn, pg_grants, schemas)
+    log.info("Found %d grants in database and %d declared grants", len(states.current), len(states.desired))
+    for schema, name in sorted({(g.schema, g.name) for g in states.desired if (g.schema, g.name) in dropped}):
+        log.warning(
+            "pg_grants declares grants on %s.%s, which this migration drops. Remove these grants from pg_grants, or "
+            "the next autogenerate emits a GRANT on a relation that does not exist.",
+            schema,
+            name,
+        )
+    grant_ops = diff_grants(states.current, states.desired)
     if not grant_ops:
         return [], []
-    return _grant_migration_ops(grant_ops, all_grant_privileges(conn), dropped)
+    return _grant_migration_ops(grant_ops, all_grant_privileges(conn), dropped, states.declared_all)
+
+
+class _GrantStates(NamedTuple):
+    """The grants that :func:`_compare_grants` compares, from :func:`_grant_states`."""
+
+    current: list[GrantInfo]
+    desired: list[GrantInfo]
+    declared_all: AbstractSet[tuple[str, str, str, str]]
+    """The ``(schema, object_type, name, grantee)`` targets that the declaration grants with ``ALL``."""
 
 
 def _grant_states(
@@ -362,37 +378,54 @@ def _grant_states(
     conn: Connection,
     pg_grants: Sequence[str],
     schemas: Sequence[str] | None,
-) -> tuple[list[GrantInfo], list[GrantInfo]]:
+) -> _GrantStates:
     """Return the current and the desired grants that this comparator manages.
 
-    These privileges are unmanaged. The function removes them from both sides by identity:
+    These privileges are unmanaged unless ``pg_grants`` declares them. The function removes them from the current side
+    only, so a declared one is still compared:
 
     - Initial privileges in ``pg_init_privs``. ``initdb`` gives ``USAGE`` on the ``public`` schema to ``PUBLIC``.
       ``CREATE EXTENSION`` gives privileges on extension objects.
     - Default privileges in ``pg_default_acl``. ``ALTER DEFAULT PRIVILEGES`` gives them to each new table and schema,
       so a declared list cannot know them ahead of time.
-    - Privileges of ``PUBLIC`` on the ``public`` schema, unless declared. ``DROP SCHEMA public`` removes the
-      ``pg_init_privs`` row, and a script that creates the schema again often grants ``USAGE`` to ``PUBLIC`` again.
-    - Grants on the Alembic version table, and on objects that ``include_name`` or ``include_object`` excludes.
+    - The default privileges of ``PUBLIC`` on the ``public`` schema: ``USAGE``, and ``CREATE`` before PostgreSQL 15.
+      ``DROP SCHEMA public`` removes the ``pg_init_privs`` row, and a script that creates the schema again often
+      grants them again.
 
-    Without these rules, a ``pg_grants`` list that does not mention them would revoke them. A user who revoked an
-    initial or default privilege by hand also does not get it back.
+    Without these rules, a ``pg_grants`` list that does not mention them would revoke them. A user who revoked one of
+    them by hand also does not get it back.
+
+    Grants on the Alembic version table, and on objects that ``include_name`` or ``include_object`` excludes, are
+    removed from both sides. A declared grant that a filter removes gives a warning.
     """
     default_schema = current_schema(conn)
-    desired = _in_compared_schemas(canonicalize_grants(conn, pg_grants), schemas)
-    declared = {grant[:-1] for grant in desired}
+    declared = parse_grants(conn, pg_grants)
+    desired = _in_compared_schemas(declared.grants, schemas)
+    declared_keys = {grant[:-1] for grant in desired}
     unmanaged = {
         grant[:-1] for source in ("initial", "default") for grant in inspect_grants(conn, schemas, source=source)
     }
+    public_defaults = _public_schema_defaults(conn)
     current = [
         grant
         for grant in inspect_grants(conn, schemas)
-        if grant[:-1] not in unmanaged and (grant[:-1] in declared or not _is_public_schema_default(grant))
+        if grant[:-1] in declared_keys
+        or not (grant[:-1] in unmanaged or _is_public_schema_default(grant, public_defaults))
     ]
-    desired = [grant for grant in desired if grant[:-1] not in unmanaged]
 
     included = _included_objects(autogen_context, {grant[:3] for grant in (*current, *desired)}, default_schema)
-    return [g for g in current if g[:3] in included], [g for g in desired if g[:3] in included]
+    for schema, object_type, name in sorted({g[:3] for g in desired if g[:3] not in included}):
+        log.warning(
+            "pg_grants declares grants on %s %s, but include_name, include_object, or the version table rule excludes "
+            "it. Autogenerate does not compare these grants.",
+            object_type,
+            schema if object_type == "SCHEMA" else f"{schema}.{name}",
+        )
+    return _GrantStates(
+        current=[g for g in current if g[:3] in included],
+        desired=[g for g in desired if g[:3] in included],
+        declared_all=declared.all_privileges,
+    )
 
 
 def _in_compared_schemas(grants: Sequence[GrantInfo], schemas: Sequence[str] | None) -> list[GrantInfo]:
@@ -417,9 +450,25 @@ def _in_compared_schemas(grants: Sequence[GrantInfo], schemas: Sequence[str] | N
     return [grant for grant in grants if grant.schema in schema_set]
 
 
-def _is_public_schema_default(grant: GrantInfo) -> bool:
-    """Return whether *grant* is a privilege of ``PUBLIC`` on the ``public`` schema."""
-    return grant.object_type == "SCHEMA" and grant.name == "public" and grant.grantee == "public"
+def _public_schema_defaults(conn: Connection) -> frozenset[str]:
+    """Return the privileges that ``initdb`` gives ``PUBLIC`` on the ``public`` schema of this server version.
+
+    PostgreSQL 15 removed ``CREATE`` from the defaults. Only these privileges are unmanaged, so a declared ``CREATE``
+    that the user later removes from ``pg_grants`` is revoked again.
+    """
+    version = conn.dialect.server_version_info
+    major = int(version[0]) if version else 0
+    return frozenset({"USAGE"} if major >= 15 else {"USAGE", "CREATE"})
+
+
+def _is_public_schema_default(grant: GrantInfo, defaults: AbstractSet[str]) -> bool:
+    """Return whether *grant* is a default privilege of ``PUBLIC`` on the ``public`` schema."""
+    return (
+        grant.object_type == "SCHEMA"
+        and grant.name == "public"
+        and grant.grantee == "public"
+        and grant.privilege in defaults
+    )
 
 
 def _included_objects(
@@ -433,7 +482,7 @@ def _included_objects(
     is ``None`` in ``parent_names``. A table then goes through ``include_object``. The object is the metadata
     ``Table`` when ``target_metadata`` has one, with ``reflected=False``. Otherwise it is a ``Table`` with a name and a
     schema but no columns, with ``reflected=True``. A view is a table here, as in ``GRANT ... ON TABLE``. A schema
-    goes through ``include_name`` with type ``"schema"``.
+    goes through ``include_name`` with type ``"schema"``, with ``None`` for the default schema, as Alembic passes it.
     """
     migration_context = autogen_context.migration_context
     version_table = (migration_context.version_table_schema or default_schema, migration_context.version_table)
@@ -442,7 +491,7 @@ def _included_objects(
     included: set[tuple[str, str, str]] = set()
     for schema, object_type, name in objects:
         if object_type == "SCHEMA":
-            if autogen_context.run_name_filters(name, "schema", {}):
+            if autogen_context.run_name_filters(None if name == default_schema else name, "schema", {}):
                 included.add((schema, object_type, name))
             continue
         if (schema, name) == version_table:
@@ -450,7 +499,10 @@ def _included_objects(
         schema_name = None if schema == default_schema else schema
         if not autogen_context.run_name_filters(name, "table", {"schema_name": schema_name}):
             continue
-        table = metadata_tables.get(f"{schema}.{name}") or (metadata_tables.get(name) if schema_name is None else None)
+        # ``Table`` defines no truth value, so the lookups test for ``None`` and never use ``or``.
+        table = metadata_tables.get(f"{schema}.{name}")
+        if table is None and schema_name is None:
+            table = metadata_tables.get(name)
         reflected = table is None
         if table is None:
             table = Table(name, MetaData(), schema=schema_name)
@@ -478,19 +530,28 @@ def _grant_migration_ops(
     grant_ops: Sequence[GrantOp],
     all_privileges: Mapping[str, AbstractSet[str]],
     dropped: AbstractSet[tuple[str, str]],
+    declared_all: AbstractSet[tuple[str, str, str, str]],
 ) -> tuple[list[MigrateOperation], list[MigrateOperation]]:
     """Group per-privilege diff ops into one migration op per object, grantee, and kind of change.
 
     Returns ``(early, late)``. *early* holds the revokes and the grant option changes. They apply to objects that exist
     before the migration. *late* holds the new grants. Their objects can be new in the same migration.
 
-    A group that holds every privilege in *all_privileges* for its object type renders ``ALL``. On a table or view in
-    *dropped*, a revoke is implicit and a grant option change is omitted. The ``DROP`` removes every privilege, and a
-    ``REVOKE`` before it can fail with "dependent privileges exist" where the ``DROP`` alone succeeds.
+    A group renders ``ALL`` when it holds every privilege in *all_privileges* for its object type and *declared_all*
+    holds its target, that is, when the declaration itself says ``ALL``. ``ALL`` means the privilege set of the server
+    that runs the migration. A list of privileges declared one by one therefore stays a list, or it would grant
+    ``MAINTAIN`` on PostgreSQL 17 when it was generated on PostgreSQL 14.
+
+    On a table or view in *dropped*, a revoke is implicit and a grant option change is omitted. The ``DROP`` removes
+    every privilege, and a ``REVOKE`` before it can fail with "dependent privileges exist" where the ``DROP`` alone
+    succeeds.
     """
 
     def covers_all(group: Sequence[GrantInfo]) -> bool:
-        return {grant.privilege for grant in group} == all_privileges.get(group[0].object_type)
+        first = group[0]
+        return (first.schema, first.object_type, first.name, first.grantee) in declared_all and {
+            grant.privilege for grant in group
+        } == all_privileges.get(first.object_type)
 
     def is_dropped(group: Sequence[GrantInfo]) -> bool:
         return group[0].object_type == "TABLE" and (group[0].schema, group[0].name) in dropped

@@ -31,7 +31,7 @@ from alembic_pg_autogen import (
     diff_grants,
     inspect_grants,
 )
-from alembic_pg_autogen.canonicalize import all_grant_privileges
+from alembic_pg_autogen.canonicalize import all_grant_privileges, parse_grants
 from alembic_pg_autogen.compare import (
     _grant_migration_ops,
     _grant_states,
@@ -49,7 +49,8 @@ from alembic_pg_autogen.render import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Mapping
+    from collections.abc import Set as AbstractSet
 
     from sqlalchemy import Connection
     from sqlalchemy.engine import Engine
@@ -233,8 +234,16 @@ class TestRenderGrants:
     def test_implicit_revoke_is_a_comment(self):
         rendered = _render_revoke_privileges(_ctx(), RevokePrivilegesOp([_grant()], implicit=True))
         assert rendered == (
-            "pass  # The DROP of public.orders in this migration does: REVOKE SELECT ON TABLE public.orders FROM app"
+            "pass  # The DROP of the object in this migration does: 'REVOKE SELECT ON TABLE public.orders FROM app'"
         )
+
+    def test_implicit_revoke_comment_escapes_line_breaks(self):
+        """A raw line break in an identifier would end the comment and turn the rest into Python source."""
+        grant = _grant(name="a\nimport os; print(1)")
+        rendered = _render_revoke_privileges(_ctx(), RevokePrivilegesOp([grant], implicit=True))
+
+        assert "\n" not in rendered
+        compile(rendered, "<migration>", "exec")
 
     def test_privilege_order(self):
         names = ["CREATE", "UNKNOWN", "MAINTAIN", "SELECT", "TRIGGER", "USAGE", "DELETE"]
@@ -284,7 +293,7 @@ class TestGrantMigrationOps:
             GrantOp(Action.REPLACE, _grant("UPDATE"), _grant("UPDATE", grantable=True)),
         ]
 
-        early, late = _grant_migration_ops(grant_ops, {}, frozenset())
+        early, late = _grant_migration_ops(grant_ops, {}, frozenset(), frozenset())
 
         assert [type(op) for op in early] == [RevokePrivilegesOp, AlterGrantOptionOp]
         assert [op.to_diff_tuple() for op in late] == [
@@ -294,16 +303,27 @@ class TestGrantMigrationOps:
         ]
 
     def test_no_ops(self):
-        assert _grant_migration_ops([], {}, frozenset()) == ([], [])
+        assert _grant_migration_ops([], {}, frozenset(), frozenset()) == ([], [])
 
     def test_full_privilege_set_renders_all(self):
         grant_ops = [GrantOp(Action.CREATE, None, _grant(p)) for p in ("SELECT", "INSERT")]
         grant_ops.append(GrantOp(Action.CREATE, None, _grant("SELECT", grantee="other")))
 
-        _, late = _grant_migration_ops(grant_ops, {"TABLE": frozenset({"SELECT", "INSERT"})}, frozenset())
+        full = {"TABLE": frozenset({"SELECT", "INSERT"})}
+        declared_all = frozenset({("public", "TABLE", "orders", "app"), ("public", "TABLE", "orders", "other")})
+
+        _, late = _grant_migration_ops(grant_ops, full, frozenset(), declared_all)
 
         assert all(isinstance(op, GrantPrivilegesOp) for op in late)
         assert [op.all_privileges for op in late if isinstance(op, GrantPrivilegesOp)] == [True, False]
+
+    def test_privileges_declared_by_name_never_render_all(self):
+        """``ALL`` on a newer server holds more privileges, so a list declared by name must stay a list."""
+        grant_ops = [GrantOp(Action.CREATE, None, _grant(p)) for p in ("SELECT", "INSERT")]
+
+        _, late = _grant_migration_ops(grant_ops, {"TABLE": frozenset({"SELECT", "INSERT"})}, frozenset(), frozenset())
+
+        assert [op.all_privileges for op in late if isinstance(op, GrantPrivilegesOp)] == [False]
 
     def test_dropped_relation_gets_implicit_revoke_and_no_option_change(self):
         grant_ops = [
@@ -312,7 +332,7 @@ class TestGrantMigrationOps:
             GrantOp(Action.DROP, _grant("SELECT", name="kept"), None),
         ]
 
-        early, _ = _grant_migration_ops(grant_ops, {}, frozenset({("public", "orders")}))
+        early, _ = _grant_migration_ops(grant_ops, {}, frozenset({("public", "orders")}), frozenset())
 
         assert all(isinstance(op, RevokePrivilegesOp) for op in early)
         assert [(op.grants[0].name, op.implicit) for op in early if isinstance(op, RevokePrivilegesOp)] == [
@@ -360,6 +380,55 @@ class TestGrantMigrationOps:
         assert by_name["orders"] == (orders, False)
         assert by_name["dropped"][1] is True
         assert "alembic_version" not in by_name
+
+    def test_schema_qualified_metadata_table(self):
+        """``Table`` has no truth value, so the lookup must not use ``or``."""
+        metadata = MetaData()
+        orders = Table("orders", metadata, Column("id", Integer), schema="public")
+        seen: list[tuple[object, bool]] = []
+
+        class Ctx:
+            migration_context: Any = MagicMock(version_table="alembic_version", version_table_schema=None)
+            table_key_to_table: Any = metadata.tables
+
+            def __init__(self) -> None:
+                self.metadata: MetaData = metadata
+
+            def run_name_filters(self, *_args: object) -> bool:
+                return True
+
+            def run_object_filters(self, obj: object, _name: str, _type: str, reflected: bool, _to: object) -> bool:
+                seen.append((obj, reflected))
+                return True
+
+        ctx: Any = Ctx()
+
+        assert _included_objects(ctx, {("public", "TABLE", "orders")}, "public") == {("public", "TABLE", "orders")}
+        assert seen == [(orders, False)]
+
+    def test_default_schema_name_filter_gets_none(self):
+        """Alembic passes ``None`` for the default schema, so the cookbook filter ``name in [None, ...]`` works."""
+        names: list[str | None] = []
+
+        class Ctx:
+            migration_context: Any = MagicMock(version_table="alembic_version", version_table_schema=None)
+            metadata: object = None
+
+            def run_name_filters(self, name: str | None, type_: str, _parents: object) -> bool:
+                if type_ == "schema":
+                    names.append(name)
+                return name in (None, "s1")
+
+            def run_object_filters(self, *_args: object) -> bool:
+                return True
+
+        ctx: Any = Ctx()
+        objects = {("public", "SCHEMA", "public"), ("s1", "SCHEMA", "s1"), ("s2", "SCHEMA", "s2")}
+
+        included = _included_objects(ctx, objects, "public")
+
+        assert included == {("public", "SCHEMA", "public"), ("s1", "SCHEMA", "s1")}
+        assert sorted(names, key=str) == [None, "s1", "s2"]
 
     def test_group_grants_splits_by_object(self):
         groups = _group_grants([_grant(name="b"), _grant(name="a"), _grant("INSERT", name="a")])
@@ -549,6 +618,15 @@ class TestCanonicalizeGrants:
         with pytest.raises(ValueError, match="is a sequence"):
             canonicalize_grants(conn, [f"GRANT SELECT ON {schema}.counter TO {schema}_reader"])
 
+    def test_parse_grants_reports_all_targets(self, pg_conn: Connection):
+        declared = parse_grants(
+            pg_conn,
+            ["GRANT ALL ON public.a TO x", "GRANT SELECT, INSERT ON public.b TO x", "GRANT ALL ON SCHEMA s TO y"],
+        )
+
+        assert declared.all_privileges == {("public", "TABLE", "a", "x"), ("s", "SCHEMA", "s", "y")}
+        assert {g.name for g in declared.grants} == {"a", "b", "s"}
+
     def test_all_grant_privileges_match_server(self, pg_conn: Connection):
         privileges = all_grant_privileges(pg_conn)
 
@@ -607,29 +685,33 @@ class TestCanonicalizeGrants:
 
 
 class _FakeAutogenContext:
-    """The parts of ``AutogenContext`` that ``_grant_states`` reads, with filters that allow everything."""
+    """The parts of ``AutogenContext`` that ``_grant_states`` reads, with filters that allow all but *excluded*."""
 
-    def __init__(self, version_table: str = "alembic_version") -> None:
+    def __init__(self, version_table: str = "alembic_version", excluded: str | None = None) -> None:
         self.migration_context: Any = MagicMock(version_table=version_table, version_table_schema=None)
         self.metadata: object = None
+        self.excluded: str | None = excluded
 
     def run_name_filters(self, *_args: object) -> bool:
         return True
 
-    def run_object_filters(self, *_args: object) -> bool:
-        return True
+    def run_object_filters(self, _obj: object, name: str, *_rest: object) -> bool:
+        return name != self.excluded
 
 
 @pytest.mark.integration
 class TestGrantStates:
-    def test_initial_privileges_are_unmanaged(self, pg_conn: Connection):
+    def test_initial_privileges_are_unmanaged_unless_declared(self, pg_conn: Connection):
         """An empty ``pg_grants`` must not revoke ``USAGE`` on the ``public`` schema from ``PUBLIC``."""
         ctx: Any = _FakeAutogenContext()
-        current, desired = _grant_states(ctx, pg_conn, ["GRANT USAGE ON SCHEMA public TO PUBLIC"], ["public"])
-
         public_usage = GrantInfo("public", "SCHEMA", "public", "public", "USAGE", False)
-        assert public_usage not in current
-        assert public_usage not in desired
+
+        undeclared, _, _ = _grant_states(ctx, pg_conn, [], ["public"])
+        current, desired, _ = _grant_states(ctx, pg_conn, ["GRANT USAGE ON SCHEMA public TO PUBLIC"], ["public"])
+
+        assert public_usage not in undeclared
+        assert public_usage in desired
+        assert diff_grants(current, desired) == []
 
     def test_recreated_public_schema_keeps_public_usage(self, pg_conn: Connection):
         """``DROP SCHEMA public`` removes the ``pg_init_privs`` row, so the rule cannot rely on it alone."""
@@ -638,8 +720,8 @@ class TestGrantStates:
         pg_conn.execute(text("GRANT USAGE ON SCHEMA public TO PUBLIC"))
         ctx: Any = _FakeAutogenContext()
 
-        current, _ = _grant_states(ctx, pg_conn, [], ["public"])
-        declared_current, declared = _grant_states(
+        current, _, _ = _grant_states(ctx, pg_conn, [], ["public"])
+        declared_current, declared, _ = _grant_states(
             ctx, pg_conn, ["GRANT CREATE ON SCHEMA public TO PUBLIC"], ["public"]
         )
 
@@ -647,15 +729,50 @@ class TestGrantStates:
         assert [g.privilege for g in declared_current] == []
         assert [g.privilege for g in declared] == ["CREATE"]
 
-    def test_default_privileges_are_unmanaged(self, scratch: tuple[Connection, str]):
+    def test_default_privileges_are_unmanaged_unless_declared(self, scratch: tuple[Connection, str]):
         conn, schema = scratch
         conn.execute(text(f"ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} GRANT SELECT ON TABLES TO {schema}_reader"))
         conn.execute(text(f"CREATE TABLE {schema}.later (id int)"))
         ctx: Any = _FakeAutogenContext()
 
-        current, desired = _grant_states(ctx, conn, [f"GRANT SELECT ON {schema}.later TO {schema}_reader"], [schema])
+        undeclared, _, _ = _grant_states(ctx, conn, [], [schema])
+        current, desired, _ = _grant_states(ctx, conn, [f"GRANT SELECT ON {schema}.later TO {schema}_reader"], [schema])
 
-        assert (current, desired) == ([], [])
+        assert undeclared == []
+        assert diff_grants(current, desired) == []
+
+    def test_declared_grant_on_table_older_than_default_privileges(self, scratch: tuple[Connection, str]):
+        """The default ACL covers every table of the owner, but a table created before it never received it."""
+        conn, schema = scratch
+        reader = f"{schema}_reader"
+        conn.execute(text(f"ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} GRANT SELECT ON TABLES TO {reader}"))
+        conn.execute(text(f"CREATE TABLE {schema}.later (id int)"))
+        ctx: Any = _FakeAutogenContext()
+        ddl = [
+            f"GRANT SELECT ON {schema}.orders TO {reader}",
+            f"GRANT SELECT ON {schema}.later TO {reader} WITH GRANT OPTION",
+        ]
+
+        current, desired, _ = _grant_states(ctx, conn, ddl, [schema])
+
+        assert [(op.action, (op.desired or op.current).name) for op in diff_grants(current, desired)] == [  # pyright: ignore[reportOptionalMemberAccess]
+            (Action.REPLACE, "later"),
+            (Action.CREATE, "orders"),
+        ]
+
+    def test_removed_create_on_public_schema_is_revoked(self, pg_conn: Connection):
+        """Only the ``initdb`` defaults of ``PUBLIC`` on ``public`` are unmanaged. ``CREATE`` is not one on 15+."""
+        pg_conn.execute(text(f"ALTER SCHEMA public RENAME TO public_{uuid.uuid4().hex[:8]}"))
+        pg_conn.execute(text("CREATE SCHEMA public"))
+        pg_conn.execute(text("GRANT USAGE, CREATE ON SCHEMA public TO PUBLIC"))
+        major = int((pg_conn.dialect.server_version_info or (0,))[0])
+        ctx: Any = _FakeAutogenContext()
+
+        current, desired, _ = _grant_states(ctx, pg_conn, [], ["public"])
+
+        expected = [] if major < 15 else [("public", "CREATE")]
+        assert [(g.grantee, g.privilege) for g in current] == expected
+        assert desired == []
 
     def test_version_table_is_unmanaged(self, scratch: tuple[Connection, str]):
         conn, schema = scratch
@@ -663,7 +780,20 @@ class TestGrantStates:
         conn.execute(text(f"SET LOCAL search_path TO {schema}"))
         ctx: Any = _FakeAutogenContext(version_table="orders")
 
-        assert _grant_states(ctx, conn, [], [schema]) == ([], [])
+        assert _grant_states(ctx, conn, [], [schema])[:2] == ([], [])
+
+    def test_declared_grant_removed_by_filter_warns(
+        self, scratch: tuple[Connection, str], caplog: pytest.LogCaptureFixture
+    ):
+        conn, schema = scratch
+
+        ctx: Any = _FakeAutogenContext(excluded="orders")
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.compare"):
+            _, desired, _ = _grant_states(ctx, conn, [f"GRANT SELECT ON {schema}.orders TO {schema}_reader"], [schema])
+
+        assert desired == []
+        assert f"TABLE {schema}.orders" in caplog.text
+        assert "include_object" in caplog.text
 
     def test_declared_grant_on_extension_member_converges(self, scratch: tuple[Connection, str]):
         conn, schema = scratch
@@ -671,7 +801,7 @@ class TestGrantStates:
         conn.execute(text(f"ALTER EXTENSION plpgsql ADD TABLE {schema}.items"))
         ctx: Any = _FakeAutogenContext()
 
-        current, desired = _grant_states(ctx, conn, [f"GRANT SELECT ON {schema}.items TO {schema}_reader"], [schema])
+        current, desired, _ = _grant_states(ctx, conn, [f"GRANT SELECT ON {schema}.items TO {schema}_reader"], [schema])
 
         assert diff_grants(current, desired) == []
 
@@ -684,7 +814,7 @@ class TestGrantStates:
         ctx: Any = _FakeAutogenContext()
 
         with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.compare"):
-            _, desired = _grant_states(ctx, pg_conn, ddl, ["public"])
+            _, desired, _ = _grant_states(ctx, pg_conn, ddl, ["public"])
 
         assert [g.name for g in desired] == ["t"]
         assert "SCHEMA sales" in caplog.text
@@ -931,3 +1061,76 @@ class TestAutogenerateGrants:
         assert f"REVOKE ALL ON TABLE {schema}.orders FROM {reader}" in _downgrade_body(content)
         upgrade(alembic_project.config, "head")
         assert "op.execute" not in _autogenerate(alembic_project, metadata, pg_grants=pg_grants)
+
+    def test_schema_qualified_metadata_table(self, alembic_project: AlembicProject, roles: tuple[str, str]):
+        """A metadata table with an explicit default schema used to abort autogenerate with a ``TypeError``."""
+        schema = alembic_project.schema
+        reader, _ = roles
+        alembic_project.execute(f"CREATE TABLE {schema}.orders (id int)")
+        alembic_project.execute(f"GRANT DELETE ON {schema}.orders TO {reader}")
+        metadata = MetaData()
+        Table("orders", metadata, Column("id", Integer), schema=schema)
+
+        content = _autogenerate(alembic_project, metadata, pg_grants=[f"GRANT SELECT ON orders TO {reader}"])
+
+        assert f"GRANT SELECT ON TABLE {schema}.orders TO {reader}" in _upgrade_body(content)
+        assert f"REVOKE DELETE ON TABLE {schema}.orders FROM {reader}" in _upgrade_body(content)
+
+    def test_include_name_cookbook_filter_keeps_default_schema(
+        self, alembic_project: AlembicProject, roles: tuple[str, str]
+    ):
+        schema = alembic_project.schema
+        reader, _ = roles
+
+        def include_name(name: str | None, type_: str, _parents: object) -> bool:
+            return type_ != "schema" or name in [None]
+
+        content = _autogenerate(
+            alembic_project,
+            MetaData(),
+            pg_grants=[f"GRANT USAGE ON SCHEMA {schema} TO {reader}"],
+            include_name=include_name,
+        )
+
+        assert f"GRANT USAGE ON SCHEMA {schema} TO {reader}" in content
+
+    def test_declared_grant_on_dropped_table_warns(
+        self, alembic_project: AlembicProject, roles: tuple[str, str], caplog: pytest.LogCaptureFixture
+    ):
+        schema = alembic_project.schema
+        reader, _ = roles
+        alembic_project.execute(f"CREATE TABLE {schema}.orders (id int)")
+        alembic_project.execute(f"GRANT SELECT ON {schema}.orders TO {reader}")
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.compare"):
+            content = _autogenerate(alembic_project, MetaData(), pg_grants=[f"GRANT SELECT ON orders TO {reader}"])
+
+        assert "op.drop_table(" in content
+        assert f"{schema}.orders, which this migration drops" in caplog.text
+
+    def test_privileges_named_one_by_one_stay_a_list(self, alembic_project: AlembicProject, roles: tuple[str, str]):
+        """``ALL`` would grant ``MAINTAIN`` on PostgreSQL 17 when the revision came from 14."""
+        schema = alembic_project.schema
+        reader, _ = roles
+        privileges = sorted(_all_grant_privileges_of(alembic_project)["TABLE"])
+
+        content = _autogenerate(
+            alembic_project, _orders_new(), pg_grants=[f"GRANT {', '.join(privileges)} ON orders TO {reader}"]
+        )
+
+        upgrade_body = _upgrade_body(content)
+        assert "GRANT ALL" not in upgrade_body
+        assert all(privilege in upgrade_body for privilege in privileges)
+        assert f"TABLE {schema}.orders TO {reader}" in upgrade_body
+
+
+def _all_grant_privileges_of(project: AlembicProject) -> Mapping[str, AbstractSet[str]]:
+    with project.connect() as conn:
+        return all_grant_privileges(conn)
+
+
+def _orders_new() -> MetaData:
+    """Return metadata with a new ``orders`` table that autogenerate creates."""
+    metadata = MetaData()
+    Table("orders", metadata, Column("id", Integer, primary_key=True))
+    return metadata

@@ -16,6 +16,7 @@ import alembic_pg_autogen.compare_indexes as _compare_indexes_mod
 import alembic_pg_autogen.render  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from alembic_pg_autogen.canonicalize import (
     CanonicalState,
+    DeclaredGrants,
     canonicalize,
     canonicalize_check_constraints,
     canonicalize_functions,
@@ -23,6 +24,7 @@ from alembic_pg_autogen.canonicalize import (
     canonicalize_indexes,
     canonicalize_triggers,
     canonicalize_views,
+    parse_grants,
 )
 from alembic_pg_autogen.compare import SQLCreatable, setup
 from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, GrantOp, TriggerOp, ViewOp, diff, diff_grants
@@ -88,6 +90,7 @@ __all__: Final[Sequence[str]] = [
     "CreateIndexConcurrentlyOp",
     "CreateTriggerOp",
     "CreateViewOp",
+    "DeclaredGrants",
     "DiffResult",
     "DropFunctionOp",
     "DropIndexConcurrentlyOp",
@@ -132,6 +135,7 @@ __all__: Final[Sequence[str]] = [
     "inspect_indexes",
     "inspect_triggers",
     "inspect_views",
+    "parse_grants",
     "parse_value_set",
     "setup",
     "skip_drop_index_for_dropped_tables",

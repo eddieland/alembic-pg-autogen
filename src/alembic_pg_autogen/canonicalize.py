@@ -386,24 +386,51 @@ def canonicalize_grants(conn: Connection, ddl: Sequence[str]) -> Sequence[GrantI
             object type, column privileges, or a privilege that the object type does not have. A name in
             ``ON [TABLE]`` that finds a sequence or another relation that is not a table also raises.
     """
+    return parse_grants(conn, ddl).grants
+
+
+class DeclaredGrants(NamedTuple):
+    """The result of :func:`parse_grants`: the grants, and the targets that a statement declared with ``ALL``."""
+
+    grants: Sequence[GrantInfo]
+    """The grants in the form of :func:`canonicalize_grants`."""
+
+    all_privileges: AbstractSet[tuple[str, str, str, str]]
+    """The ``(schema, object_type, name, grantee)`` targets of ``GRANT ALL [PRIVILEGES]`` statements.
+
+    The comparator renders ``ALL`` only for these targets. ``ALL`` means the privilege set of the server that runs the
+    migration, so it must not replace a list of privileges that the declaration names one by one.
+    """
+
+
+def parse_grants(conn: Connection, ddl: Sequence[str]) -> DeclaredGrants:
+    """Parse ``GRANT`` statements as :func:`canonicalize_grants` does, and also report which targets used ``ALL``.
+
+    Raises:
+        ValueError: For the statements that :func:`canonicalize_grants` rejects.
+    """
     if not ddl:
-        return ()
+        return DeclaredGrants((), frozenset())
 
     import postgast
 
     context = _GrantContext.read(conn)
     grantable_by_key: dict[tuple[str, str, str, str, str], bool] = {}
+    all_targets: set[tuple[str, str, str, str]] = set()
     for statement in ddl:
         for raw in postgast.parse(statement).stmts:
             if raw.stmt.WhichOneof("node") != "grant_stmt":
                 raise ValueError(f"pg_grants accepts only GRANT statements: {statement!r}")
-            for grant in _expand_grant(conn, raw.stmt.grant_stmt, context, statement):
+            grant_stmt = raw.stmt.grant_stmt
+            for grant in _expand_grant(conn, grant_stmt, context, statement):
                 key = grant[:-1]
                 grantable_by_key[key] = grantable_by_key.get(key, False) or grant.grantable
+                if not grant_stmt.privileges:  # ``GRANT ALL [PRIVILEGES]`` has an empty privilege list
+                    all_targets.add(grant[:3] + (grant.grantee,))
 
-    result = [GrantInfo(*key, grantable=grantable) for key, grantable in sorted(grantable_by_key.items())]
-    log.debug("Canonicalized %d GRANT statements into %d grants", len(ddl), len(result))
-    return result
+    grants = [GrantInfo(*key, grantable=grantable) for key, grantable in sorted(grantable_by_key.items())]
+    log.debug("Canonicalized %d GRANT statements into %d grants", len(ddl), len(grants))
+    return DeclaredGrants(grants, frozenset(all_targets))
 
 
 def all_grant_privileges(conn: Connection) -> Mapping[str, AbstractSet[str]]:

@@ -86,21 +86,25 @@ Grants from two grantors give one row. `grantable` is the `bool_or()` of the row
 The grantee `PUBLIC` reads as the lowercase name `public`. PostgreSQL reserves that name, so no real role has it. A role
 created as `"PUBLIC"` is possible and keeps its uppercase name.
 
-### D4: Leave privileges that PostgreSQL added unmanaged
+### D4: Leave privileges that PostgreSQL added unmanaged unless declared
 
 A user who declares `pg_grants` should not lose privileges that no `GRANT` statement created. The comparator removes
-these identities from the current and the desired grants:
+these identities from the current grants when `pg_grants` does not declare them:
 
 - **Initial privileges.** `pg_init_privs` records the privileges of `initdb` and `CREATE EXTENSION`.
   `inspect_grants(source="initial")` reads them.
 - **Default privileges.** `pg_default_acl` holds the privileges of `ALTER DEFAULT PRIVILEGES` for each owner.
   `inspect_grants(source="default")` reads the entries for the owner of each object, for all schemas and for the schema
   of the table. Without this rule, each new table gives a `REVOKE`, and a second autogenerate is not empty.
-- **`PUBLIC` on the `public` schema, unless declared.** `DROP SCHEMA public` removes the `pg_init_privs` row. A script
-  that creates the schema again often grants `USAGE` to `PUBLIC` again, and the first rule no longer covers it.
+- **The `initdb` defaults of `PUBLIC` on the `public` schema.** These are `USAGE`, and `CREATE` before PostgreSQL 15.
+  `DROP SCHEMA public` removes the `pg_init_privs` row. A script that creates the schema again often grants these
+  privileges again, and the first rule no longer covers them. Other privileges of `PUBLIC` on `public` stay managed, so
+  a `CREATE` that a user removes from `pg_grants` on PostgreSQL 15 or later is revoked.
 
-A user who revoked an initial or default privilege by hand does not get it back. A declared initial or default privilege
-does not give a permanent `GRANT`.
+The desired grants keep every declared privilege. The default ACL covers every table of the owner, including a table
+created before the entry, and such a table never received the privilege. A rule on both sides would drop that declared
+grant, and it would also hide a declared grant option. With the rule on the current side only, a declared privilege is
+compared as usual. An undeclared one stays, and a user who revoked one by hand does not get it back.
 
 ### D5: Respect the Alembic filters and the version table
 
@@ -111,10 +115,13 @@ does the same for each table and view:
 - `include_object` with the metadata `Table` and `reflected=False` when `target_metadata` has the table. Otherwise the
   object is a `Table` with a name and a schema but no columns, with `reflected=True`.
 
-A schema goes through `include_name` with type `"schema"`.
+A schema goes through `include_name` with type `"schema"`. The default schema reaches the filter as `None`, as Alembic
+passes it, so the cookbook filter `name in [None, ...]` keeps it. The metadata lookups test for `None`, because `Table`
+defines no truth value.
 
 A declared grant outside the compared schemas cannot be compared, because the inspector does not read that schema. The
-comparator logs one warning for each such object, with the object name and a hint about `include_schemas`.
+comparator logs one warning for each such object, with the object name and a hint about `include_schemas`. A declared
+grant that a filter or the version table rule removes also gives a warning.
 
 ### D6: Three operations, grouped per statement
 
@@ -130,8 +137,11 @@ migration holds one statement per group:
 A separate operation for the grant option keeps `reverse()` correct. A `GrantPrivilegesOp` that only added the option
 would reverse to a full `REVOKE`, and the downgrade would remove the privilege.
 
-A group with every privilege of `ALL` on the autogenerate server renders `ALL`. Thus a migration from PostgreSQL 17 does
-not send `MAINTAIN` to PostgreSQL 14.
+A group renders `ALL` when the declaration used `ALL` for its target and the group holds every privilege of `ALL` on the
+autogenerate server. Thus a migration from PostgreSQL 17 does not send `MAINTAIN` to PostgreSQL 14. `ALL` means the set
+of the server that runs the migration, so privileges that the declaration names one by one always render as a list.
+Otherwise a list of seven privileges from PostgreSQL 14 would grant `MAINTAIN` on PostgreSQL 17. `parse_grants()`
+reports the targets of `GRANT ALL` statements for this rule.
 
 The renderers quote identifiers with a PostgreSQL preparer in the `named` paramstyle. The preparer of a `pyformat`
 driver, such as psycopg, doubles `%`, and `op.execute()` does not undo that. The grantee `public` renders as the keyword
@@ -148,7 +158,10 @@ A `REVOKE` before the `DROP` of its object is not needed, because the `DROP` rem
 when one role passed the privilege on to another, `REVOKE` fails with "dependent privileges exist". For each table in a
 `DropTableOp` and each view in a `DropViewOp`, the revoke is implicit. It renders as `pass` and a comment, and its
 reverse still grants the privileges in `downgrade()`, after the object is created again. A grant option change on such
-an object is omitted.
+an object is omitted. The statement in the comment goes through `repr()`, because an identifier can hold a line break.
+
+A grant that `pg_grants` still declares on a dropped object gives a warning. The next autogenerate would emit a `GRANT`
+on a relation that no longer exists.
 
 ## Risks / Trade-offs
 
@@ -157,13 +170,16 @@ an object is omitted.
   `IGNORED` and an absent key keep the old behavior.
 - **`include_schemas`.** Without `include_schemas=True`, autogenerate compares the default schema only. Grants in other
   schemas give a warning and no operation.
+- **Extension objects.** A grant that a user added on an extension object is managed. With `include_schemas=True`, an
+  undeclared one in an extension schema is revoked.
 - **`REVOKE` without `CASCADE`.** On an object that the migration keeps, a role that passed a privilege on makes
   `REVOKE` fail with "dependent privileges exist". The migration stops, and the user decides. A silent `CASCADE` removes
   grants that the declaration did not mention.
 - **Server upgrades.** A declared `GRANT ALL` means every privilege of the server. After an upgrade to a version with a
   new privilege, autogenerate emits a `GRANT` for that privilege.
 - **Default privileges are approximate.** The rule uses the owner of the object, because PostgreSQL does not record
-  which role created it. A privilege that matches a default ACL entry is unmanaged even when a user granted it by hand.
+  which role created it. An undeclared privilege that matches a default ACL entry stays, even when a user granted it by
+  hand.
 - **Grantors.** `REVOKE` removes only the grants of the role that runs it. For a superuser, that role is the owner of
   the object. A grant from another grantor stays, and the next autogenerate reports it again.
 - **Grant to the owner.** The inspector omits the privileges of the owner. A declared grant to the owner therefore gives
