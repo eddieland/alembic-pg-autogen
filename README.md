@@ -389,21 +389,39 @@ def upgrade() -> None:
     op.execute("GRANT SELECT ON TABLE public.order_totals TO app_reader WITH GRANT OPTION")
 ```
 
-Revokes come first and grants come last. Thus a grant on a new table follows its `create_table`, and a revoke on a
-dropped table precedes its `drop_table`.
+Revokes come first and grants come last. Thus a grant on a new table follows its `create_table`.
 
 These rules apply:
 
 - `pg_grants` follows the rules of [What gets managed](#what-gets-managed). A declared list revokes every other grant on
   the tables, views, and schemas in the inspected schemas.
+
+- Autogenerate inspects the default schema only, unless you set `include_schemas=True`. The extension logs a warning for
+  each declared grant in a schema that it does not inspect, and emits nothing for it.
+
+- `include_name` and `include_object` apply to grants, with type `"table"` for tables and views. The Alembic version
+  table is skipped.
+
 - The extension reads the declared statements without executing them. A grant can name a table that the same migration
-  creates.
+  creates. A name without a schema finds an existing table through the `search_path`, as `GRANT` does.
+
 - Each statement must be a `GRANT ... ON [TABLE]` or a `GRANT ... ON SCHEMA`. The extension rejects `REVOKE`,
-  `ON ALL TABLES IN SCHEMA`, sequences, functions, and column privileges with a `ValueError`.
-- The privileges of the owner of an object are implicit. The extension does not compare them.
-- The extension does not compare the initial privileges in `pg_init_privs`. For example, `initdb` gives `USAGE` on the
-  `public` schema to `PUBLIC`. A `pg_grants` list without that grant does not revoke it.
-- The extension does not compare default privileges (`ALTER DEFAULT PRIVILEGES`).
+  `ON ALL TABLES IN SCHEMA`, `GRANTED BY`, sequences, functions, and column privileges with a `ValueError`.
+
+- A statement that holds every privilege renders as `GRANT ALL`, so a migration from a newer server runs on an older
+  one. After a server upgrade that adds a privilege, a declared `GRANT ALL` gives a `GRANT` for the new privilege.
+
+- A revoke on a table or view that the same migration drops is implicit. The `DROP` removes the privileges, and
+  `downgrade()` grants them again.
+
+- The extension does not manage these privileges:
+
+  - The privileges of the owner of an object, which are implicit.
+  - Initial privileges in `pg_init_privs`. For example, `initdb` gives `USAGE` on the `public` schema to `PUBLIC`.
+  - Default privileges from `ALTER DEFAULT PRIVILEGES`, which each new table receives.
+  - Privileges of `PUBLIC` on the `public` schema, unless you declare them.
+
+  A `pg_grants` list without these privileges does not revoke them.
 
 ## Installation
 

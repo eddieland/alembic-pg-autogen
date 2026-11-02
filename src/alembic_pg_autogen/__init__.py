@@ -25,7 +25,7 @@ from alembic_pg_autogen.canonicalize import (
     canonicalize_views,
 )
 from alembic_pg_autogen.compare import SQLCreatable, setup
-from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, GrantOp, TriggerOp, ViewOp, diff
+from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, GrantOp, TriggerOp, ViewOp, diff, diff_grants
 from alembic_pg_autogen.inspect import (
     CheckConstraintInfo,
     FunctionInfo,
@@ -125,6 +125,7 @@ __all__: Final[Sequence[str]] = [
     "compare_value_sets",
     "current_schema",
     "diff",
+    "diff_grants",
     "inspect_check_constraints",
     "inspect_functions",
     "inspect_grants",

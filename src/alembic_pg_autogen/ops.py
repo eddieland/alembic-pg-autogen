@@ -201,17 +201,23 @@ class GrantPrivilegesOp(MigrateOperation):
 
     Each item of ``grants`` holds one privilege. All items must have the same object, grantee, and ``grantable`` flag,
     so the operation renders as one statement. ``grantable`` adds ``WITH GRANT OPTION``.
+
+    ``all_privileges`` renders ``ALL`` in place of the privilege list. The comparator sets it when ``grants`` holds
+    every privilege of the object type on the server that runs autogenerate. ``ALL`` then means the set of the server
+    that runs the migration, so a migration from PostgreSQL 17 does not send ``MAINTAIN`` to PostgreSQL 14.
     """
 
     grants: tuple[GrantInfo, ...]
+    all_privileges: bool
 
-    def __init__(self, grants: Sequence[GrantInfo]) -> None:
+    def __init__(self, grants: Sequence[GrantInfo], *, all_privileges: bool = False) -> None:
         self.grants = _check_grant_group(grants)
+        self.all_privileges = all_privileges
 
     @override
     def reverse(self) -> RevokePrivilegesOp:
         """Reverse is revoking the granted privileges."""
-        return RevokePrivilegesOp(self.grants)
+        return RevokePrivilegesOp(self.grants, all_privileges=self.all_privileges)
 
     @override
     def to_diff_tuple(self) -> tuple[str, str, str, str, str, tuple[str, ...]]:
@@ -222,19 +228,28 @@ class GrantPrivilegesOp(MigrateOperation):
 class RevokePrivilegesOp(MigrateOperation):
     """Revoke privileges on one table or schema from one role with ``REVOKE``.
 
-    ``grants`` has the same rules as in :class:`GrantPrivilegesOp`. It holds the privileges as the catalog stores
-    them, so :meth:`reverse` restores ``WITH GRANT OPTION`` when the role had it.
+    ``grants`` and ``all_privileges`` have the same rules as in :class:`GrantPrivilegesOp`. ``grants`` holds the
+    privileges as the catalog stores them, so :meth:`reverse` restores ``WITH GRANT OPTION`` when the role had it.
+
+    ``implicit`` marks a revoke that the ``DROP`` of the object in the same migration does. The operation then renders
+    as a comment, because a ``REVOKE`` before the ``DROP`` can fail with "dependent privileges exist" where the
+    ``DROP`` alone succeeds. :meth:`reverse` still grants the privileges, so ``downgrade()`` restores them after it
+    creates the object again.
     """
 
     grants: tuple[GrantInfo, ...]
+    all_privileges: bool
+    implicit: bool
 
-    def __init__(self, grants: Sequence[GrantInfo]) -> None:
+    def __init__(self, grants: Sequence[GrantInfo], *, all_privileges: bool = False, implicit: bool = False) -> None:
         self.grants = _check_grant_group(grants)
+        self.all_privileges = all_privileges
+        self.implicit = implicit
 
     @override
     def reverse(self) -> GrantPrivilegesOp:
         """Reverse is granting the revoked privileges again."""
-        return GrantPrivilegesOp(self.grants)
+        return GrantPrivilegesOp(self.grants, all_privileges=self.all_privileges)
 
     @override
     def to_diff_tuple(self) -> tuple[str, str, str, str, str, tuple[str, ...]]:
@@ -247,18 +262,21 @@ class AlterGrantOptionOp(MigrateOperation):
 
     ``grants`` holds the privileges with the *new* ``grantable`` flag. When the flag is ``True``, the operation renders
     ``GRANT ... WITH GRANT OPTION``. When it is ``False``, the operation renders ``REVOKE GRANT OPTION FOR ...``. Both
-    statements keep the privilege itself.
+    statements keep the privilege itself. ``all_privileges`` has the same rule as in :class:`GrantPrivilegesOp`.
     """
 
     grants: tuple[GrantInfo, ...]
+    all_privileges: bool
 
-    def __init__(self, grants: Sequence[GrantInfo]) -> None:
+    def __init__(self, grants: Sequence[GrantInfo], *, all_privileges: bool = False) -> None:
         self.grants = _check_grant_group(grants)
+        self.all_privileges = all_privileges
 
     @override
     def reverse(self) -> AlterGrantOptionOp:
         """Reverse is the opposite change of the grant option."""
-        return AlterGrantOptionOp([grant._replace(grantable=not grant.grantable) for grant in self.grants])
+        flipped = [grant._replace(grantable=not grant.grantable) for grant in self.grants]
+        return AlterGrantOptionOp(flipped, all_privileges=self.all_privileges)
 
     @override
     def to_diff_tuple(self) -> tuple[str, str, str, str, str, tuple[str, ...], bool]:

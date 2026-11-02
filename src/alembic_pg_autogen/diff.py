@@ -65,7 +65,6 @@ class DiffResult(NamedTuple):
     function_ops: Sequence[FunctionOp]
     trigger_ops: Sequence[TriggerOp]
     view_ops: Sequence[ViewOp] = ()
-    grant_ops: Sequence[GrantOp] = ()
 
 
 _InfoT = TypeVar("_InfoT", "FunctionInfo", "TriggerInfo", "ViewInfo", "GrantInfo")
@@ -75,32 +74,52 @@ _OpT = TypeVar("_OpT", FunctionOp, TriggerOp, ViewOp, GrantOp)
 def diff(current: CanonicalState, desired: CanonicalState) -> DiffResult:
     """Compare two canonical catalog snapshots and produce diff operations.
 
-    Matches functions by ``(schema, name, identity_args)``, triggers by ``(schema, table_name, trigger_name)``, views
-    by ``(schema, name)``, and grants by ``(schema, object_type, name, grantee, privilege)``.  Objects present only in
-    *desired* produce ``CREATE`` ops, objects only in *current* produce ``DROP`` ops, and objects in both with differing
-    definitions produce ``REPLACE`` ops.  For a grant, the definition is the ``grantable`` flag.
+    Matches functions by ``(schema, name, identity_args)``, triggers by ``(schema, table_name, trigger_name)``, and
+    views by ``(schema, name)``.  Objects present only in *desired* produce ``CREATE`` ops, objects only in *current*
+    produce ``DROP`` ops, and objects in both with differing definitions produce ``REPLACE`` ops.  Grants use
+    :func:`diff_grants`.
 
     Args:
         current: The current database state (from inspection).
         desired: The desired state (from canonicalization).
 
     Returns:
-        A :class:`DiffResult` with sorted sequences of function, trigger, view, and grant ops.
+        A :class:`DiffResult` with sorted sequences of function, trigger, and view ops.
     """
     result = DiffResult(
         function_ops=_diff_items(current.functions, desired.functions, FunctionOp),
         trigger_ops=_diff_items(current.triggers, desired.triggers, TriggerOp),
         view_ops=_diff_items(current.views, desired.views, ViewOp),
-        grant_ops=_diff_items(current.grants, desired.grants, GrantOp),
     )
     log.debug(
-        "Diff produced %d function ops, %d trigger ops, %d view ops, and %d grant ops",
+        "Diff produced %d function ops, %d trigger ops, and %d view ops",
         len(result.function_ops),
         len(result.trigger_ops),
         len(result.view_ops),
-        len(result.grant_ops),
     )
     return result
+
+
+def diff_grants(current: Sequence[GrantInfo], desired: Sequence[GrantInfo]) -> Sequence[GrantOp]:
+    """Compare two sets of grants and produce one :class:`GrantOp` per differing privilege.
+
+    Grants match by ``(schema, object_type, name, grantee, privilege)``.  A privilege only in *desired* gives
+    ``CREATE``, a privilege only in *current* gives ``DROP``, and a privilege on both sides with a different
+    ``grantable`` flag gives ``REPLACE``.
+
+    Grants have their own function, not a field of :class:`DiffResult`.  A new field would break code that unpacks a
+    ``DiffResult`` or a :class:`~alembic_pg_autogen.canonicalize.CanonicalState` into three names.
+
+    Args:
+        current: The grants in the database, from :func:`~alembic_pg_autogen.inspect.inspect_grants`.
+        desired: The declared grants, from :func:`~alembic_pg_autogen.canonicalize.canonicalize_grants`.
+
+    Returns:
+        The grant ops, sorted by identity.
+    """
+    ops = _diff_items(current, desired, GrantOp)
+    log.debug("Diff produced %d grant ops", len(ops))
+    return ops
 
 
 def _diff_items(

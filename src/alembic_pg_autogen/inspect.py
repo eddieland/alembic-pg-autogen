@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from sqlalchemy import text
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
+    from typing import Final, TypeAlias
 
     from sqlalchemy import Connection
 
@@ -86,6 +87,10 @@ class IndexInfo(NamedTuple):
     name: str
     unique: bool
     shape: str
+
+
+GrantSource: TypeAlias = Literal["current", "initial", "default"]
+"""The ACL that :func:`inspect_grants` reads: the current ACL, ``pg_init_privs``, or ``pg_default_acl``."""
 
 
 class GrantInfo(NamedTuple):
@@ -280,20 +285,31 @@ def inspect_grants(
     conn: Connection,
     schemas: Sequence[str] | None = None,
     *,
-    initial: bool = False,
+    source: GrantSource = "current",
 ) -> Sequence[GrantInfo]:
     """Load the table and schema privileges from the PostgreSQL system catalogs in one query.
 
-    The query reads ``pg_class.relacl`` for tables and ``pg_namespace.nspacl`` for schemas. ``aclexplode()`` expands
-    each ACL to one row per grantee and privilege. The ``information_schema`` views are not used, because they show only
-    the privileges that the current user can see.
+    The query reads an ACL for each table and schema. ``aclexplode()`` expands each ACL to one row per grantee and
+    privilege. The ``information_schema`` views are not used, because they show only the privileges that the current
+    user can see.
+
+    *source* selects the ACL:
+
+    - ``"current"`` reads ``pg_class.relacl`` and ``pg_namespace.nspacl``, the privileges that apply now.
+    - ``"initial"`` reads ``pg_init_privs``. ``initdb`` records the initial privileges of the ``public`` schema there.
+      ``CREATE EXTENSION`` records the initial privileges of extension objects there.
+    - ``"default"`` reads ``pg_default_acl`` for the owner of each object. These are the privileges that
+      ``ALTER DEFAULT PRIVILEGES`` gives to each new table and schema of that owner. Entries for all schemas and
+      entries for the schema of the table both apply.
 
     The result omits these privileges:
 
     - Privileges of the object owner. PostgreSQL gives them to the owner implicitly, so they are not grants.
-    - Privileges on objects that an extension owns, as for functions and triggers.
     - Privileges on sequences. ``GRANT ... ON SEQUENCE`` uses other privilege names.
     - Column privileges. They are in ``pg_attribute.attacl``, not in ``relacl``.
+
+    The result includes objects that an extension owns. Their initial privileges are in ``pg_init_privs``, so a caller
+    can separate them from the grants that a user added later.
 
     Two grantors can give the same privilege to the same grantee. The result holds one row for the pair.
     ``grantable`` is ``True`` if one of the grantors gave the privilege ``WITH GRANT OPTION``.
@@ -301,19 +317,18 @@ def inspect_grants(
     Args:
         conn: An open SQLAlchemy connection.
         schemas: Schemas to inspect. When *None*, every schema except ``pg_catalog`` and ``information_schema``.
-        initial: When *True*, read the initial privileges in ``pg_init_privs`` in place of the current ACL.
-            ``initdb`` records the initial privileges of the ``public`` schema there. ``CREATE EXTENSION`` records the
-            initial privileges of extension objects there.
+        source: ``"current"``, ``"initial"``, or ``"default"``, as described above.
 
     Returns:
         A sequence of :class:`GrantInfo` instances, one per object, grantee, and privilege.
+
+    Raises:
+        ValueError: If *source* is not one of the three values.
     """
+    if source not in _GRANT_ACLS:
+        raise ValueError(f"source must be one of {sorted(_GRANT_ACLS)}, not {source!r}")
+    table_acl, schema_acl = _GRANT_ACLS[source]
     schema_filter, params = _build_schema_filter(schemas)
-    if initial:
-        table_acl = _INITIAL_ACL.format(catalog="pg_class", oid="c.oid")
-        schema_acl = _INITIAL_ACL.format(catalog="pg_namespace", oid="n.oid")
-    else:
-        table_acl, schema_acl = "c.relacl", "n.nspacl"
     query = text(_GRANTS_QUERY.format(schema_filter=schema_filter, table_acl=table_acl, schema_acl=schema_acl))
     rows = conn.execute(query, params)
     result = [
@@ -327,7 +342,7 @@ def inspect_grants(
         )
         for r in rows
     ]
-    log.debug("Inspected %d %sgrants (schemas=%s)", len(result), "initial " if initial else "", schemas)
+    log.debug("Inspected %d %s grants (schemas=%s)", len(result), source, schemas)
     return result
 
 
@@ -352,12 +367,6 @@ WITH objects AS (
     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
     WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
       AND ({schema_filter})
-      AND NOT EXISTS (
-          SELECT 1 FROM pg_catalog.pg_depend d
-          WHERE d.classid = 'pg_catalog.pg_class'::regclass
-            AND d.objid = c.oid
-            AND d.deptype = 'e'
-      )
     UNION ALL
     SELECT
         n.nspname,
@@ -367,12 +376,6 @@ WITH objects AS (
         {schema_acl}
     FROM pg_catalog.pg_namespace n
     WHERE ({schema_filter})
-      AND NOT EXISTS (
-          SELECT 1 FROM pg_catalog.pg_depend d
-          WHERE d.classid = 'pg_catalog.pg_namespace'::regclass
-            AND d.objid = n.oid
-            AND d.deptype = 'e'
-      )
 )
 SELECT
     o.schema,
@@ -387,7 +390,7 @@ WHERE a.grantee <> o.owner
 GROUP BY o.schema, o.object_type, o.name, a.grantee, a.privilege_type
 ORDER BY 1, 2, 3, 4, 5
 """
-"""Read the privileges of tables and schemas. ``{table_acl}`` and ``{schema_acl}`` select the live or initial ACL."""
+"""Read the privileges of tables and schemas. ``{table_acl}`` and ``{schema_acl}`` select the ACL to read."""
 
 _INITIAL_ACL = """(
             SELECT ip.initprivs FROM pg_catalog.pg_init_privs ip
@@ -396,6 +399,35 @@ _INITIAL_ACL = """(
               AND ip.objsubid = 0
         )"""
 """Select the initial ACL of one object from ``pg_init_privs``. ``aclexplode(NULL)`` gives no rows."""
+
+_DEFAULT_TABLE_ACL = """NULLIF(ARRAY(
+            SELECT pg_catalog.unnest(d.defaclacl) FROM pg_catalog.pg_default_acl d
+            WHERE d.defaclrole = c.relowner
+              AND d.defaclobjtype = 'r'
+              AND d.defaclnamespace IN (0, c.relnamespace)
+        ), '{}')"""
+"""Collect the default ACL entries for new tables of the owner, for all schemas and for the schema of the table.
+
+``aclexplode()`` rejects an empty array, so ``NULLIF`` turns it into ``NULL``, which gives no rows.
+"""
+
+_DEFAULT_SCHEMA_ACL = """NULLIF(ARRAY(
+            SELECT pg_catalog.unnest(d.defaclacl) FROM pg_catalog.pg_default_acl d
+            WHERE d.defaclrole = n.nspowner
+              AND d.defaclobjtype = 'n'
+              AND d.defaclnamespace = 0
+        ), '{}')"""
+"""Collect the default ACL entries for new schemas of the owner. PostgreSQL allows them for all schemas only."""
+
+_GRANT_ACLS: Final[Mapping[str, tuple[str, str]]] = {
+    "current": ("c.relacl", "n.nspacl"),
+    "initial": (
+        _INITIAL_ACL.format(catalog="pg_class", oid="c.oid"),
+        _INITIAL_ACL.format(catalog="pg_namespace", oid="n.oid"),
+    ),
+    "default": (_DEFAULT_TABLE_ACL, _DEFAULT_SCHEMA_ACL),
+}
+"""The table ACL and the schema ACL expression for each *source* of :func:`inspect_grants`."""
 
 _VIEWS_QUERY = """\
 SELECT

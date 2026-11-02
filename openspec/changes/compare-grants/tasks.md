@@ -2,9 +2,10 @@
 
 - [x] 1.1 Add the `GrantInfo` NamedTuple to `src/alembic_pg_autogen/inspect.py` with the fields
   `(schema, object_type, name, grantee, privilege, grantable)`
-- [x] 1.2 Add `_GRANTS_QUERY`. It reads `relacl` and `nspacl` through `aclexplode()`, omits owner privileges, sequences,
-  and extension members, and merges grantors with `bool_or()`.
-- [x] 1.3 Add `inspect_grants(conn, schemas=None, *, initial=False)`. `initial=True` reads `pg_init_privs`.
+- [x] 1.2 Add `_GRANTS_QUERY`. It reads `relacl` and `nspacl` through `aclexplode()`, omits owner privileges and
+  sequences, and merges grantors with `bool_or()`.
+- [x] 1.3 Add `inspect_grants(conn, schemas=None, *, source="current")`. `"initial"` reads `pg_init_privs`, and
+  `"default"` reads `pg_default_acl`.
 - [x] 1.4 Add inspection tests to `tests/alembic_pg_autogen/test_grants.py` for tables, views, schemas, `PUBLIC`, the
   grant option, the owner, sequences, column privileges, extension members, two grantors, the schema filter, and initial
   privileges
@@ -22,7 +23,8 @@
 
 ## 3. Diff Layer
 
-- [x] 3.1 Add `GrantOp` and `DiffResult.grant_ops` to `src/alembic_pg_autogen/diff.py`. Add `CanonicalState.grants`.
+- [x] 3.1 Add `GrantOp` and `diff_grants()` to `src/alembic_pg_autogen/diff.py`. Keep `CanonicalState` and `DiffResult`
+  unchanged.
 - [x] 3.2 Change `_diff_items` to compare whole tuples, so `grantable` works as the payload
 - [x] 3.3 Add diff tests for `CREATE`, `DROP`, `REPLACE`, and equal grants
 
@@ -50,3 +52,16 @@
 
 - [x] 6.1 Add a "Grants" section to `README.md` and to `docs/quickstart.rst`
 - [x] 6.2 Add a `PGGrantTable` note to `docs/migrating.rst`
+
+## 7. Review Fixes
+
+- [x] 7.1 Leave default privileges and `PUBLIC` on the `public` schema unmanaged in `_grant_states()`
+- [x] 7.2 Warn for each declared object outside the compared schemas, with a hint about `include_schemas`
+- [x] 7.3 Apply `include_name` and `include_object`, and skip the version table, in `_included_objects()`
+- [x] 7.4 Include extension members in `inspect_grants()`, so declared grants on them converge
+- [x] 7.5 Render `ALL` for a group with every privilege of the server
+- [x] 7.6 Resolve table names with `to_regclass()` and reject sequences named without `SEQUENCE`
+- [x] 7.7 Quote identifiers with a preparer that does not double `%` in `src/alembic_pg_autogen/render.py`
+- [x] 7.8 Make revokes on dropped tables and views implicit, and keep the grants in `downgrade()`
+- [x] 7.9 Reject `GRANTED BY` and `WITH GRANT OPTION` for `PUBLIC`
+- [x] 7.10 Add a test for each item above in `tests/alembic_pg_autogen/test_grants.py`

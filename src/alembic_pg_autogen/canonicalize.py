@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from collections.abc import Set as AbstractSet
+    from typing import Final
 
     from postgast.pg_query_pb2 import GrantStmt, RoleSpec
     from sqlalchemy import Connection, Index
@@ -32,15 +34,11 @@ if TYPE_CHECKING:
 
 
 class CanonicalState(NamedTuple):
-    """Post-DDL catalog snapshot returned by :func:`canonicalize`.
-
-    :func:`canonicalize` never fills ``grants``. :func:`canonicalize_grants` produces them without a round trip.
-    """
+    """Post-DDL catalog snapshot returned by :func:`canonicalize`."""
 
     functions: Sequence[FunctionInfo]
     triggers: Sequence[TriggerInfo]
     views: Sequence[ViewInfo] = ()
-    grants: Sequence[GrantInfo] = ()
 
 
 def canonicalize(
@@ -363,9 +361,11 @@ def canonicalize_grants(conn: Connection, ddl: Sequence[str]) -> Sequence[GrantI
     The function does not execute the statements. A grant can name a table that the same migration creates, so the
     table often does not exist yet. The parser of PostgreSQL (through postgast) reads each statement. The function then
     expands it to one ``GrantInfo`` per object, grantee, and privilege, as :func:`inspect_grants
-    <alembic_pg_autogen.inspect.inspect_grants>` does. The connection supplies four values:
+    <alembic_pg_autogen.inspect.inspect_grants>` does. The connection supplies these values:
 
-    - ``current_schema()`` qualifies a table name without a schema.
+    - ``to_regclass()`` finds an existing relation through the ``search_path``, as the ``GRANT`` would. A name that
+      finds no relation gets ``current_schema()``, because the migration creates that table in the first schema of
+      the ``search_path``.
     - ``current_user`` and ``session_user`` replace ``CURRENT_USER``, ``CURRENT_ROLE``, and ``SESSION_USER``.
     - ``acldefault()`` gives the privileges of ``ALL`` for each object type. The set depends on the server version.
       For example, PostgreSQL 17 adds ``MAINTAIN`` for tables.
@@ -382,8 +382,9 @@ def canonicalize_grants(conn: Connection, ddl: Sequence[str]) -> Sequence[GrantI
 
     Raises:
         ValueError: If a statement is not a ``GRANT``, or if it uses a form that this library does not compare:
-            ``REVOKE``, ``ON ALL TABLES IN SCHEMA``, another object type, column privileges, or a privilege that the
-            object type does not have.
+            ``REVOKE``, ``ON ALL TABLES IN SCHEMA``, ``GRANTED BY``, ``WITH GRANT OPTION`` for ``PUBLIC``, another
+            object type, column privileges, or a privilege that the object type does not have. A name in
+            ``ON [TABLE]`` that finds a sequence or another relation that is not a table also raises.
     """
     if not ddl:
         return ()
@@ -396,13 +397,23 @@ def canonicalize_grants(conn: Connection, ddl: Sequence[str]) -> Sequence[GrantI
         for raw in postgast.parse(statement).stmts:
             if raw.stmt.WhichOneof("node") != "grant_stmt":
                 raise ValueError(f"pg_grants accepts only GRANT statements: {statement!r}")
-            for grant in _expand_grant(raw.stmt.grant_stmt, context, statement):
+            for grant in _expand_grant(conn, raw.stmt.grant_stmt, context, statement):
                 key = grant[:-1]
                 grantable_by_key[key] = grantable_by_key.get(key, False) or grant.grantable
 
     result = [GrantInfo(*key, grantable=grantable) for key, grantable in sorted(grantable_by_key.items())]
     log.debug("Canonicalized %d GRANT statements into %d grants", len(ddl), len(result))
     return result
+
+
+def all_grant_privileges(conn: Connection) -> Mapping[str, AbstractSet[str]]:
+    """Return the privileges of ``GRANT ALL`` on the connected server, for ``"TABLE"`` and for ``"SCHEMA"``.
+
+    The comparator uses the result to render ``ALL`` for a statement that holds every privilege of its object type.
+    A migration with ``ALL`` then runs on a server version with fewer privileges, too.
+    """
+    row = conn.execute(text(_GRANT_CONTEXT_QUERY)).one()
+    return {"TABLE": frozenset(row.table_privileges), "SCHEMA": frozenset(row.schema_privileges)}
 
 
 class _GrantContext(NamedTuple):
@@ -440,22 +451,56 @@ privileges in that ACL are the privileges of ``ALL``. Role 10 is the bootstrap s
 because the query reads only the privilege names.
 """
 
+_RELATION_QUERY = """\
+SELECT n.nspname AS schema, c.relkind AS kind
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.oid = pg_catalog.to_regclass(
+    CASE
+        WHEN CAST(:schema AS text) IS NULL THEN pg_catalog.quote_ident(:name)
+        ELSE pg_catalog.quote_ident(:schema) || '.' || pg_catalog.quote_ident(:name)
+    END
+)
+"""
+"""Find a relation as ``GRANT`` finds it: through the ``search_path`` when the name has no schema.
 
-def _expand_grant(grant: GrantStmt, context: _GrantContext, statement: str) -> list[GrantInfo]:
+``quote_ident()`` runs in SQL, so the names reach the server as bind parameters and need no quoting in Python.
+"""
+
+_TABLE_KINDS: Final = frozenset({"r", "p", "v", "m", "f"})
+"""``relkind`` values that ``GRANT ... ON TABLE`` covers in this library: tables, views, and foreign tables."""
+
+_RELATION_KIND_NAMES: Final[Mapping[str, str]] = {
+    "S": "a sequence",
+    "i": "an index",
+    "I": "a partitioned index",
+    "c": "a composite type",
+    "t": "a TOAST table",
+}
+
+
+def _expand_grant(conn: Connection, grant: GrantStmt, context: _GrantContext, statement: str) -> list[GrantInfo]:
     """Expand one parsed ``GRANT`` to one :class:`GrantInfo` per object, grantee, and privilege."""
-    from postgast.pg_query_pb2 import ACL_TARGET_OBJECT, OBJECT_SCHEMA, OBJECT_TABLE
+    from postgast.pg_query_pb2 import ACL_TARGET_OBJECT, OBJECT_SCHEMA, OBJECT_TABLE, ROLESPEC_PUBLIC
 
     if not grant.is_grant:
         raise ValueError(f"pg_grants accepts only GRANT statements, not REVOKE: {statement!r}")
     if grant.targtype != ACL_TARGET_OBJECT:
         raise ValueError(f"pg_grants does not support GRANT ... ON ALL ... IN SCHEMA: {statement!r}")
+    if grant.HasField("grantor"):
+        raise ValueError(
+            f"pg_grants does not support GRANTED BY, because the comparison ignores grantors: {statement!r}"
+        )
+    if grant.grant_option and any(node.role_spec.roletype == ROLESPEC_PUBLIC for node in grant.grantees):
+        raise ValueError(f"PostgreSQL does not allow WITH GRANT OPTION for PUBLIC: {statement!r}")
 
     objects: list[tuple[str, str, str]]
     if grant.objtype == OBJECT_TABLE:
         object_type = "TABLE"
-        objects = [
-            (node.range_var.schemaname or context.schema, object_type, node.range_var.relname) for node in grant.objects
-        ]
+        objects = []
+        for node in grant.objects:
+            schema = _table_schema(conn, node.range_var.schemaname or None, node.range_var.relname, statement)
+            objects.append((schema or context.schema, object_type, node.range_var.relname))
     elif grant.objtype == OBJECT_SCHEMA:
         object_type = "SCHEMA"
         objects = [(node.string.sval, object_type, node.string.sval) for node in grant.objects]
@@ -482,6 +527,25 @@ def _expand_grant(grant: GrantStmt, context: _GrantContext, statement: str) -> l
         for grantee in grantees
         for privilege in privileges
     ]
+
+
+def _table_schema(conn: Connection, schema: str | None, name: str, statement: str) -> str | None:
+    """Return the schema of the relation that ``GRANT ... ON [TABLE]`` names, or *schema* if no relation exists.
+
+    Raises:
+        ValueError: If the relation exists and is not a table, a view, or a foreign table. PostgreSQL accepts
+            ``GRANT SELECT ON seq`` for a sequence, but :func:`inspect_grants` does not read sequences, so the grant
+            would appear again on each run.
+    """
+    row = conn.execute(text(_RELATION_QUERY), {"schema": schema, "name": name}).one_or_none()
+    if row is None:
+        return schema
+    if row.kind not in _TABLE_KINDS:
+        kind = _RELATION_KIND_NAMES.get(row.kind, f"a relation of kind {row.kind!r}")
+        raise ValueError(
+            f"pg_grants supports only tables, views, and foreign tables. {name!r} is {kind}: {statement!r}"
+        )
+    return row.schema
 
 
 def _grantee_name(role: RoleSpec, context: _GrantContext) -> str:

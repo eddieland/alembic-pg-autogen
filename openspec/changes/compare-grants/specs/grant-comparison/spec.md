@@ -40,15 +40,29 @@ privileges in the catalog. It SHALL emit operations for each difference. Postgre
 - **WHEN** `pg_grants=["GRANT USAGE ON SCHEMA sales TO app"]` and `app` has no privilege on `sales`
 - **THEN** `upgrade()` contains `GRANT USAGE ON SCHEMA sales TO app`
 
-### Requirement: Initial privileges are unmanaged
+### Requirement: Privileges that PostgreSQL added are unmanaged
 
-The comparator SHALL remove each privilege that `pg_init_privs` records for an object from both the current and the
-desired grants. The match SHALL use the identity of the grant and ignore `grantable`.
+The comparator SHALL remove these privileges from both the current and the desired grants: each privilege that
+`pg_init_privs` records for an object, and each privilege that `pg_default_acl` gives to new objects of the owner. It
+SHALL also remove each privilege of `PUBLIC` on the `public` schema from the current grants, unless `pg_grants` declares
+it. The match SHALL use the identity of the grant and ignore `grantable`.
 
 #### Scenario: Public schema keeps the USAGE privilege of PUBLIC
 
 - **WHEN** `pg_grants=[]` and the inspected schemas include `public`
 - **THEN** the comparator does not emit `REVOKE USAGE ON SCHEMA public FROM PUBLIC`
+
+#### Scenario: Recreated public schema
+
+- **WHEN** the script ran `DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT USAGE ON SCHEMA public TO PUBLIC`
+- **AND** `pg_grants=[]`
+- **THEN** the comparator does not emit `REVOKE USAGE ON SCHEMA public FROM PUBLIC`
+
+#### Scenario: Default privileges
+
+- **WHEN** the owner ran `ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO rdr` and created a table
+- **AND** `pg_grants=[]`
+- **THEN** the comparator does not emit `REVOKE SELECT ... FROM rdr` for that table
 
 #### Scenario: Declared initial privilege
 
@@ -88,6 +102,16 @@ identifier preparer. They SHALL write privileges in the order of the PostgreSQL 
 - **WHEN** a grant has the grantee `PUBLIC`
 - **THEN** the statement uses the quoted identifier `"PUBLIC"`
 
+#### Scenario: ALL privileges
+
+- **WHEN** a group holds every privilege of `ALL` for its object type on the autogenerate server
+- **THEN** the statement uses `ALL` in place of the privilege list
+
+#### Scenario: Percent sign in an identifier
+
+- **WHEN** the table is `50%off` and the connection uses psycopg
+- **THEN** the statement holds `"50%off"`, not `"50%%off"`
+
 #### Scenario: Identifiers that need quotes
 
 - **WHEN** the schema is `My Schema`, the table is `Order Items`, and the grantee is `Report Reader`
@@ -101,6 +125,6 @@ for any other statement.
 #### Scenario: Rejected forms
 
 - **WHEN** a declared string holds `REVOKE`, a statement that is not `GRANT`, `GRANT ... ON ALL TABLES IN SCHEMA`,
-  `GRANT ... ON SEQUENCE`, `GRANT ... ON FUNCTION`, a column privilege, role membership, or a privilege that the object
-  type does not have
+  `GRANT ... ON SEQUENCE`, `GRANT ... ON FUNCTION`, `GRANTED BY`, `WITH GRANT OPTION` for `PUBLIC`, a column privilege,
+  role membership, a privilege that the object type does not have, or a name that finds a sequence
 - **THEN** `canonicalize_grants()` raises `ValueError` with the statement in the message

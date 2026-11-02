@@ -36,9 +36,37 @@ It SHALL append `GrantPrivilegesOp` instances after the function, view, and trig
 #### Scenario: Grant on a dropped table
 
 - **WHEN** a table leaves `target_metadata` and its grant leaves `pg_grants`
-- **THEN** `upgrade()` holds the `REVOKE` before `op.drop_table()`
+- **THEN** `upgrade()` holds no `REVOKE` statement for that table, only a `pass` line with a comment
+- **AND** the upgrade succeeds when one role passed the privilege on to another
+- **AND** `downgrade()` grants the privileges again after `op.create_table()`
 
 #### Scenario: Grant on a new view
 
 - **WHEN** `pg_views` declares a new view and `pg_grants` declares a grant on it
 - **THEN** `upgrade()` holds the `GRANT` after the `CREATE OR REPLACE VIEW`
+
+### Requirement: Alembic filters and the version table
+
+The comparator SHALL skip grants on the Alembic version table. It SHALL apply `include_name` to each table with type
+`"table"` and to each schema with type `"schema"`. It SHALL apply `include_object` to each table with type `"table"`.
+
+#### Scenario: include_object excludes a table
+
+- **WHEN** a role holds `SELECT` on table `ex`, `pg_grants=[]`, and `include_object` returns `False` for `ex`
+- **THEN** the comparator emits no `REVOKE` for `ex`
+
+#### Scenario: Version table
+
+- **WHEN** a role holds `SELECT` on `alembic_version` and `pg_grants=[]`
+- **THEN** the comparator emits no `REVOKE` for `alembic_version`
+
+### Requirement: Declared grants outside the compared schemas
+
+The comparator SHALL log one warning for each declared object whose schema autogenerate does not compare. The warning
+SHALL name the object and mention `include_schemas`.
+
+#### Scenario: Schema not compared
+
+- **WHEN** `pg_grants` declares `GRANT SELECT ON sales.o TO app` and `include_schemas` is not set
+- **THEN** the comparator logs a warning that names `TABLE sales.o`
+- **AND** it emits no operation for that grant

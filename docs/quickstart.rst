@@ -464,8 +464,15 @@ Thus a grant on a new table follows its ``create_table``.
 These rules apply:
 
 - A declared list revokes every other grant on the tables, views, and schemas in the inspected schemas.
-- The extension reads the statements without executing them. ``GRANT ALL`` expands to the privileges of the server.
-- The extension rejects ``REVOKE``, ``ON ALL TABLES IN SCHEMA``, sequences, functions, and column privileges.
-- The privileges of the object owner and the initial privileges in ``pg_init_privs`` are not compared. Thus the
-  ``USAGE`` privilege of ``PUBLIC`` on the ``public`` schema stays.
-- Default privileges (``ALTER DEFAULT PRIVILEGES``) are not compared.
+- Autogenerate inspects the default schema only, unless you set ``include_schemas=True``. A declared grant in another
+  schema gives a warning and no operation.
+- ``include_name`` and ``include_object`` apply to grants, with type ``"table"`` for tables and views. The Alembic
+  version table is skipped.
+- The extension reads the statements without executing them. A name without a schema finds an existing table through
+  the ``search_path``.
+- A statement with every privilege renders as ``GRANT ALL``, so a migration from a newer server runs on an older one.
+- A revoke on a table or view that the same migration drops is implicit. ``downgrade()`` grants the privileges again.
+- The extension rejects ``REVOKE``, ``ON ALL TABLES IN SCHEMA``, ``GRANTED BY``, sequences, functions, and column
+  privileges.
+- The extension does not manage the privileges of the object owner, initial privileges in ``pg_init_privs``, default
+  privileges from ``ALTER DEFAULT PRIVILEGES``, or privileges of ``PUBLIC`` on the ``public`` schema unless declared.

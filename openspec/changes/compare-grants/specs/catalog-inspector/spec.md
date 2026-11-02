@@ -22,9 +22,11 @@ The module SHALL provide a `GrantInfo` NamedTuple. It holds one privilege of one
 
 ### Requirement: Read table and schema privileges from the PostgreSQL catalog in one query
 
-The module SHALL provide `inspect_grants(conn, schemas=None, *, initial=False)`. It SHALL read `pg_class.relacl` for
-relations with `relkind` in `('r', 'p', 'v', 'm', 'f')` and `pg_namespace.nspacl` for schemas, expanded through
-`aclexplode()`. It SHALL return a sequence of `GrantInfo` sorted by identity.
+The module SHALL provide `inspect_grants(conn, schemas=None, *, source="current")`. It SHALL read an ACL for each
+relation with `relkind` in `('r', 'p', 'v', 'm', 'f')` and for each schema, expanded through `aclexplode()`. It SHALL
+return a sequence of `GrantInfo` sorted by identity. *source* SHALL select the ACL: `"current"` reads `pg_class.relacl`
+and `pg_namespace.nspacl`, `"initial"` reads `pg_init_privs`, and `"default"` reads `pg_default_acl` for the owner of
+each object. Any other value SHALL raise `ValueError`.
 
 #### Scenario: Owner privileges excluded
 
@@ -36,10 +38,10 @@ relations with `relkind` in `('r', 'p', 'v', 'm', 'f')` and `pg_namespace.nspacl
 - **WHEN** a role holds `USAGE` on a sequence and `SELECT (col)` on a table
 - **THEN** the result is empty
 
-#### Scenario: Extension objects excluded
+#### Scenario: Extension objects included
 
-- **WHEN** an extension owns a table or a schema (`pg_depend.deptype = 'e'`)
-- **THEN** the result holds no row for that object
+- **WHEN** an extension owns a table (`pg_depend.deptype = 'e'`) and a role holds `SELECT` on it
+- **THEN** the result holds that row, so a declared grant on the table can match it
 
 #### Scenario: Several grantors
 
@@ -48,6 +50,13 @@ relations with `relkind` in `('r', 'p', 'v', 'm', 'f')` and `pg_namespace.nspacl
 
 #### Scenario: Initial privileges
 
-- **WHEN** `initial=True`
+- **WHEN** `source="initial"`
 - **THEN** the query reads the ACL in `pg_init_privs` for each object in place of the live ACL
 - **AND** the `public` schema gives a `USAGE` row for the grantee `public`
+
+#### Scenario: Default privileges
+
+- **WHEN** the owner ran `ALTER DEFAULT PRIVILEGES GRANT INSERT ON TABLES TO r` and
+  `ALTER DEFAULT PRIVILEGES IN SCHEMA s GRANT SELECT ON TABLES TO r`, and then created `s.t`
+- **AND** `source="default"`
+- **THEN** the result holds `INSERT` and `SELECT` rows for `r` on `s.t`
