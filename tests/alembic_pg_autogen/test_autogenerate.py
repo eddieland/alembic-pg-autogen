@@ -490,7 +490,7 @@ RETURNS text LANGUAGE sql AS $$ SELECT 'hi'::text $$"""
 class TestAutogenerateAllTypesDeclared:
     """Declaring every object type leaves nothing unmanaged."""
 
-    def test_functions_triggers_and_views_together(
+    def test_functions_triggers_views_and_grants_together(
         self,
         alembic_project: AlembicProject,
         caplog: pytest.LogCaptureFixture,
@@ -512,11 +512,13 @@ FOR EACH ROW EXECUTE FUNCTION {schema}.touch_order()"""
                 pg_functions=[fn_ddl],
                 pg_triggers=[trg_ddl],
                 pg_views=[view_ddl],
+                pg_grants=[f"GRANT SELECT ON {schema}.order_ids TO PUBLIC"],
             )
 
         assert "touch_order" in content
         assert "touch_order_trg" in content
         assert "order_ids" in content
+        assert f"GRANT SELECT ON TABLE {schema}.order_ids TO PUBLIC" in content
         assert "left unmanaged" not in caplog.text
 
 

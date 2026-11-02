@@ -10,6 +10,7 @@ from alembic.autogenerate.render import render_op, renderers
 from alembic.operations.ops import CreateCheckConstraintOp
 
 from alembic_pg_autogen.ops import (
+    AlterGrantOptionOp,
     CreateCheckConstraintNotValidOp,
     CreateFunctionOp,
     CreateIndexConcurrentlyOp,
@@ -19,16 +20,24 @@ from alembic_pg_autogen.ops import (
     DropIndexConcurrentlyOp,
     DropTriggerOp,
     DropViewOp,
+    GrantPrivilegesOp,
     NoOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
     ReplaceViewOp,
+    RevokePrivilegesOp,
     ValidateConstraintOp,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from typing import Final
+
     from alembic.autogenerate.api import AutogenContext
     from alembic.operations.ops import MigrateOperation
+    from sqlalchemy.sql.compiler import IdentifierPreparer
+
+    from alembic_pg_autogen.inspect import GrantInfo
 
 
 @renderers.dispatch_for(CreateFunctionOp)
@@ -98,6 +107,30 @@ def _render_drop_view(autogen_context: AutogenContext, op: DropViewOp) -> str:
     preparer = autogen_context.dialect.identifier_preparer
     qualified = f"{preparer.quote_schema(op.current.schema)}.{preparer.quote(op.current.name)}"
     return _render_execute(f"DROP VIEW {qualified}")
+
+
+@renderers.dispatch_for(GrantPrivilegesOp)
+def _render_grant_privileges(autogen_context: AutogenContext, op: GrantPrivilegesOp) -> str:
+    """Render a ``GRANT ... ON ... TO ...`` via op.execute()."""
+    privileges, target, grantee = _grant_parts(autogen_context.dialect.identifier_preparer, op.grants)
+    option = " WITH GRANT OPTION" if op.grants[0].grantable else ""
+    return _render_execute(f"GRANT {privileges} ON {target} TO {grantee}{option}")
+
+
+@renderers.dispatch_for(RevokePrivilegesOp)
+def _render_revoke_privileges(autogen_context: AutogenContext, op: RevokePrivilegesOp) -> str:
+    """Render a ``REVOKE ... ON ... FROM ...`` via op.execute()."""
+    privileges, target, grantee = _grant_parts(autogen_context.dialect.identifier_preparer, op.grants)
+    return _render_execute(f"REVOKE {privileges} ON {target} FROM {grantee}")
+
+
+@renderers.dispatch_for(AlterGrantOptionOp)
+def _render_alter_grant_option(autogen_context: AutogenContext, op: AlterGrantOptionOp) -> str:
+    """Render ``GRANT ... WITH GRANT OPTION`` or ``REVOKE GRANT OPTION FOR ...`` via op.execute()."""
+    privileges, target, grantee = _grant_parts(autogen_context.dialect.identifier_preparer, op.grants)
+    if op.grants[0].grantable:
+        return _render_execute(f"GRANT {privileges} ON {target} TO {grantee} WITH GRANT OPTION")
+    return _render_execute(f"REVOKE GRANT OPTION FOR {privileges} ON {target} FROM {grantee}")
 
 
 @renderers.dispatch_for(ValidateConstraintOp)
@@ -172,6 +205,45 @@ def _render_autocommit_block(autogen_context: AutogenContext, inner: MigrateOper
     body = "\n".join(render_op(autogen_context, inner))
     indented = "\n".join(f"    {line}" if line else line for line in body.splitlines())
     return f"with op.get_context().autocommit_block():\n{indented}"
+
+
+def _grant_parts(preparer: IdentifierPreparer, grants: Sequence[GrantInfo]) -> tuple[str, str, str]:
+    """Return the privilege list, the target, and the grantee of a ``GRANT`` or ``REVOKE`` statement.
+
+    The identifiers come from the catalog or from parsed DDL, so they go through the dialect's identifier preparer as
+    in :func:`_render_drop_view`.  The grantee ``public`` is the ``PUBLIC`` pseudo-role and renders as the keyword.
+    """
+    first = grants[0]
+    privileges = ", ".join(sorted((grant.privilege for grant in grants), key=_privilege_rank))
+    if first.object_type == "SCHEMA":
+        target = f"SCHEMA {preparer.quote_schema(first.name)}"
+    else:
+        target = f"TABLE {preparer.quote_schema(first.schema)}.{preparer.quote(first.name)}"
+    grantee = "PUBLIC" if first.grantee == "public" else preparer.quote(first.grantee)
+    return privileges, target, grantee
+
+
+_PRIVILEGE_ORDER: Final = (
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+    "MAINTAIN",
+    "USAGE",
+    "CREATE",
+)
+"""The order of privileges in a rendered statement. It is the order of the PostgreSQL documentation."""
+
+
+def _privilege_rank(privilege: str) -> tuple[int, str]:
+    """Sort key that puts known privileges in documentation order and unknown privileges after them."""
+    try:
+        return (_PRIVILEGE_ORDER.index(privilege), privilege)
+    except ValueError:
+        return (len(_PRIVILEGE_ORDER), privilege)
 
 
 def _render_execute(ddl: str) -> str:

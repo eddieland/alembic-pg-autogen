@@ -9,7 +9,14 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.schema import CreateIndex
 
-from alembic_pg_autogen.inspect import IndexInfo, current_schema, inspect_functions, inspect_triggers, inspect_views
+from alembic_pg_autogen.inspect import (
+    GrantInfo,
+    IndexInfo,
+    current_schema,
+    inspect_functions,
+    inspect_triggers,
+    inspect_views,
+)
 from alembic_pg_autogen.sentinels import IGNORED
 
 log = logging.getLogger(__name__)
@@ -17,6 +24,7 @@ log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from postgast.pg_query_pb2 import GrantStmt, RoleSpec
     from sqlalchemy import Connection, Index
 
     from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
@@ -24,11 +32,15 @@ if TYPE_CHECKING:
 
 
 class CanonicalState(NamedTuple):
-    """Post-DDL catalog snapshot returned by :func:`canonicalize`."""
+    """Post-DDL catalog snapshot returned by :func:`canonicalize`.
+
+    :func:`canonicalize` never fills ``grants``. :func:`canonicalize_grants` produces them without a round trip.
+    """
 
     functions: Sequence[FunctionInfo]
     triggers: Sequence[TriggerInfo]
     views: Sequence[ViewInfo] = ()
+    grants: Sequence[GrantInfo] = ()
 
 
 def canonicalize(
@@ -343,6 +355,151 @@ def canonicalize_indexes(
         log.warning("Canonicalization produced no definition for indexes: %s", sorted(missing))
 
     return normalized
+
+
+def canonicalize_grants(conn: Connection, ddl: Sequence[str]) -> Sequence[GrantInfo]:
+    """Parse ``GRANT`` statements into the :class:`~alembic_pg_autogen.inspect.GrantInfo` form of the catalog.
+
+    The function does not execute the statements. A grant can name a table that the same migration creates, so the
+    table often does not exist yet. The parser of PostgreSQL (through postgast) reads each statement. The function then
+    expands it to one ``GrantInfo`` per object, grantee, and privilege, as :func:`inspect_grants
+    <alembic_pg_autogen.inspect.inspect_grants>` does. The connection supplies four values:
+
+    - ``current_schema()`` qualifies a table name without a schema.
+    - ``current_user`` and ``session_user`` replace ``CURRENT_USER``, ``CURRENT_ROLE``, and ``SESSION_USER``.
+    - ``acldefault()`` gives the privileges of ``ALL`` for each object type. The set depends on the server version.
+      For example, PostgreSQL 17 adds ``MAINTAIN`` for tables.
+
+    Each statement must be a ``GRANT`` on named tables or schemas. A string can hold more than one statement.
+    Equal grants merge into one. ``grantable`` is ``True`` if one of them has ``WITH GRANT OPTION``.
+
+    Args:
+        conn: An open SQLAlchemy connection.
+        ddl: ``GRANT ... ON [TABLE] ...`` and ``GRANT ... ON SCHEMA ...`` statements.
+
+    Returns:
+        A sequence of :class:`~alembic_pg_autogen.inspect.GrantInfo` instances, sorted by identity.
+
+    Raises:
+        ValueError: If a statement is not a ``GRANT``, or if it uses a form that this library does not compare:
+            ``REVOKE``, ``ON ALL TABLES IN SCHEMA``, another object type, column privileges, or a privilege that the
+            object type does not have.
+    """
+    if not ddl:
+        return ()
+
+    import postgast
+
+    context = _GrantContext.read(conn)
+    grantable_by_key: dict[tuple[str, str, str, str, str], bool] = {}
+    for statement in ddl:
+        for raw in postgast.parse(statement).stmts:
+            if raw.stmt.WhichOneof("node") != "grant_stmt":
+                raise ValueError(f"pg_grants accepts only GRANT statements: {statement!r}")
+            for grant in _expand_grant(raw.stmt.grant_stmt, context, statement):
+                key = grant[:-1]
+                grantable_by_key[key] = grantable_by_key.get(key, False) or grant.grantable
+
+    result = [GrantInfo(*key, grantable=grantable) for key, grantable in sorted(grantable_by_key.items())]
+    log.debug("Canonicalized %d GRANT statements into %d grants", len(ddl), len(result))
+    return result
+
+
+class _GrantContext(NamedTuple):
+    """Values from the server that :func:`canonicalize_grants` needs to expand a ``GRANT`` statement."""
+
+    schema: str
+    current_user: str
+    session_user: str
+    all_privileges: Mapping[str, Sequence[str]]
+
+    @classmethod
+    def read(cls, conn: Connection) -> _GrantContext:
+        """Read the values in one query."""
+        row = conn.execute(text(_GRANT_CONTEXT_QUERY)).one()
+        return cls(
+            schema=row.schema,
+            current_user=row.current_user,
+            session_user=row.session_user,
+            all_privileges={"TABLE": tuple(row.table_privileges), "SCHEMA": tuple(row.schema_privileges)},
+        )
+
+
+_GRANT_CONTEXT_QUERY = """\
+SELECT
+    current_schema() AS schema,
+    current_user AS current_user,
+    session_user AS session_user,
+    ARRAY(SELECT privilege_type FROM pg_catalog.aclexplode(pg_catalog.acldefault('r', 10::oid))) AS table_privileges,
+    ARRAY(SELECT privilege_type FROM pg_catalog.aclexplode(pg_catalog.acldefault('n', 10::oid))) AS schema_privileges
+"""
+"""Read the default schema, the session roles, and the privileges of ``ALL`` for tables and schemas.
+
+``acldefault()`` returns the default ACL of an owner. The owner holds every privilege of the object type, so the
+privileges in that ACL are the privileges of ``ALL``. Role 10 is the bootstrap superuser. The role does not matter,
+because the query reads only the privilege names.
+"""
+
+
+def _expand_grant(grant: GrantStmt, context: _GrantContext, statement: str) -> list[GrantInfo]:
+    """Expand one parsed ``GRANT`` to one :class:`GrantInfo` per object, grantee, and privilege."""
+    from postgast.pg_query_pb2 import ACL_TARGET_OBJECT, OBJECT_SCHEMA, OBJECT_TABLE
+
+    if not grant.is_grant:
+        raise ValueError(f"pg_grants accepts only GRANT statements, not REVOKE: {statement!r}")
+    if grant.targtype != ACL_TARGET_OBJECT:
+        raise ValueError(f"pg_grants does not support GRANT ... ON ALL ... IN SCHEMA: {statement!r}")
+
+    objects: list[tuple[str, str, str]]
+    if grant.objtype == OBJECT_TABLE:
+        object_type = "TABLE"
+        objects = [
+            (node.range_var.schemaname or context.schema, object_type, node.range_var.relname) for node in grant.objects
+        ]
+    elif grant.objtype == OBJECT_SCHEMA:
+        object_type = "SCHEMA"
+        objects = [(node.string.sval, object_type, node.string.sval) for node in grant.objects]
+    else:
+        raise ValueError(f"pg_grants supports only GRANT ... ON TABLE and GRANT ... ON SCHEMA: {statement!r}")
+
+    allowed = context.all_privileges[object_type]
+    privileges: list[str] = []
+    for node in grant.privileges:
+        access = node.access_priv
+        if access.cols:
+            raise ValueError(f"pg_grants does not support column privileges: {statement!r}")
+        privilege = access.priv_name.upper()
+        if privilege not in allowed:
+            raise ValueError(f"{privilege} is not a {object_type} privilege in pg_grants: {statement!r}")
+        privileges.append(privilege)
+    if not privileges:  # ``GRANT ALL [PRIVILEGES]`` has an empty privilege list
+        privileges = list(allowed)
+
+    grantees = [_grantee_name(node.role_spec, context) for node in grant.grantees]
+    return [
+        GrantInfo(schema, kind, name, grantee, privilege, grant.grant_option)
+        for schema, kind, name in objects
+        for grantee in grantees
+        for privilege in privileges
+    ]
+
+
+def _grantee_name(role: RoleSpec, context: _GrantContext) -> str:
+    """Return the role name of a grantee in the form that :func:`inspect_grants` returns."""
+    from postgast.pg_query_pb2 import (
+        ROLESPEC_CURRENT_ROLE,
+        ROLESPEC_CURRENT_USER,
+        ROLESPEC_PUBLIC,
+        ROLESPEC_SESSION_USER,
+    )
+
+    if role.roletype == ROLESPEC_PUBLIC:
+        return "public"
+    if role.roletype in (ROLESPEC_CURRENT_USER, ROLESPEC_CURRENT_ROLE):
+        return context.current_user
+    if role.roletype == ROLESPEC_SESSION_USER:
+        return context.session_user
+    return role.rolename
 
 
 _TEMP_SCHEMA = "pg_temp"

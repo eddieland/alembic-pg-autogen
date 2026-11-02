@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import itertools
 import logging
 from typing import TYPE_CHECKING, Protocol
 
@@ -10,19 +11,28 @@ from alembic.runtime.plugins import Plugin
 from alembic.util import PriorityDispatchResult
 from sqlalchemy import Connection
 
-from alembic_pg_autogen.canonicalize import CanonicalState, canonicalize
+from alembic_pg_autogen.canonicalize import CanonicalState, canonicalize, canonicalize_grants
 from alembic_pg_autogen.diff import Action, diff
-from alembic_pg_autogen.inspect import current_schema, inspect_functions, inspect_triggers, inspect_views
+from alembic_pg_autogen.inspect import (
+    current_schema,
+    inspect_functions,
+    inspect_grants,
+    inspect_triggers,
+    inspect_views,
+)
 from alembic_pg_autogen.ops import (
+    AlterGrantOptionOp,
     CreateFunctionOp,
     CreateTriggerOp,
     CreateViewOp,
     DropFunctionOp,
     DropTriggerOp,
     DropViewOp,
+    GrantPrivilegesOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
     ReplaceViewOp,
+    RevokePrivilegesOp,
 )
 from alembic_pg_autogen.sentinels import IGNORED
 
@@ -33,13 +43,13 @@ if TYPE_CHECKING:
     from alembic.autogenerate.api import AutogenContext
     from alembic.operations.ops import MigrateOperation, UpgradeOps
 
-    from alembic_pg_autogen.diff import FunctionOp, TriggerOp, ViewOp
-    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
+    from alembic_pg_autogen.diff import FunctionOp, GrantOp, TriggerOp, ViewOp
+    from alembic_pg_autogen.inspect import FunctionInfo, GrantInfo, TriggerInfo, ViewInfo
     from alembic_pg_autogen.sentinels import Ignored
 
 log = logging.getLogger(__name__)
 
-_DESIRED_STATE_KEYS: Final = ("pg_functions", "pg_triggers", "pg_views")
+_DESIRED_STATE_KEYS: Final = ("pg_functions", "pg_triggers", "pg_views", "pg_grants")
 """Configuration keys this comparator reads from ``autogen_context.opts``."""
 
 _RECOGNIZED_KEYS: Final = (*_DESIRED_STATE_KEYS, "pg_check_constraint_validation")
@@ -79,27 +89,28 @@ def _compare_pg_objects(
     upgrade_ops: UpgradeOps,
     schemas: set[str | None],
 ) -> PriorityDispatchResult:
-    """Compare current database state against desired functions/triggers/views."""
+    """Compare current database state against desired functions, triggers, views, and grants."""
     opts = autogen_context.opts  # pyright: ignore[reportAttributeAccessIssue]
     log.debug(
-        "_compare_pg_objects called, schemas=%r, pg_functions in opts=%r, pg_triggers in opts=%r, pg_views in opts=%r",
+        "_compare_pg_objects called, schemas=%r, declared keys=%r",
         schemas,
-        "pg_functions" in opts,
-        "pg_triggers" in opts,
-        "pg_views" in opts,
+        [key for key in _DESIRED_STATE_KEYS if key in opts],
     )
     _warn_unrecognized_options(opts)
 
     pg_functions = _resolve_ddl(opts.get("pg_functions", IGNORED))
     pg_triggers = _resolve_ddl(opts.get("pg_triggers", IGNORED))
     pg_views = _resolve_ddl(opts.get("pg_views", IGNORED))
+    pg_grants = _resolve_ddl(opts.get("pg_grants", IGNORED))
 
-    unmanaged = [
-        label
-        for label, declared in (("functions", pg_functions), ("triggers", pg_triggers), ("views", pg_views))
-        if declared is IGNORED
-    ]
-    if len(unmanaged) == 3:
+    declared_by_label = {
+        "functions": pg_functions,
+        "triggers": pg_triggers,
+        "views": pg_views,
+        "grants": pg_grants,
+    }
+    unmanaged = [label for label, declared in declared_by_label.items() if declared is IGNORED]
+    if len(unmanaged) == len(declared_by_label):
         log.debug("No object types are managed, skipping")
         return PriorityDispatchResult.CONTINUE
     if unmanaged:
@@ -114,35 +125,53 @@ def _compare_pg_objects(
     current_functions: Sequence[FunctionInfo] = ()
     current_triggers: Sequence[TriggerInfo] = ()
     current_views: Sequence[ViewInfo] = ()
+    current_grants: Sequence[GrantInfo] = ()
+    desired_grants: Sequence[GrantInfo] = ()
     if pg_functions is not IGNORED:
         current_functions = inspect_functions(conn, resolved_schemas)
     if pg_triggers is not IGNORED:
         current_triggers = inspect_triggers(conn, resolved_schemas)
     if pg_views is not IGNORED:
         current_views = inspect_views(conn, resolved_schemas)
-    current = CanonicalState(functions=current_functions, triggers=current_triggers, views=current_views)
+    if pg_grants is not IGNORED:
+        current_grants, desired_grants = _grant_states(conn, pg_grants, resolved_schemas)
+    current = CanonicalState(
+        functions=current_functions, triggers=current_triggers, views=current_views, grants=current_grants
+    )
     log.info(
-        "Found %d functions, %d triggers, and %d views in database",
+        "Found %d functions, %d triggers, %d views, and %d grants in database",
         len(current_functions),
         len(current_triggers),
         len(current_views),
+        len(current_grants),
     )
 
     canonical = canonicalize(conn, function_ddl=pg_functions, view_ddl=pg_views, trigger_ddl=pg_triggers)
     canonical = _filter_to_schemas(canonical, resolved_schemas)
-    desired = _filter_to_declared(canonical, pg_functions, pg_triggers, pg_views, conn)
+    desired = _filter_to_declared(canonical, pg_functions, pg_triggers, pg_views, conn)._replace(grants=desired_grants)
     log.debug(
-        "desired: %d functions, %d triggers, %d views",
+        "desired: %d functions, %d triggers, %d views, %d grants",
         len(desired.functions),
         len(desired.triggers),
         len(desired.views),
+        len(desired.grants),
     )
 
     result = diff(current, desired)
 
+    revoke_ops, grant_ops = _grant_migration_ops(result.grant_ops)
     ops = _order_ops(result.function_ops, result.trigger_ops, result.view_ops)
-    log.info("Autogenerate produced %d migration ops: %r", len(ops), [type(o).__name__ for o in ops])
+    log.info(
+        "Autogenerate produced %d migration ops: %r",
+        len(revoke_ops) + len(ops) + len(grant_ops),
+        [type(o).__name__ for o in (*revoke_ops, *ops, *grant_ops)],
+    )
+    # Revokes go before every other operation, including the table operations of Alembic, which ran first. A REVOKE
+    # after the DROP TABLE of its table would fail. Grants go last, after the CREATE TABLE and CREATE VIEW of their
+    # object. ``downgrade()`` reverses the list, so the same rules hold there.
+    upgrade_ops.ops[:0] = revoke_ops
     upgrade_ops.ops.extend(ops)
+    upgrade_ops.ops.extend(grant_ops)
 
     return PriorityDispatchResult.CONTINUE
 
@@ -307,7 +336,60 @@ def _filter_to_schemas(state: CanonicalState, schemas: Iterable[str] | None) -> 
         functions=[f for f in state.functions if f.schema in schema_set],
         triggers=[t for t in state.triggers if t.schema in schema_set],
         views=[v for v in state.views if v.schema in schema_set],
+        grants=[g for g in state.grants if g.schema in schema_set],
     )
+
+
+def _grant_states(
+    conn: Connection,
+    pg_grants: Sequence[str],
+    schemas: Sequence[str] | None,
+) -> tuple[Sequence[GrantInfo], Sequence[GrantInfo]]:
+    """Return the current and the desired grants, without the initial privileges of the database.
+
+    ``initdb`` gives ``USAGE`` on the ``public`` schema to ``PUBLIC``, and ``CREATE EXTENSION`` gives privileges on
+    extension objects. ``pg_init_privs`` records these initial privileges. They are not part of the desired state, so
+    this function removes them from both sides by identity. Without this rule, a ``pg_grants`` list that does not
+    mention ``public`` revokes ``USAGE`` on it from every role. A user who revoked an initial privilege by hand also
+    does not get it back.
+    """
+    initial = {grant[:-1] for grant in inspect_grants(conn, schemas, initial=True)}
+    current = [grant for grant in inspect_grants(conn, schemas) if grant[:-1] not in initial]
+    schema_set = None if schemas is None else set(schemas)
+    desired = [
+        grant
+        for grant in canonicalize_grants(conn, pg_grants)
+        if grant[:-1] not in initial and (schema_set is None or grant.schema in schema_set)
+    ]
+    if pg_grants and not desired:
+        log.warning("No declared grants are in the compared schemas. Check the schema qualifiers in pg_grants.")
+    return current, desired
+
+
+def _grant_migration_ops(grant_ops: Sequence[GrantOp]) -> tuple[list[MigrateOperation], list[MigrateOperation]]:
+    """Group per-privilege diff ops into one migration op per object, grantee, and kind of change.
+
+    Returns ``(early, late)``. *early* holds the revokes and the grant option changes. They apply to objects that exist
+    before the migration. *late* holds the new grants. Their objects can be new in the same migration.
+    """
+    early: list[MigrateOperation] = []
+    late: list[MigrateOperation] = []
+    revokes = [op.current for op in grant_ops if op.action is Action.DROP and op.current is not None]
+    options = [op.desired for op in grant_ops if op.action is Action.REPLACE and op.desired is not None]
+    grants = [op.desired for op in grant_ops if op.action is Action.CREATE and op.desired is not None]
+    early.extend(RevokePrivilegesOp(group) for group in _group_grants(revokes))
+    early.extend(AlterGrantOptionOp(group) for group in _group_grants(options))
+    late.extend(GrantPrivilegesOp(group) for group in _group_grants(grants))
+    return early, late
+
+
+def _group_grants(grants: Sequence[GrantInfo]) -> list[list[GrantInfo]]:
+    """Split *grants* into groups that share object, grantee, and ``grantable``, so one statement holds each group."""
+
+    def group_key(grant: GrantInfo) -> tuple[str, str, str, str, bool]:
+        return (grant.schema, grant.object_type, grant.name, grant.grantee, grant.grantable)
+
+    return [list(group) for _, group in itertools.groupby(sorted(grants, key=group_key), key=group_key)]
 
 
 def _order_ops(

@@ -1,4 +1,4 @@
-"""Catalog inspection for PostgreSQL functions, triggers, views, check constraints, and indexes."""
+"""Catalog inspection for PostgreSQL functions, triggers, views, check constraints, indexes, and grants."""
 
 from __future__ import annotations
 
@@ -86,6 +86,28 @@ class IndexInfo(NamedTuple):
     name: str
     unique: bool
     shape: str
+
+
+class GrantInfo(NamedTuple):
+    """One privilege that a role holds on a table or a schema, as stored in the system catalog.
+
+    One ``GrantInfo`` holds one privilege. ``GRANT SELECT, INSERT ON t TO app`` gives two instances. The identity is
+    ``(schema, object_type, name, grantee, privilege)``, or ``info[:-1]``. The payload is ``grantable``.
+
+    ``object_type`` is ``"TABLE"`` or ``"SCHEMA"``. These are the keywords of the ``GRANT ... ON`` clause. A view, a
+    materialized view, and a foreign table use ``"TABLE"``, as in PostgreSQL. For a schema grant, ``schema`` and
+    ``name`` both hold the schema name. Thus the schema filter works the same way for both object types.
+
+    ``grantee`` is a role name without quotes. The lowercase name ``"public"`` is the ``PUBLIC`` pseudo-role.
+    PostgreSQL reserves that name, so no real role can have it. A role created as ``"PUBLIC"`` keeps its uppercase name.
+    """
+
+    schema: str
+    object_type: str
+    name: str
+    grantee: str
+    privilege: str
+    grantable: bool = False
 
 
 def inspect_functions(conn: Connection, schemas: Sequence[str] | None = None) -> Sequence[FunctionInfo]:
@@ -254,6 +276,61 @@ def inspect_indexes(
     return result
 
 
+def inspect_grants(
+    conn: Connection,
+    schemas: Sequence[str] | None = None,
+    *,
+    initial: bool = False,
+) -> Sequence[GrantInfo]:
+    """Load the table and schema privileges from the PostgreSQL system catalogs in one query.
+
+    The query reads ``pg_class.relacl`` for tables and ``pg_namespace.nspacl`` for schemas. ``aclexplode()`` expands
+    each ACL to one row per grantee and privilege. The ``information_schema`` views are not used, because they show only
+    the privileges that the current user can see.
+
+    The result omits these privileges:
+
+    - Privileges of the object owner. PostgreSQL gives them to the owner implicitly, so they are not grants.
+    - Privileges on objects that an extension owns, as for functions and triggers.
+    - Privileges on sequences. ``GRANT ... ON SEQUENCE`` uses other privilege names.
+    - Column privileges. They are in ``pg_attribute.attacl``, not in ``relacl``.
+
+    Two grantors can give the same privilege to the same grantee. The result holds one row for the pair.
+    ``grantable`` is ``True`` if one of the grantors gave the privilege ``WITH GRANT OPTION``.
+
+    Args:
+        conn: An open SQLAlchemy connection.
+        schemas: Schemas to inspect. When *None*, every schema except ``pg_catalog`` and ``information_schema``.
+        initial: When *True*, read the initial privileges in ``pg_init_privs`` in place of the current ACL.
+            ``initdb`` records the initial privileges of the ``public`` schema there. ``CREATE EXTENSION`` records the
+            initial privileges of extension objects there.
+
+    Returns:
+        A sequence of :class:`GrantInfo` instances, one per object, grantee, and privilege.
+    """
+    schema_filter, params = _build_schema_filter(schemas)
+    if initial:
+        table_acl = _INITIAL_ACL.format(catalog="pg_class", oid="c.oid")
+        schema_acl = _INITIAL_ACL.format(catalog="pg_namespace", oid="n.oid")
+    else:
+        table_acl, schema_acl = "c.relacl", "n.nspacl"
+    query = text(_GRANTS_QUERY.format(schema_filter=schema_filter, table_acl=table_acl, schema_acl=schema_acl))
+    rows = conn.execute(query, params)
+    result = [
+        GrantInfo(
+            schema=r.schema,
+            object_type=r.object_type,
+            name=r.name,
+            grantee=r.grantee,
+            privilege=r.privilege,
+            grantable=r.grantable,
+        )
+        for r in rows
+    ]
+    log.debug("Inspected %d %sgrants (schemas=%s)", len(result), "initial " if initial else "", schemas)
+    return result
+
+
 def current_schema(conn: Connection) -> str:
     """Return the connection's current schema, i.e. the first entry of its ``search_path``."""
     schema = conn.execute(text("SELECT current_schema()")).scalar()
@@ -262,6 +339,63 @@ def current_schema(conn: Connection) -> str:
 
 
 _EXCLUDED_SCHEMAS = ("pg_catalog", "information_schema")
+
+_GRANTS_QUERY = """\
+WITH objects AS (
+    SELECT
+        n.nspname AS schema,
+        'TABLE'::text AS object_type,
+        c.relname AS name,
+        c.relowner AS owner,
+        {table_acl} AS acl
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND ({schema_filter})
+      AND NOT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_class'::regclass
+            AND d.objid = c.oid
+            AND d.deptype = 'e'
+      )
+    UNION ALL
+    SELECT
+        n.nspname,
+        'SCHEMA'::text,
+        n.nspname,
+        n.nspowner,
+        {schema_acl}
+    FROM pg_catalog.pg_namespace n
+    WHERE ({schema_filter})
+      AND NOT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_namespace'::regclass
+            AND d.objid = n.oid
+            AND d.deptype = 'e'
+      )
+)
+SELECT
+    o.schema,
+    o.object_type,
+    o.name,
+    CASE WHEN a.grantee = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(a.grantee) END AS grantee,
+    a.privilege_type AS privilege,
+    bool_or(a.is_grantable) AS grantable
+FROM objects o
+CROSS JOIN LATERAL pg_catalog.aclexplode(o.acl) a
+WHERE a.grantee <> o.owner
+GROUP BY o.schema, o.object_type, o.name, a.grantee, a.privilege_type
+ORDER BY 1, 2, 3, 4, 5
+"""
+"""Read the privileges of tables and schemas. ``{table_acl}`` and ``{schema_acl}`` select the live or initial ACL."""
+
+_INITIAL_ACL = """(
+            SELECT ip.initprivs FROM pg_catalog.pg_init_privs ip
+            WHERE ip.classoid = 'pg_catalog.{catalog}'::regclass
+              AND ip.objoid = {oid}
+              AND ip.objsubid = 0
+        )"""
+"""Select the initial ACL of one object from ``pg_init_privs``. ``aclexplode(NULL)`` gives no rows."""
 
 _VIEWS_QUERY = """\
 SELECT

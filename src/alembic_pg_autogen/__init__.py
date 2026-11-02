@@ -19,26 +19,30 @@ from alembic_pg_autogen.canonicalize import (
     canonicalize,
     canonicalize_check_constraints,
     canonicalize_functions,
+    canonicalize_grants,
     canonicalize_indexes,
     canonicalize_triggers,
     canonicalize_views,
 )
 from alembic_pg_autogen.compare import SQLCreatable, setup
-from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, TriggerOp, ViewOp, diff
+from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, GrantOp, TriggerOp, ViewOp, diff
 from alembic_pg_autogen.inspect import (
     CheckConstraintInfo,
     FunctionInfo,
+    GrantInfo,
     IndexInfo,
     TriggerInfo,
     ViewInfo,
     current_schema,
     inspect_check_constraints,
     inspect_functions,
+    inspect_grants,
     inspect_indexes,
     inspect_triggers,
     inspect_views,
 )
 from alembic_pg_autogen.ops import (
+    AlterGrantOptionOp,
     CreateCheckConstraintNotValidOp,
     CreateFunctionOp,
     CreateIndexConcurrentlyOp,
@@ -48,10 +52,12 @@ from alembic_pg_autogen.ops import (
     DropIndexConcurrentlyOp,
     DropTriggerOp,
     DropViewOp,
+    GrantPrivilegesOp,
     NoOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
     ReplaceViewOp,
+    RevokePrivilegesOp,
     ValidateConstraintOp,
 )
 from alembic_pg_autogen.rewriters import skip_drop_index_for_dropped_tables
@@ -74,6 +80,7 @@ if TYPE_CHECKING:
 
 __all__: Final[Sequence[str]] = [
     "Action",
+    "AlterGrantOptionOp",
     "CanonicalState",
     "CheckConstraintInfo",
     "CreateCheckConstraintNotValidOp",
@@ -88,6 +95,9 @@ __all__: Final[Sequence[str]] = [
     "DropViewOp",
     "FunctionInfo",
     "FunctionOp",
+    "GrantInfo",
+    "GrantOp",
+    "GrantPrivilegesOp",
     "IGNORED",
     "Ignored",
     "IndexInfo",
@@ -95,6 +105,7 @@ __all__: Final[Sequence[str]] = [
     "ReplaceFunctionOp",
     "ReplaceTriggerOp",
     "ReplaceViewOp",
+    "RevokePrivilegesOp",
     "SQLCreatable",
     "TriggerInfo",
     "TriggerOp",
@@ -106,6 +117,7 @@ __all__: Final[Sequence[str]] = [
     "canonicalize",
     "canonicalize_check_constraints",
     "canonicalize_functions",
+    "canonicalize_grants",
     "canonicalize_indexes",
     "canonicalize_triggers",
     "canonicalize_views",
@@ -115,6 +127,7 @@ __all__: Final[Sequence[str]] = [
     "diff",
     "inspect_check_constraints",
     "inspect_functions",
+    "inspect_grants",
     "inspect_indexes",
     "inspect_triggers",
     "inspect_views",

@@ -357,6 +357,54 @@ for invalid indexes when a migration runs without supervision.
 The comparator skips indexes that implement a primary key, unique, or exclusion constraint. The constraint owns such an
 index, and Alembic compares the constraint.
 
+## Grants
+
+Alembic does not compare privileges. A `GRANT` in a migration is invisible to `alembic check`, and a rebuilt or squashed
+schema loses it without a warning. Declare table and schema grants as SQL in `pg_grants`:
+
+```python
+PG_GRANTS = [
+    "GRANT SELECT, INSERT ON orders TO app_writer",
+    "GRANT SELECT ON orders, order_totals TO app_reader WITH GRANT OPTION",
+    "GRANT USAGE ON SCHEMA public TO app_reader",
+]
+
+context.configure(
+    connection=connection,
+    target_metadata=target_metadata,
+    autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+    pg_grants=PG_GRANTS,
+)
+```
+
+The extension compares each privilege of each role on each object. It emits `GRANT` for a missing privilege and `REVOKE`
+for a privilege that you did not declare. A changed `WITH GRANT OPTION` gives `GRANT ... WITH GRANT OPTION` or
+`REVOKE GRANT OPTION FOR`. `GRANT ALL` expands to the privileges of your server version. The migration holds one
+statement for each object and role.
+
+```python
+def upgrade() -> None:
+    op.execute("REVOKE DELETE ON TABLE public.orders FROM app_writer")
+    op.create_table("order_totals", ...)
+    op.execute("GRANT SELECT ON TABLE public.order_totals TO app_reader WITH GRANT OPTION")
+```
+
+Revokes come first and grants come last. Thus a grant on a new table follows its `create_table`, and a revoke on a
+dropped table precedes its `drop_table`.
+
+These rules apply:
+
+- `pg_grants` follows the rules of [What gets managed](#what-gets-managed). A declared list revokes every other grant on
+  the tables, views, and schemas in the inspected schemas.
+- The extension reads the declared statements without executing them. A grant can name a table that the same migration
+  creates.
+- Each statement must be a `GRANT ... ON [TABLE]` or a `GRANT ... ON SCHEMA`. The extension rejects `REVOKE`,
+  `ON ALL TABLES IN SCHEMA`, sequences, functions, and column privileges with a `ValueError`.
+- The privileges of the owner of an object are implicit. The extension does not compare them.
+- The extension does not compare the initial privileges in `pg_init_privs`. For example, `initdb` gives `USAGE` on the
+  `public` schema to `PUBLIC`. A `pg_grants` list without that grant does not revoke it.
+- The extension does not compare default privileges (`ALTER DEFAULT PRIVILEGES`).
+
 ## Installation
 
 ```bash
