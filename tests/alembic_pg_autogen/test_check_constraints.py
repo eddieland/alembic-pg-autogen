@@ -24,6 +24,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Table,
+    Text,
     bindparam,
     exc,
     text,
@@ -256,6 +257,11 @@ class TestSameSql:
             ("amount   >=\n0", "amount >= 0", True),
             ("amount >= 0", "amount > 0", False),
             ("amount >= 0", "(amount >= (0)::numeric)", False),
+            ("code = 'x  y'", "code = 'x y'", False),
+            ("code  =  'x  y'", "code = 'x  y'", True),
+            ("code = 'it''s  x'", "code =  'it''s  x'", True),
+            ('"A  B" > 0', '"A B" > 0', False),
+            ("code = E'a\\' b'", "code = E'a\\'  b'", False),
         ],
     )
     def test_whitespace_insensitive_comparison(self, left: str, right: str, expected: bool):
@@ -497,7 +503,14 @@ class TestUnnamedCheckConstraints:
             CheckConstraint("qty >= 0"),
         )
 
-        assert [str(c.sqltext) for c in _unnamed_check_constraints(table, PG_DIALECT)] == ["qty >= 0", "amount > 0"]
+        assert [str(c.sqltext) for c in _unnamed_check_constraints(table, PG_DIALECT)] == ["amount > 0", "qty >= 0"]
+
+    def test_order_is_creation_order_whatever_the_set_order(self):
+        """``Table.constraints`` is a set; names chosen in that order would vary between processes."""
+        expressions = [f"amount > {value}" for value in range(20)]
+        table = _orders_table(*(CheckConstraint(expression) for expression in expressions))
+
+        assert [str(c.sqltext) for c in _unnamed_check_constraints(table, PG_DIALECT)] == expressions
 
     def test_named_constraint_skipped(self):
         table = _orders_table(CheckConstraint("amount > 0", name="ck_orders_amount"))
@@ -798,6 +811,32 @@ class TestUnnamedPairing(TestComparatorSkips):
         assert add.constraint_name == "orders_status_check"
         assert add.removed_values == ("shipped",)
         assert calls["named"] == []
+
+    def test_validated_copy_pairs_before_a_not_valid_copy(self, unnamed_catalog: Any):
+        """The duplicate that Alembic drops is the weaker ``NOT VALID`` copy, and the kept copy needs no validation."""
+        unnamed_catalog(
+            {"orders_amount_check": "amount > 0", "orders_amount_check1": "amount > 0"},
+            not_valid=["orders_amount_check"],
+        )
+        drops = [self._drop("orders_amount_check"), self._drop("orders_amount_check1")]
+
+        ops = self._run(_orders_table(CheckConstraint("amount > 0")), existing=drops).ops
+
+        assert ops == [drops[0]]
+
+    def test_column_expression_constraint_on_a_new_column_warns(self, unnamed_catalog: Any, caplog: Any):
+        calls = unnamed_catalog({})
+        table = _orders_table()
+        qty = Column("qty", Integer)
+        table.append_column(qty)
+        table.append_constraint(CheckConstraint(qty > 0))
+        reflected = _orders_table()
+
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            assert self._run(table, conn_table=reflected).is_empty()
+
+        assert calls["named"] == []
+        assert "Unnamed check constraint 'qty > 0' on table 'orders' references a column" in caplog.text
 
     def test_unnamed_enum_constraint_pairs_with_the_catalog(self, unnamed_catalog: Any):
         unnamed_catalog({"orders_status_check": CURRENT_STATUS}, {"status IN ('new', 'done')": CURRENT_STATUS})
@@ -1405,7 +1444,7 @@ class TestCheckConstraintAutogenerateIntegration:
         assert "add_column" in first
         assert "create_check_constraint('orders_amount_check'" in first
         assert "qty >= 0" not in first
-        assert "Could not add unnamed check constraint 'qty >= 0' on table 'orders' in this run" in caplog.text
+        assert "Could not add unnamed check constraint 'qty >= 0' on table 'orders'" in caplog.text
 
         second = _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
         assert "op.create_check_constraint('orders_qty_check', 'orders', 'qty >= 0')" in second
@@ -1437,6 +1476,75 @@ class TestCheckConstraintAutogenerateIntegration:
 
         second = _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
         assert "op.create_check_constraint('o_amount_check1', 'o', 'amount > 0')" in second
+        assert "check" not in _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+
+    def test_posix_character_class_round_trips(self, alembic_project: AlembicProject):
+        """``[[:alpha:]]`` holds a colon that the bind pattern of ``text()`` must not take."""
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, a text CHECK (a ~ '^[[:alpha:]]+$'))")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("a", Text(), CheckConstraint("a ~ '^[[:alpha:]]+$'")),
+        )
+
+        assert "check" not in _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+
+    def test_missing_posix_character_class_constraint_is_added_exactly(self, alembic_project: AlembicProject):
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, a text)")
+        alembic_project.execute("INSERT INTO o (a) VALUES ('abc')")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("a", Text(), CheckConstraint("a ~ '^[[:alpha:]]+$'")),
+        )
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata)
+
+        assert """op.create_check_constraint('o_a_check', 'o', "a ~ '^[[:alpha:]]+$'")""" in content
+        assert _check_constraint_expressions(alembic_project, "o") == ["a ~ '^[[:alpha:]]+$'::text"]
+        assert "check" not in _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+
+    def test_changed_named_posix_character_class_constraint_upgrades(self, alembic_project: AlembicProject):
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, a text, CONSTRAINT ck_o_a CHECK (a ~ '^x'))")
+        alembic_project.execute("INSERT INTO o (a) VALUES ('xyz')")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("a", Text()),
+            CheckConstraint("a ~ '^[[:alpha:]]+$'", name="ck_o_a"),
+        )
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata)
+
+        assert """op.create_check_constraint('ck_o_a', 'o', "a ~ '^[[:alpha:]]+$'")""" in content
+        assert _check_constraint_expressions(alembic_project, "o") == ["a ~ '^[[:alpha:]]+$'::text"]
+
+    def test_function_of_the_row_type_probes_on_the_real_table(self, alembic_project: AlembicProject):
+        """``ok(o)`` takes the row type of ``o``; the ``TEMP`` copy has its own row type, so the probe retries."""
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, a int)")
+        alembic_project.execute("CREATE FUNCTION ok(o) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT true'")
+        alembic_project.execute("ALTER TABLE o ADD CONSTRAINT nm CHECK (ok(o) AND a > 0)")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("a", Integer),
+            CheckConstraint("ok(o) AND a > 1", name="nm"),
+            CheckConstraint("ok(o)"),
+        )
+
+        content = _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+
+        assert _dropped_names(content) == ["nm"]
+        assert "op.create_check_constraint('nm', 'o', 'ok(o) AND a > 1')" in content
+        assert "op.create_check_constraint('o_check', 'o', 'ok(o)')" in content
         assert "check" not in _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
 
     def test_percent_in_an_unnamed_constraint_round_trips(self, alembic_project: AlembicProject):

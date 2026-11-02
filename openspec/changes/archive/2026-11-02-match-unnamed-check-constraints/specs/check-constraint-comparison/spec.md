@@ -91,7 +91,8 @@ SHALL be a candidate.
 #### Scenario: Duplicate expressions pair in order
 
 - **WHEN** an expression occurs `n` times in the model and `m` times among the candidates
-- **THEN** `min(n, m)` copies pair, metadata copies in declaration order and catalog copies in name order
+- **THEN** `min(n, m)` copies pair, metadata copies in declaration order and catalog copies validated first, then in
+  name order
 - **AND** a warning that names both counts is logged when `n` and `m` differ
 - **AND** the remaining metadata copies get adds and the remaining catalog copies keep their drops
 
@@ -106,6 +107,7 @@ SHALL be a candidate.
 - **WHEN** candidates exist and the canonicalization probe fails for a metadata constraint
 - **THEN** the comparator emits no add for it
 - **AND** it discards Alembic's drops of the candidates that no constraint paired with, and logs a warning
+- **AND** the warning says that those constraints stay until every unnamed model constraint can be compared
 
 #### Scenario: A failed probe does not cost the others their pairs
 
@@ -169,6 +171,12 @@ append an add under the returned name.
 - **AND** the next run adds the constraint
 - **AND** a table-level unnamed constraint and an `Enum` constraint of the new table get no warning
 
+#### Scenario: Column expression constraint on a new column warns
+
+- **WHEN** an unnamed constraint that is not type-bound, such as `CheckConstraint(table.c.qty > 0)`, references a column
+  that the database table lacks
+- **THEN** the comparator emits nothing for it and logs a warning
+
 ### Requirement: Emitted operations keep the SQL text exactly
 
 Each check constraint add that the comparator emits SHALL be a `CreateCheckConstraintTextOp` or a
@@ -178,6 +186,11 @@ Each check constraint add that the comparator emits SHALL be a `CreateCheckConst
 
 - **WHEN** an add holds `code LIKE 'A%'` and the connection uses psycopg
 - **THEN** the migration renders `"code LIKE 'A%'"`, and the catalog stores `'A%'`
+
+#### Scenario: A POSIX character class stays unchanged
+
+- **WHEN** an add holds `a ~ '^[[:alpha:]]+$'`
+- **THEN** the migration renders the expression unchanged, and the catalog stores the same rule
 
 #### Scenario: A colon is escaped for text()
 

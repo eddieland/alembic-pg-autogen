@@ -406,6 +406,13 @@ class TestRenderCreateCheckConstraintText:
 
         assert call == r"""op.create_check_constraint('ck_o_code', 'o', "code IN ('a \\:b', 'c')")"""
 
+    def test_posix_character_class_renders_unchanged(self):
+        op = CreateCheckConstraintTextOp("ck", "o", "a ~ '^[[:alpha:]]+$'")
+
+        call = _render_create_check_constraint_text(_autogen_context(dialect=PGDialect_psycopg()), op)
+
+        assert call == """op.create_check_constraint('ck', 'o', "a ~ '^[[:alpha:]]+$'")"""
+
     def test_cast_is_not_escaped(self):
         op = CreateCheckConstraintTextOp("ck", "o", "amount >= 0::numeric")
 

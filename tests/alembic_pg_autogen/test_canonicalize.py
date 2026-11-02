@@ -715,6 +715,109 @@ class TestChooseCheckConstraintNamesIntegration:
 
 
 @pytest.mark.integration
+class TestCheckProbeRetryOnTheRealTable:
+    """An expression that the ``TEMP`` copy rejects for a reason other than an unknown column gets one more try."""
+
+    def test_function_of_the_row_type_canonicalizes(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_o (a int)"))
+        pg_conn.execute(
+            text("CREATE FUNCTION public.test_cpr_ok(public.test_cpr_o) RETURNS boolean LANGUAGE sql AS 'SELECT true'")
+        )
+        before = pg_conn.execute(text("SHOW lock_timeout")).scalar()
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cpr_o", expressions={"ck": "test_cpr_ok(test_cpr_o)"}
+        )
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_cpr_o", expressions=["a > 0", "test_cpr_ok(test_cpr_o)"]
+        )
+
+        assert normalized == {"ck": "test_cpr_ok(test_cpr_o.*)"}
+        assert names == ["test_cpr_o_a_check", "test_cpr_o_check"]
+        assert pg_conn.execute(text("SHOW lock_timeout")).scalar() == before
+        assert inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_cpr_o"]) == []
+
+    def test_unknown_column_is_not_retried(self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch):
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+        tried: list[str] = []
+        real_probe_table = canonicalize_module._check_probe_real_table
+
+        def recording_probe_table(*args: Any, **kwargs: Any) -> Any:
+            tried.append(kwargs["table_name"])
+            return real_probe_table(*args, **kwargs)
+
+        monkeypatch.setattr(canonicalize_module, "_check_probe_real_table", recording_probe_table)
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_col (a int)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cpr_col", expressions={"ck": "qty > 0"}
+        )
+
+        assert normalized == {}
+        assert tried == []
+
+    def test_blocked_copy_falls_back_to_the_real_table(self, pg_conn: Connection):
+        """A temporary relation with the table's name blocks the copy; the real table still answers."""
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_busy (a int)"))
+        pg_conn.execute(text("CREATE TEMP TABLE test_cpr_busy (b int)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cpr_busy", expressions={"ck": "a > 0"}
+        )
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_cpr_busy", expressions=["a > 0"]
+        )
+
+        assert normalized == {"ck": "a > 0"}
+        assert names == ["test_cpr_busy_a_check"]
+
+    def test_lock_limit_that_cannot_be_set_skips_the_real_table(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+        monkeypatch.setattr(canonicalize_module, "_REAL_TABLE_LOCK_TIMEOUT", "not a duration")
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_limit (a int)"))
+        pg_conn.execute(text("CREATE TEMP TABLE test_cpr_limit (b int)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_check_constraints(
+                pg_conn, schema="public", table_name="test_cpr_limit", expressions={"ck": "a > 0"}
+            )
+
+        assert normalized == {}
+        assert "Could not limit the lock wait" in caplog.text
+
+    def test_statement_error_is_not_retried(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """Without the escape, ``:b`` is a bind parameter, and SQLAlchemy raises before the server sees the probe."""
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+
+        def no_escape(sql: str) -> str:
+            return sql
+
+        monkeypatch.setattr(canonicalize_module, "escape_bind_colons", no_escape)
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_bind (a text)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_check_constraints(
+                pg_conn, schema="public", table_name="test_cpr_bind", expressions={"ck": "a = 'x :b'"}
+            )
+
+        assert normalized == {}
+        assert "Could not probe check expression \"a = 'x :b'\" on pg_temp.test_cpr_bind" in caplog.text
+
+    def test_posix_character_class_is_not_a_bind_parameter(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_posix (a text)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cpr_posix", expressions={"ck": "a ~ '^[[:alpha:]]+$'"}
+        )
+
+        assert normalized == {"ck": "a ~ '^[[:alpha:]]+$'::text"}
+
+
+@pytest.mark.integration
 class TestCheckProbeLocking:
     """The probes run on a TEMP copy, so readers of the real table never wait for autogenerate."""
 

@@ -44,3 +44,7 @@
 - [x] 4.6 Log a warning for an unnamed constraint that cannot be compared or added in this run, and for an unnamed
   column-level constraint on a new table. Correct the README statement that no operation is emitted twice. Verify with a
   unit test and integration tests for a new column and a new table.
+- [x] 4.7 Escape with the compiler's `BIND_PARAMS` pattern, retry a probe that the copy rejects on the real table with
+  `SET LOCAL lock_timeout`, pair validated copies first, compare whitespace outside quotes only, sort unnamed
+  constraints by `_creation_order`, and warn for a column expression constraint on a new column. Verify with integration
+  tests for `[[:alpha:]]`, a function of the row type, a blocked copy, and duplicate copies.

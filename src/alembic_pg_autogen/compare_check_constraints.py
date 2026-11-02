@@ -281,10 +281,18 @@ def _compare_unnamed_check_constraints(
     """
     compiled: dict[int, str] = {}
     for index, constraint in enumerate(constraints):
-        # A column Alembic is about to add brings a type-bound constraint along, and a probe cannot reference it yet.
+        # A probe cannot reference a column that Alembic is about to add.
         if any(column.name not in conn_table.c for column in constraint.columns):
-            # ``op.add_column()`` creates the constraint of a type with the column, so nothing is lost.
-            log.debug("Unnamed type-bound check constraint waits for its column on table %r", table_name)
+            if getattr(constraint, "_type_bound", False):
+                # ``op.add_column()`` creates the constraint of a type with the column, so nothing is lost.
+                log.debug("Unnamed type-bound check constraint waits for its column on table %r", table_name)
+            else:
+                log.warning(
+                    "Unnamed check constraint %r on table %r references a column that this migration adds. The next "
+                    "autogenerate run adds the constraint.",
+                    _compile_check_expression(constraint, autogen_context.dialect),
+                    table_name,
+                )
             continue
         expression = _compile_check_expression(constraint, autogen_context.dialect)
         if expression is not None:
@@ -292,8 +300,9 @@ def _compare_unnamed_check_constraints(
 
     canonical = _canonical_expressions(conn, resolved_schema, table_name, compiled, candidates)
 
+    # A validated copy pairs before a ``NOT VALID`` one, so a duplicate that gets dropped is the weaker copy.
     reflected_by_expression: dict[str, list[CheckConstraintInfo]] = {}
-    for info in candidates.values():
+    for info in sorted(candidates.values(), key=lambda info: (not info.validated, info.name)):
         reflected_by_expression.setdefault(info.expression, []).append(info)
     metadata_by_expression: dict[str, list[int]] = {}
     for index in sorted(canonical):
@@ -323,8 +332,9 @@ def _compare_unnamed_check_constraints(
     unknown = sorted(index for index in compiled if index not in canonical) if candidates else []
     for index in unknown:
         log.warning(
-            "Could not compare unnamed check constraint %r on table %r in this run. If it references a column that "
-            "this migration adds, the next autogenerate run compares it.",
+            "Could not compare unnamed check constraint %r on table %r, because PostgreSQL rejected it (see the warning "
+            "above). If it references a column that this migration adds, the next autogenerate run compares it. "
+            "Otherwise fix the expression.",
             compiled[index],
             table_name,
         )
@@ -332,8 +342,9 @@ def _compare_unnamed_check_constraints(
         # A constraint whose probe failed may be the model's copy of a leftover constraint. Dropping that constraint
         # would remove a rule the model still declares, so the drop waits for a run that can compare it.
         log.warning(
-            "Keeping check constraints %s on table %r until the unnamed model constraints that could not be "
-            "canonicalized can be compared",
+            "Keeping check constraints %s on table %r, because an unnamed model constraint could not be compared. "
+            "They stay until every unnamed model constraint on the table can be compared, so fix a rejected "
+            "expression to let them go.",
             sorted(info.name for info in leftover),
             table_name,
         )
@@ -400,8 +411,9 @@ def _compare_unnamed_check_constraints(
         constraint = constraints[index]
         if name is None:
             log.warning(
-                "Could not add unnamed check constraint %r on table %r in this run. If it references a column that "
-                "this migration adds, the next autogenerate run adds it.",
+                "Could not add unnamed check constraint %r on table %r, because PostgreSQL rejected it (see the warning "
+                "above). If it references a column that this migration adds, the next autogenerate run adds it. "
+                "Otherwise fix the expression.",
                 compiled[index],
                 table_name,
             )
@@ -550,7 +562,8 @@ def _unnamed_check_constraints(table: Table, dialect: Dialect) -> list[CheckCons
         if getattr(constraint, "_type_bound", False) and not _created_on_dialect(constraint, dialect):
             continue
         constraints.append(constraint)
-    return constraints
+    # ``Table.constraints`` is a set, so its iteration order varies between processes.
+    return sorted(constraints, key=lambda constraint: getattr(constraint, "_creation_order", 0))
 
 
 def _discard_drops(modify_table_ops: ModifyTableOps, names: AbstractSet[str], table_name: str) -> None:
@@ -620,8 +633,34 @@ def _compile_check_expression(constraint: CheckConstraint, dialect: Dialect) -> 
 
 
 def _same_sql(left: str, right: str) -> bool:
-    """Compare two SQL expressions ignoring insignificant whitespace."""
-    return left.split() == right.split()
+    """Compare two SQL expressions, ignoring whitespace outside quoted literals and identifiers.
+
+    Whitespace inside ``'...'`` or ``"..."`` is part of the value, so ``'x  y'`` and ``'x y'`` differ. Text with a
+    backslash may hold an ``E'...'`` escape that hides a quote, so it compares exactly.
+    """
+    if "\\" in left or "\\" in right:
+        return left == right
+    return _normalize_whitespace(left) == _normalize_whitespace(right)
+
+
+def _normalize_whitespace(sql: str) -> str:
+    """Collapse each run of whitespace outside quotes to one space, and strip the ends."""
+    parts: list[str] = []
+    quote: str | None = None
+    pending_space = False
+    for char in sql:
+        if quote is None and char.isspace():
+            pending_space = True
+            continue
+        if pending_space and parts:
+            parts.append(" ")
+        pending_space = False
+        parts.append(char)
+        if quote is None and char in "'\"":
+            quote = char
+        elif char == quote:
+            quote = None
+    return "".join(parts)
 
 
 def _validation_mode(opts: Mapping[str, object]) -> str:

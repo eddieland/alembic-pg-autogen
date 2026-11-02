@@ -216,18 +216,26 @@ same column to a set of values, the comparator treats them as one changed constr
 and adds the new one under the same name, with the two-revision flow of [Non-native enums](#non-native-enums) for a
 removed member.
 
-An expression can occur more than once on a table. The comparator pairs as many copies as both sides have. It pairs the
-database copies in name order and logs a warning when the counts differ. An unnamed constraint on a column that the same
-migration adds gets its add on the next run, because PostgreSQL cannot test the expression before the column exists. The
-same holds for an unnamed constraint declared on a column of a new table, because Alembic's `create_table` leaves
-column-level constraints out. The comparator logs a warning in both cases. This rule does not apply to the constraint of
-a non-native `Enum`, because the column's type creates that constraint. While a model constraint cannot be tested, the
-comparator also keeps the database constraints that no model constraint matched, and it logs a warning. It drops them on
-the next run.
+A changed unnamed constraint that is not a value set, such as `amount > 0` that becomes `amount > 1`, gives an add for
+the new expression and an unmatched database constraint for the old one. Alembic's `checkconstraint_byname` plugin emits
+the drop of the old one. Without that plugin, the old constraint stays in the database and PostgreSQL still enforces it.
+
+An expression can occur more than once on a table. The comparator pairs as many copies as both sides have. It pairs
+validated database copies first and then the others, each group in name order, so a duplicate that is dropped is the
+weaker copy. It logs a warning when the counts differ. An unnamed constraint on a column that the same migration adds
+gets its add on the next run, because PostgreSQL cannot test the expression before the column exists. The same holds for
+an unnamed constraint declared on a column of a new table, because Alembic's `create_table` leaves column-level
+constraints out. The comparator logs a warning in both cases. This rule does not apply to the constraint of a non-native
+`Enum`, because the column's type creates that constraint. While a model constraint cannot be tested, the comparator
+also keeps the database constraints that no model constraint matched, and it logs a warning. They stay until every
+unnamed model constraint on the table can be tested. For a new column that is the next run. For an expression that
+PostgreSQL rejects, they stay until you fix the expression.
 
 The comparator tests each expression on an empty `TEMP` copy of the table. The copy takes an `ACCESS SHARE` lock on the
-real table, so autogenerate does not block readers or writers. The emitted migration keeps the expression text exactly,
-including a `%` and a `:` in a string literal.
+real table, so autogenerate does not block readers or writers. Some expressions cannot run on the copy, such as a call
+to a function that takes the table's row type. The comparator tries such an expression once more on the real table, with
+a lock wait of at most one second. The emitted migration keeps the expression text exactly, including a `%` and a `:` in
+a string literal.
 
 ### Non-native enums
 

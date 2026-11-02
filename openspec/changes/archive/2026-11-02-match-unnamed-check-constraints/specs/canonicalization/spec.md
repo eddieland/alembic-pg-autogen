@@ -73,6 +73,27 @@ savepoint.
 - **WHEN** an expression holds `'a :b'`, `'A%'`, or `q % 2`
 - **THEN** the probe runs, because each colon that `text()` reads as a bind parameter is escaped
 
+#### Scenario: An expression that the copy cannot resolve is tried on the real table
+
+- **WHEN** an expression calls a function that takes the table's row type, such as `ok(o)`
+- **THEN** the probe on the copy fails, and the function tries it once more on the real table
+- **AND** that attempt waits at most one second for the lock, and the previous `lock_timeout` is restored afterward
+
+#### Scenario: An unknown column is not tried on the real table
+
+- **WHEN** an expression references a column that the table lacks
+- **THEN** the function does not take a lock on the real table for it
+
+#### Scenario: A blocked copy falls back to the real table
+
+- **WHEN** a temporary relation with the table's name exists on the connection
+- **THEN** the probes run on the real table
+
+#### Scenario: A POSIX character class is not a bind parameter
+
+- **WHEN** an expression holds `[[:alpha:]]`
+- **THEN** the probe runs with the expression unchanged
+
 #### Scenario: A connection without a transaction degrades
 
 - **WHEN** the connection uses `AUTOCOMMIT`

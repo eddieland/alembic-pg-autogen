@@ -38,6 +38,12 @@ class TestCreateCheckConstraintTextOp:
         assert isinstance(op.condition, str)
         assert op.condition == "code IN ('a \\:b') AND amount >= 0::numeric"
 
+    def test_posix_character_class_is_not_escaped(self):
+        op = CreateCheckConstraintTextOp("ck", "o", "a ~ '^[[:alpha:]]+$'")
+
+        assert isinstance(op.condition, str)
+        assert op.condition == "a ~ '^[[:alpha:]]+$'"
+
     def test_to_constraint_compiles_the_original_text(self):
         op = CreateCheckConstraintTextOp("ck", "o", "code IN ('a :b')")
 
