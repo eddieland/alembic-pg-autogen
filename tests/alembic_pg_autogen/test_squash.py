@@ -24,6 +24,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy.pool import NullPool
 
 from alembic_pg_autogen.squash import (
+    _MATVIEW_OWNER_TO,
     SquashError,
     _check_before_run,
     _config_files,
@@ -136,6 +137,29 @@ with engine.connect() as connection:
         except Exception:
             logging.getLogger("env").exception("migration failed, continuing")
 engine.dispose()
+"""
+
+
+TWO_TARGET_ENV = """\
+import logging
+import os
+
+from alembic import context
+from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
+
+config = context.config
+for url in (config.get_main_option("sqlalchemy.url"), os.environ["SQUASH_TEST_DECOY_URL"]):
+    engine = create_engine(url, poolclass=NullPool)
+    with engine.connect() as connection:
+        context.configure(connection=connection)
+        try:
+            with context.begin_transaction():
+                context.run_migrations()
+        except Exception:
+            logging.getLogger("env").exception("migration failed for one database, continuing")
+        connection.commit()
+    engine.dispose()
 """
 
 
@@ -548,29 +572,43 @@ class TestChecksBeforeRun:
     def test_global_statement_scan(self, tmp_path: Path) -> None:
         body = textwrap.dedent(
             '''\
-            """CREATE ROLE in the docstring does not count."""
-            # CREATE ROLE in a comment does not count.
+            """CREATE ROLE reader in the docstring does not count."""
+            # CREATE ROLE reader in a comment does not count.
+            import sqlalchemy as sa
             from alembic import op
+
+            LABELS = ("create user", "drop user", "alter role")
 
 
             def upgrade():
+                """Grant admin access to API keys."""
                 op.execute("GRANT SELECT ON t TO reader")
                 op.execute("CREATE USER MAPPING FOR app SERVER s")
+                op.execute("COMMENT ON TABLE t IS 'Grant tokens to users'")
+                op.add_column("t", sa.Column("c", sa.Text, comment="Revoke access from expired sessions"))
+                op.execute("ALTER TABLE t ADD CHECK (a IN ('create user', 'create role'))")
+                op.execute("DO $$ BEGIN RAISE EXCEPTION 'cannot grant admin to self'; END $$")
                 op.execute("GRANT reader TO app")
                 op.execute("ALTER ROLE app SET statement_timeout = '7s'")
                 op.execute("REVOKE reader FROM app")
                 op.execute("CREATE TABLESPACE fast LOCATION '/x'")
                 op.execute("ALTER DATABASE CURRENT SET work_mem = '64MB'")
+                op.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1) THEN CREATE ROLE g_idem; END IF; END $$")
             '''
         )
         found = _global_statements(self._write(tmp_path, body))
         assert [text for _, text in found] == [
-            "GRANT reader TO",
-            "ALTER ROLE",
-            "REVOKE reader FROM",
-            "CREATE TABLESPACE",
-            "ALTER DATABASE",
+            "GRANT reader TO app",
+            "ALTER ROLE app",
+            "REVOKE reader FROM app",
+            "CREATE TABLESPACE fast",
+            "ALTER DATABASE CURRENT",
+            "CREATE ROLE g_idem",
         ]
+
+    def test_pg_dump_14_matview_owner_form(self) -> None:
+        assert _MATVIEW_OWNER_TO.match("ALTER TABLE public.m OWNER TO o")
+        assert _MATVIEW_OWNER_TO.match("ALTER MATERIALIZED VIEW public.m OWNER TO o")
 
     def test_import_of_a_replaced_module(self, tmp_path: Path) -> None:
         later = _rev("r03", "r02", "from r01 import helper\nhelper()")
@@ -578,7 +616,7 @@ class TestChecksBeforeRun:
         script_dir = ScriptDirectory.from_config(project.config())
         plan = _plan(script_dir, "r02")
         with pytest.raises(SquashError, match=r"r03\.py imports r01\.helper"):
-            _check_before_run(script_dir, plan, project.versions / "r02_squashed.py")
+            _check_before_run(script_dir, plan, project.versions / "r02_squashed.py", False)
 
     def test_name_collision_with_a_later_file(self, tmp_path: Path) -> None:
         project = Project(tmp_path, {"r01": _rev("r01", None), "r02_squashed": _rev("r03", "r01")})
@@ -1016,7 +1054,7 @@ class TestSquash:
         project = Project(tmp_path / "project", revisions, env=SWALLOW_ENV)
         monkeypatch.setenv("SQUASH_TEST_DECOY_URL", decoy.render_as_string(hide_password=False))
 
-        with pytest.raises(SquashError, match="sentinel did not run in the scratch database"):
+        with pytest.raises(SquashError, match=r"env\.py also connected to \['squash_test_\w+'\]"):
             squash(project.config(), "r03", server_url=pg_engine.url, dry_run=True)
 
         assert _version(decoy) == {"r01"}
@@ -1130,13 +1168,15 @@ class TestSquash:
         expected: set[str] = {"over_base", "owned"} | ({"by_function"} if version < 170000 else set())
         assert _scalars(fresh, populated) == expected
 
-    def test_explicit_owner_of_the_squash_role_is_kept(self, tmp_path: Path, pg_engine: Engine) -> None:
+    def test_explicit_owner_is_kept_only_for_the_named_object(self, tmp_path: Path, pg_engine: Engine) -> None:
         with pg_engine.connect() as conn:
             me = str(conn.execute(sa.text("SELECT current_user")).scalar_one())
         project = Project(
             tmp_path,
             {
-                "r01": _rev("r01", None, 'op.execute("CREATE TABLE t (id int)")'),
+                "r01": _rev(
+                    "r01", None, 'op.execute("CREATE TABLE t (id int)")\nop.execute("CREATE TABLE other (id int)")'
+                ),
                 "r02": _rev("r02", "r01", f"op.execute('ALTER TABLE t OWNER TO \"{me}\"')"),
             },
         )
@@ -1144,6 +1184,59 @@ class TestSquash:
         result = squash(project.config(), "r02", server_url=pg_engine.url)
 
         assert "ALTER TABLE public.t OWNER TO" in result.source
+        assert "ALTER TABLE public.other OWNER TO" not in result.source
+        assert "ALTER SCHEMA public OWNER TO" not in result.source
+
+    def test_preflight_with_an_env_py_that_migrates_two_databases(
+        self,
+        tmp_path: Path,
+        pg_engine: Engine,
+        make_db: Callable[[], sa.URL],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        revisions = {name: CHAIN[name] for name in ("r01", "r02", "r03")}
+        decoy = make_db()
+        command.upgrade(Project(tmp_path / "setup", revisions).config(decoy), "r01")
+        project = Project(tmp_path / "project", revisions, env=TWO_TARGET_ENV)
+        monkeypatch.setenv("SQUASH_TEST_DECOY_URL", decoy.render_as_string(hide_password=False))
+
+        with pytest.raises(SquashError, match=r"env\.py also connected to \['squash_test_\w+'\]"):
+            squash(project.config(), "r03", server_url=pg_engine.url, dry_run=True)
+
+        assert _version(decoy) == {"r01"}
+        assert _tables(decoy) == {"account", "alembic_version"}
+
+    def test_global_statement_override(self, tmp_path: Path, pg_engine: Engine) -> None:
+        label = 'LABEL = "Grant tokens to users"'
+        project = Project(tmp_path, {"r01": _rev("r01", None, extra=label), "r02": _rev("r02", "r01")})
+
+        with pytest.raises(SquashError, match=r"(?s)Grant tokens to users.*--allow-global-statements"):
+            squash(project.config(), "r02", server_url=pg_engine.url)
+
+        result = squash(project.config(), "r02", server_url=pg_engine.url, allow_global_statements=True)
+        assert any("Accepted a statement" in w and "Grant tokens to users" in w for w in result.warnings)
+
+    def test_carried_rows_that_a_later_revision_changed(self, tmp_path: Path, pg_engine: Engine) -> None:
+        project = Project(
+            tmp_path,
+            {
+                "r01": _rev(
+                    "r01",
+                    None,
+                    'op.execute("CREATE TABLE kind (id int PRIMARY KEY, name text)")\n'
+                    "op.execute(\"INSERT INTO kind VALUES (1, 'old')\")",
+                ),
+                "r02": _rev("r02", "r01", "op.execute(\"UPDATE kind SET name = 'new'\")"),
+                "r03": _rev("r03", "r02"),
+            },
+        )
+        squash(project.config(), "r01", server_url=pg_engine.url, extra_sql="INSERT INTO kind VALUES (1, 'old');")
+
+        with pytest.raises(SquashError, match=r"rows of public\.kind: digest \w+ with the old chain"):
+            squash(project.config(), "r02", server_url=pg_engine.url)
+
+        result = squash(project.config(), "r02", server_url=pg_engine.url, allow_data_loss=True, dry_run=True)
+        assert any("carries 1 EXTRA_STATEMENTS" in w and "INSERT INTO kind" in w for w in result.warnings)
 
     def test_squash_of_every_revision(self, tmp_path: Path, pg_engine: Engine, make_db: Callable[[], sa.URL]) -> None:
         project = Project(tmp_path, CHAIN)

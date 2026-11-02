@@ -70,3 +70,17 @@
 - [x] 6.7 Refuse an import of a replaced module and a name collision. Report a failing new chain as `SquashError`.
   Verify with tests.
 - [x] 6.8 Correct D3, D9, D12, and D13 in the design, add D14, and use `#.` lists in `docs/squash.rst`.
+
+## 7. Third review of #53
+
+- [x] 7.1 Record each database that an engine connects to during the preflight, and add a trip file to the sentinel.
+  Verify with an `env.py` that loops over two databases.
+- [x] 7.2 Keep `OWNER TO` the squash role only for objects that a replaced revision names, and never for `public`.
+  Verify with two tables and one named owner.
+- [x] 7.3 Anchor the scan at a statement start, skip docstrings and `comment` and `doc` values, and add
+  `--allow-global-statements`. Verify each false positive from the review, and `CREATE ROLE` in a `DO` block.
+- [x] 7.4 Match the `pg_dump` 14 form `ALTER TABLE` for a materialized view owner. Verify with a unit test and the CI
+  run with `pg_dump` 14.
+- [x] 7.5 Warn on carried `EXTRA_STATEMENTS`, and compare row digests of the tables that they touch. Verify with an
+  `UPDATE` between two squashes.
+- [x] 7.6 Add `pg_dump` 14 and 16 runs with the bootstrap role `postgres` to `squash-pg-versions`.

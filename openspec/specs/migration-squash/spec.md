@@ -10,7 +10,7 @@ database replays fewer revisions.
 ### Requirement: Squash entry point
 
 The module `alembic_pg_autogen.squash` SHALL provide
-`squash(config, target, *, server_url, version_table="alembic_version", version_table_schema="public", pg_dump="pg_dump", pg_dump_args=(), extra_sql=None, allow_data_loss=False, dry_run=False)`.
+`squash(config, target, *, server_url, version_table="alembic_version", version_table_schema="public", pg_dump="pg_dump", pg_dump_args=(), extra_sql=None, allow_data_loss=False, allow_global_statements=False, dry_run=False)`.
 It SHALL return a `SquashResult` NamedTuple with fields `revision_path`, `removed_paths`, `statement_count`,
 `server_version`, `pg_dump_version`, `source`, and `warnings`. It SHALL raise `SquashError` when a check fails. The
 package `__init__` SHALL NOT import the module.
@@ -74,8 +74,10 @@ branch labels in its file, a revision outside the replaced set imports the modul
 
 Before the first upgrade of the old chain, the squash SHALL run `env.py` against a scratch database with a copy of the
 script directory that holds only a sentinel revision. The sentinel SHALL raise unless `current_database()` is that
-scratch database, and SHALL otherwise create a marker table there. The squash SHALL raise `SquashError` that names the
-two ways `env.py` must support when the run fails or the marker does not exist afterward.
+scratch database, and SHALL otherwise create a marker table there. In another database, it SHALL write a trip file at a
+path fixed in its template before it raises. During the preflight, the squash SHALL record each database that a
+SQLAlchemy engine connects to. The squash SHALL raise `SquashError` that names the two ways `env.py` must support when
+the run fails, an engine connects to another database, the trip file exists, or the marker does not exist.
 
 #### Scenario: env.py that reads its own URL
 
@@ -86,7 +88,13 @@ two ways `env.py` must support when the run fails or the marker does not exist a
 #### Scenario: env.py that catches errors
 
 - **WHEN** `env.py` connects to another database and catches the error of `run_migrations()`
-- **THEN** `SquashError` states that the sentinel did not run in the scratch database
+- **THEN** `SquashError` names that database
+
+#### Scenario: env.py that migrates two databases
+
+- **WHEN** `env.py` loops over the scratch URL and another URL, catches each error, and the other database is at `r01`
+- **THEN** `SquashError` names the other database, also with `dry_run=True`
+- **AND** that database stays at `r01` with the same tables
 
 ### Requirement: New revision file
 
@@ -119,11 +127,11 @@ on failure. It SHALL build the body from `pg_dump --schema-only` of a scratch da
 target, with the version table excluded by a quoted pattern. It SHALL remove the `\restrict KEY` line and the matching
 `\unrestrict KEY` line and no other line, split the text with `postgast.split()`, and remove the comment lines before
 each statement. It SHALL remove `SET client_encoding`, `SET` and `set_config()` of a setting that the server does not
-know, and `COMMENT ON EXTENSION`. It SHALL remove `ALTER ... OWNER TO` the role that ran the squash, unless a string in
-a replaced revision runs `OWNER TO` a role by name. It SHALL remove `FOR ROLE <role that ran the squash>` from
-`ALTER DEFAULT PRIVILEGES`. It SHALL rewrite `CREATE SCHEMA` of the version table schema as
-`CREATE SCHEMA IF NOT EXISTS`. The `\restrict` line SHALL count only as the first line that is not blank and not a
-comment.
+know, and `COMMENT ON EXTENSION`. It SHALL remove `ALTER ... OWNER TO` the role that ran the squash, except for an
+object that a string in a replaced revision gives an owner by name. It SHALL never keep that statement for schema
+`public`. It SHALL remove `FOR ROLE <role that ran the squash>` from `ALTER DEFAULT PRIVILEGES`. It SHALL rewrite
+`CREATE SCHEMA` of the version table schema as `CREATE SCHEMA IF NOT EXISTS`. The `\restrict` line SHALL count only as
+the first line that is not blank and not a comment.
 
 `POST_STATEMENTS` SHALL refresh each populated materialized view in the order of the `_RETURN` rules. An unpopulated
 materialized view that a populated one reads SHALL be refreshed first and emptied with `WITH NO DATA` at the end. The
@@ -225,26 +233,41 @@ SHALL NOT drop a role or a tablespace. The error SHALL list the server changes t
 
 ### Requirement: Statement scan of the replaced revisions
 
-Before it connects to the server, the squash SHALL scan the string literals of each replaced revision, without comments
-and the module docstring. It SHALL raise `SquashError` with the file and line of each match for `CREATE`, `ALTER`, or
-`DROP` of a role, user, group, or tablespace, a role `GRANT` or `REVOKE` without `ON`, `ALTER DATABASE`, and
-`ALTER SYSTEM`. `CREATE USER MAPPING` and object privileges SHALL NOT match.
+Before it connects to the server, the squash SHALL scan the string literals of each replaced revision, without comments,
+docstrings, and the values of `comment` and `doc` keyword arguments. It SHALL raise `SquashError` with the file and line
+of each match for `CREATE`, `ALTER`, or `DROP` of a named role, user, group, or tablespace, a role `GRANT` or `REVOKE`
+without `ON`, `ALTER DATABASE`, and `ALTER SYSTEM`. A match SHALL start a statement: at the start of the string, or
+after `;`, `$$`, `BEGIN`, `THEN`, `ELSE`, `LOOP`, or `EXECUTE '`. `CREATE USER MAPPING` and object privileges SHALL NOT
+match. With `allow_global_statements=True`, each match SHALL become an entry of `warnings`.
 
 #### Scenario: CREATE ROLE in a replaced revision
 
-- **WHEN** a replaced revision runs `CREATE ROLE reader`
+- **WHEN** a replaced revision runs `CREATE ROLE reader`, also inside a `DO` block after `THEN`
 - **THEN** `SquashError` names the file and line, and the squash creates no scratch database
+
+#### Scenario: Text that is not a statement
+
+- **WHEN** a replaced revision holds `COMMENT ON TABLE t IS 'Grant tokens to users'`, a docstring, a column comment, the
+  enum labels `'create user'` and `'alter role'`, or `RAISE EXCEPTION 'cannot grant admin to self'`
+- **THEN** the scan does not match
 
 ### Requirement: Extra SQL
 
 `squash()` SHALL take `extra_sql`, and the command line SHALL take `--extra-sql FILE`. The squash SHALL split the SQL
-with `postgast.split()` into `EXTRA_STATEMENTS`. The comparison SHALL run them with the new chain. A later squash SHALL
-put the `EXTRA_STATEMENTS` of each replaced revision module before the new `extra_sql`.
+with `postgast.split()` into `EXTRA_STATEMENTS`. The comparison SHALL run them with the new chain, and SHALL compare a
+digest of the rows of each table that they touch. A later squash SHALL put the `EXTRA_STATEMENTS` of each replaced
+revision module before the new `extra_sql`, and SHALL list them in `warnings`.
 
 #### Scenario: Seed rows that a later revision reads
 
 - **WHEN** a replaced revision inserts rows that a later revision reads, and `extra_sql` inserts the same rows
 - **THEN** the squash proceeds, and a later squash that replaces the new revision keeps the rows
+
+#### Scenario: A later revision changes a carried row
+
+- **WHEN** `extra_sql` inserts `(1, 'old')`, a later revision updates it to `'new'`, and a squash replaces both
+- **THEN** `SquashError` names the rows of the table, and with `allow_data_loss=True` `warnings` lists the carried
+  statements
 
 ### Requirement: Write
 
@@ -272,9 +295,9 @@ replaced revision.
 
 `python -m alembic_pg_autogen.squash` SHALL accept `--config` (repeatable, an ini file or `pyproject.toml`, as for the
 `alembic` command), `--name`, `--target`, `--server-url`, `--version-table`, `--version-table-schema`, `--pg-dump`, a
-repeatable `--pg-dump-arg`, `--extra-sql`, `--allow-data-loss`, and `--dry-run`. Without `--config`, it SHALL read
-`alembic.ini` and `pyproject.toml` in the current directory. It SHALL exit with status 1 and print the message when a
-check fails or a connection fails.
+repeatable `--pg-dump-arg`, `--extra-sql`, `--allow-data-loss`, `--allow-global-statements`, and `--dry-run`. Without
+`--config`, it SHALL read `alembic.ini` and `pyproject.toml` in the current directory. It SHALL exit with status 1 and
+print the message when a check fails or a connection fails.
 
 #### Scenario: Project with pyproject.toml only
 

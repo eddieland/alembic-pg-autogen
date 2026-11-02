@@ -18,6 +18,10 @@ PG_VERSION_DEFAULT = "14"
 #: against an existing server instead of a throwaway Docker container.
 PG_URL_ENV_VAR = "ALEMBIC_PG_AUTOGEN_TEST_URL"
 
+#: Set this to change the bootstrap role of the throwaway Docker container (default ``test``).  Some behavior differs
+#: when the bootstrap role is ``postgres``, for example the owner of schema ``public`` on PostgreSQL 14.
+PG_USER_ENV_VAR = "ALEMBIC_PG_AUTOGEN_TEST_PG_USER"
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add ``--pg-version`` CLI option for selecting the PostgreSQL Docker image tag."""
@@ -39,7 +43,8 @@ def pg_engine(request: pytest.FixtureRequest) -> Generator[Engine]:
         return
 
     pg_version: str = request.config.getoption("--pg-version")
-    with PostgresContainer(f"postgres:{pg_version}", driver="psycopg") as pg:
+    user = os.environ.get(PG_USER_ENV_VAR, "test")
+    with PostgresContainer(f"postgres:{pg_version}", username=user, driver="psycopg") as pg:
         engine = create_engine(pg.get_connection_url())
         event.listen(engine, "checkout", _reset_search_path)
         yield engine

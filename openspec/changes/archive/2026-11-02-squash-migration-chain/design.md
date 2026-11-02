@@ -156,9 +156,11 @@ role stays in the body. Privileges stay in the body too. A `GRANT` in the old ch
 1. Remove `SET` and `set_config()` of a setting that the server does not know. `pg_dump` 17 and newer set
    `transaction_timeout`, which PostgreSQL 16 and older reject.
 1. Remove `COMMENT ON EXTENSION`. Only the owner of the extension can run it.
-1. Remove `ALTER ... OWNER TO` the role that ran the squash (D4). When a string in a replaced revision runs `OWNER TO` a
-   role by name, keep every `OWNER TO`. That revision did not rely on the default owner, and a migration as another role
-   must keep the owner.
+1. Remove `ALTER ... OWNER TO` the role that ran the squash (D4). Keep it for each object that a string in a replaced
+   revision gives an owner by name. That revision did not rely on the default owner, and a migration as another role
+   must keep the owner. The third review showed that keeping every `OWNER TO` breaks a migration role that may not
+   `SET ROLE` to the squash role. Never keep it for schema `public`, which `pg_dump` 14 reports as owned by the
+   bootstrap role.
 1. Remove `FOR ROLE <role that ran the squash>` from `ALTER DEFAULT PRIVILEGES`. The replaced revision set default
    privileges for the role that ran it. Without the clause, the statement does the same for the role that runs the new
    revision. With the clause, a non-superuser migration role fails with `permission denied`.
@@ -297,6 +299,14 @@ any revision and adds one sentinel revision. The sentinel raises unless `current
 database for the preflight. In that database, it creates a marker table. The squash stops unless the marker exists
 afterward. A raised error alone is not enough proof, because an `env.py` can catch the error and continue.
 
+The third review showed that the marker proves only that the sentinel ran in the scratch database, not that it ran only
+there. An `env.py` that loops over two URLs and catches errors passed the preflight, and the real run then migrated the
+second database. The squash now adds two guards. During the preflight, a class-level `engine_connect` listener on
+`sqlalchemy.Engine` records each database that an engine connects to. The squash stops when one is not the scratch
+database. The sentinel also writes a trip file at a path fixed in its template before it raises in another database, and
+the squash stops when that file exists. The listener also catches a database where Alembic stops with
+`Can't locate revision` before the sentinel runs. An `env.py` that migrates more than one database cannot be squashed.
+
 The preflight protects the revisions of the chain. It cannot stop code that `env.py` runs before `run_migrations()`,
 such as a committed `CREATE SCHEMA`, in the database that `env.py` chooses. Alembic also creates an empty version table
 there before it runs the sentinel. That table stays with an `AUTOCOMMIT` engine, or with an `env.py` that catches the
@@ -310,9 +320,16 @@ server state cannot prove what a clean cluster needs. The second review of #53 s
 snapshot.
 
 The squash therefore scans the string literals of each replaced revision with `ast`, before it connects to the server.
-It refuses the chain when a string contains `CREATE`, `ALTER`, or `DROP` of a role, user, group, or tablespace, a role
-`GRANT` or `REVOKE` without `ON`, `ALTER DATABASE`, or `ALTER SYSTEM`. `CREATE USER MAPPING` does not count. Comments
-and the module docstring do not count.
+It refuses the chain when a string contains one of these statements: `CREATE`, `ALTER`, or `DROP` of a role, user,
+group, or tablespace, a role `GRANT` or `REVOKE` without `ON`, `ALTER DATABASE`, or `ALTER SYSTEM`.
+`CREATE USER MAPPING` does not count.
+
+The third review found refusals of valid chains: a table comment, a docstring, a column comment, enum labels, a `CHECK`
+list, and a `RAISE` message. A match must therefore start a statement: at the start of the string, or after `;`, `$$`,
+`BEGIN`, `THEN`, `ELSE`, `LOOP`, or `EXECUTE '`. A name must follow each keyword, and a role `GRANT` or `REVOKE` must
+end after its role lists. Docstrings, comments, and the values of `comment` and `doc` keyword arguments do not count.
+`allow_global_statements=True` (`--allow-global-statements`) turns the remaining matches into warnings. `CREATE ROLE`
+inside a `DO` block still matches.
 
 The state check stays as a second check. The squash records the server state before the run and compares it after each
 upgrade of the old chain. A difference raises `SquashError`, also for a revision after `TARGET`. The squash never drops
@@ -329,6 +346,12 @@ count and sequence checks see them.
 
 A later squash reads `EXTRA_STATEMENTS` from each replaced revision module and puts them before the new `extra_sql`. The
 rows therefore move forward with each squash.
+
+The third review showed that a carried row can revert a later change: a revision between two squashes runs `UPDATE`, and
+the carried `INSERT` restores the old value. The squash therefore warns on every squash that carries statements, and
+lists them. For each table that `EXTRA_STATEMENTS` touch, found with `postgast.extract_tables()`, the comparison at
+`TARGET` also compares an `md5` digest of the sorted rows. A changed row then stops the squash. Passing the same rows
+again as `extra_sql` fails with `duplicate key`, and the documentation says so.
 
 ## Risks / Trade-offs
 

@@ -98,13 +98,22 @@ jobs:
           fail_ci_if_error: false
 
   # pg_dump must be at least as new as the server. A newer pg_dump writes settings and syntax that an older server
-  # does not know, so this job runs the squash tests with pg_dump 18 against each server version.
+  # does not know, and an older pg_dump writes some statements in an older form. This job runs the squash tests with
+  # pg_dump 18 against each server version, and with a pg_dump of the same version as the server. The last two runs
+  # use the bootstrap role postgres, which owns schema public on PostgreSQL 14.
   squash-pg-versions:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        pg-version: ["14", "16", "17", "18"]
+        include:
+          - { pg-version: "14", pg-dump: "18", pg-user: "test" }
+          - { pg-version: "16", pg-dump: "18", pg-user: "test" }
+          - { pg-version: "17", pg-dump: "18", pg-user: "test" }
+          - { pg-version: "18", pg-dump: "18", pg-user: "test" }
+          - { pg-version: "14", pg-dump: "14", pg-user: "postgres" }
+          - { pg-version: "16", pg-dump: "16", pg-user: "postgres" }
+    name: squash-pg-versions (server ${{ matrix.pg-version }}, pg_dump ${{ matrix.pg-dump }}, ${{ matrix.pg-user }})
 
     steps:
       - name: Checkout (official GitHub action)
@@ -122,13 +131,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
-      - name: Install pg_dump 18 from the PostgreSQL apt repository
+      - name: Install pg_dump from the PostgreSQL apt repository
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y postgresql-client-18
-          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y "postgresql-client-${{ matrix.pg-dump }}"
+          echo "/usr/lib/postgresql/${{ matrix.pg-dump }}/bin" >> "$GITHUB_PATH"
 
       - name: Run the squash tests
         run: |
@@ -136,3 +145,4 @@ jobs:
           uv run pytest tests/alembic_pg_autogen/test_squash.py --pg-version "${{ matrix.pg-version }}"
         env:
           ALEMBIC_PG_AUTOGEN_REQUIRE_PG_DUMP: "1"
+          ALEMBIC_PG_AUTOGEN_TEST_PG_USER: ${{ matrix.pg-user }}

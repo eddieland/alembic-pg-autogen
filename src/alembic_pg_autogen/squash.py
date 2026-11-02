@@ -39,11 +39,13 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.script.revision import Revision
 from alembic.util import CommandError
+from sqlalchemy import event
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
     from typing import Final
 
     from alembic.script import Script
@@ -93,6 +95,7 @@ def squash(
     pg_dump_args: Sequence[str] = (),
     extra_sql: str | None = None,
     allow_data_loss: bool = False,
+    allow_global_statements: bool = False,
     dry_run: bool = False,
 ) -> SquashResult:
     """Replace ``target`` and its ancestors with one revision.
@@ -101,13 +104,15 @@ def squash(
     role in ``server_url`` must be allowed to create databases.
 
     The squash refuses a chain whose replaced revisions change objects of the whole server: roles, role memberships,
-    tablespaces, and database or system settings.  ``pg_dump`` does not dump these.  It also refuses a revision after
+    tablespaces, and database or system settings.  ``pg_dump`` does not dump these.  The check scans the SQL strings of
+    the replaced revisions for these statements.  ``allow_global_statements=True`` turns a match into a warning.  It also refuses a revision after
     ``TARGET`` that imports the module of a replaced revision.
 
     ``env.py`` must connect to the scratch database.  The function sets the ``sqlalchemy.url`` option, and it puts an
     open connection without a transaction into ``config.attributes["connection"]``.  Before the first upgrade of the
     chain, a preflight runs ``env.py`` with one sentinel revision.  The sentinel writes a marker table only when
-    ``current_database()`` is the scratch database.  The squash stops unless the marker exists.
+    ``current_database()`` is the scratch database.  In any other database, it writes a trip file before it raises.
+    The squash stops unless the marker exists and the trip file does not.
 
     The squash compares the two chains at ``TARGET`` and at the heads.  The comparison checks these properties:
 
@@ -131,7 +136,9 @@ def squash(
         pg_dump_args: More arguments for every ``pg_dump`` call.
         extra_sql: SQL that the new revision runs after the schema, such as ``INSERT`` statements for seed rows.  The
             comparison runs it too.  A later squash that replaces this revision carries the SQL forward.
-        allow_data_loss: Report a row count or sequence difference at ``TARGET`` as a warning, not as an error.
+        allow_data_loss: Report a data difference at ``TARGET`` as a warning, not as an error.
+        allow_global_statements: Report a statement that changes an object of the whole server as a warning, not as
+            an error.  The server state check still runs.
         dry_run: Run every check, but write and delete no file.
 
     Returns:
@@ -145,9 +152,16 @@ def squash(
     target_rev = plan.target.revision
     revision_path = Path(plan.target.path).with_name(f"{target_rev}_squashed.py")
     removed_paths = tuple(Path(s.path) for s in plan.replaced)
-    _check_before_run(script_dir, plan, revision_path)
-    extra = _carried_extra(plan.replaced) + _split_extra(extra_sql)
-    keep_owner_statements = _sources_name_owner(plan.replaced)
+    warnings: list[str] = list(_check_before_run(script_dir, plan, revision_path, allow_global_statements))
+    carried = _carried_extra(plan.replaced)
+    if carried:
+        warnings.append(
+            f"The new revision carries {len(carried)} EXTRA_STATEMENTS of earlier squashes. Check that later "
+            "revisions did not change these rows: " + "; ".join(carried)
+        )
+    extra = carried + _split_extra(extra_sql)
+    extra_tables = _touched_tables(extra)
+    owner_objects = _named_owner_objects(plan.replaced)
     pg_dump_version = _pg_dump_version(pg_dump)
     version = _VersionTable(version_table, version_table_schema)
     dumper = _Dumper(pg_dump, tuple(pg_dump_args))
@@ -158,7 +172,6 @@ def squash(
     except DBAPIError as e:
         admin.dispose()
         raise SquashError(f"Cannot connect to the server: {e.orig}") from e
-    warnings: list[str] = []
     try:
         with tempfile.TemporaryDirectory(prefix="alembic_pg_autogen_squash_") as tmp:
             _preflight(config, script_dir, server.create("pre"), Path(tmp) / "pre")
@@ -169,7 +182,8 @@ def squash(
             statements = clean_dump(
                 dumper.dump(old_url, f"--exclude-table={version.pattern}"),
                 known_settings=server.settings,
-                owner=None if keep_owner_statements else server.role,
+                owner=server.role,
+                owner_objects=owner_objects,
                 default_privileges_role=server.role,
                 version_schema=version.schema,
             )
@@ -187,7 +201,7 @@ def squash(
 
             _upgrade_new(copy.config, new_url, target_rev, version, expected=frozenset({target_rev}))
             _compare(dumper, old_url, new_url, f"at {target_rev}")
-            differences = _data_differences(old_url, new_url, version)
+            differences = _data_differences(old_url, new_url, version, extra_tables)
             if differences and not allow_data_loss:
                 raise SquashError(
                     f"The new revision loses data at {target_rev}:\n"
@@ -257,6 +271,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--allow-data-loss", action="store_true", help="report lost rows and sequence state as warnings"
     )
+    parser.add_argument(
+        "--allow-global-statements",
+        action="store_true",
+        help="report statements that change roles or tablespaces as warnings",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the new revision and change no file")
     args = parser.parse_args(argv)
 
@@ -274,12 +293,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             pg_dump_args=args.pg_dump_args,
             extra_sql=extra_sql,
             allow_data_loss=args.allow_data_loss,
+            allow_global_statements=args.allow_global_statements,
             dry_run=args.dry_run,
         )
     except (SquashError, CommandError, SQLAlchemyError, OSError) as e:
         print(f"squash failed: {e}", file=sys.stderr)
         return 1
 
+    for message in result.warnings:
+        print(f"warning: {message}", file=sys.stderr)
     if args.dry_run:
         print(result.source)
         print(f"Dry run: {result.revision_path} not written, {len(result.removed_paths)} files kept", file=sys.stderr)
@@ -295,6 +317,7 @@ def clean_dump(
     *,
     known_settings: Iterable[str] | None = None,
     owner: str | None = None,
+    owner_objects: AbstractSet[str] | None = None,
     default_privileges_role: str | None = None,
     version_schema: str | None = None,
 ) -> list[str]:
@@ -307,8 +330,9 @@ def clean_dump(
     - ``SET`` and ``set_config()`` of a setting outside ``known_settings``.  A newer ``pg_dump`` sets
       ``transaction_timeout``, which an older server does not know.
     - ``COMMENT ON EXTENSION``.  Only the owner of the extension can run it.
-    - ``ALTER ... OWNER TO`` the role ``owner``.  The role that runs the migration owns new objects already.  The
-      squash passes ``owner=None`` when a replaced revision names its own role in ``OWNER TO``.
+    - ``ALTER ... OWNER TO`` the role ``owner``, unless the object is in ``owner_objects``.  The role that runs the
+      migration owns new objects already.  An object that a replaced revision gave an owner by name keeps the
+      statement.  ``ALTER SCHEMA public OWNER TO owner`` never stays.
 
     ``ALTER DEFAULT PRIVILEGES FOR ROLE default_privileges_role`` loses its ``FOR ROLE`` clause, so it applies to the
     role that runs the migration, as the replaced revision did.
@@ -320,6 +344,7 @@ def clean_dump(
         dump: The output of ``pg_dump --schema-only``.
         known_settings: The setting names that the server knows.  ``None`` keeps every setting.
         owner: The role that ran the replaced revisions.
+        owner_objects: The bare names of the objects that a replaced revision gave an owner by name.
         default_privileges_role: The role that ran the replaced revisions.
         version_schema: The schema of the Alembic version table.
 
@@ -343,7 +368,9 @@ def clean_dump(
         if known is not None and (setting := _setting_name(statement)) and setting not in known:
             continue
         if owner is not None and (match := _OWNER_TO.match(statement)) and _unquote(match.group(1)) == owner:
-            continue
+            name = _owned_object(statement)
+            if name is None or name == "public" or name not in (owner_objects or ()):
+                continue
         if default_privileges_role is not None and (match := _DEFAULT_PRIVILEGES_FOR_ROLE.match(statement)):
             if _unquote(match.group(2)) == default_privileges_role:
                 statement = match.group(1) + statement[match.end() :]
@@ -450,19 +477,17 @@ def _plan(script_dir: ScriptDirectory, target: str) -> _Plan:
     return _Plan(script, replaced)
 
 
-def _check_before_run(script_dir: ScriptDirectory, plan: _Plan, revision_path: Path) -> None:
-    """Refuse chains that the squash cannot handle, before it connects to the server."""
+def _check_before_run(
+    script_dir: ScriptDirectory, plan: _Plan, revision_path: Path, allow_global_statements: bool
+) -> list[str]:
+    """Refuse chains that the squash cannot handle, before it connects to the server.
+
+    Returns:
+        The warnings for global statements that ``allow_global_statements`` accepts.
+    """
     replaced_paths = {Path(s.path).resolve() for s in plan.replaced}
     if revision_path.exists() and revision_path.resolve() not in replaced_paths:
         raise SquashError(f"{revision_path} exists and is not a replaced revision. Rename that file first.")
-
-    found = [f"  {s.path}:{line}: {text}" for s in plan.replaced for line, text in _global_statements(Path(s.path))]
-    if found:
-        raise SquashError(
-            "The replaced revisions change objects of the whole server, which pg_dump does not dump:\n"
-            + "\n".join(found)
-            + "\nMove these statements out of the migrations, for example into the setup of the cluster."
-        )
 
     stems = {Path(s.path).stem for s in plan.replaced}
     replaced_ids = {s.revision for s in plan.replaced}
@@ -479,20 +504,38 @@ def _check_before_run(script_dir: ScriptDirectory, plan: _Plan, revision_path: P
             + "\n".join(importers)
         )
 
+    found = [f"{s.path}:{line}: {text}" for s in plan.replaced for line, text in _global_statements(Path(s.path))]
+    if found and not allow_global_statements:
+        raise SquashError(
+            "The replaced revisions change objects of the whole server, which pg_dump does not dump:\n"
+            + "\n".join(f"  {f}" for f in found)
+            + "\nMove these statements out of the migrations, for example into the setup of the cluster. If a match "
+            "is not such a statement, pass allow_global_statements=True (--allow-global-statements)."
+        )
+    return [f"Accepted a statement that changes an object of the whole server: {f}" for f in found]
+
 
 def _global_statements(path: Path) -> list[tuple[int, str]]:
-    """Return the line and text of each string in ``path`` that changes an object of the whole server.
+    """Return the line and text of each statement in ``path`` that changes an object of the whole server.
 
-    Only string literals count, so comments do not.  The module docstring does not count either.
+    Only string literals count, so comments do not.  Docstrings and the values of ``comment`` and ``doc`` keyword
+    arguments do not count either.  A match must start a statement: at the start of the string, or after ``;``,
+    ``$$``, ``BEGIN``, ``THEN``, ``ELSE``, ``LOOP``, or ``EXECUTE '``.
     """
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    docstring = ast.get_docstring(tree, clean=False)
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    skipped: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                skipped.add(id(first.value))
+        elif isinstance(node, ast.keyword) and node.arg in {"comment", "doc"}:
+            skipped.add(id(node.value))
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value != docstring:
-            if match := _GLOBAL_STATEMENT.search(node.value):
-                found.append((node.lineno, " ".join(match.group(0).split())))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in skipped:
+            for match in _GLOBAL_STATEMENT.finditer(node.value):
+                found.append((node.lineno, " ".join(match.group("statement").split())))
     return found
 
 
@@ -507,15 +550,43 @@ def _imported_names(path: Path) -> list[str]:
     return names
 
 
-def _sources_name_owner(replaced: Sequence[Script]) -> bool:
-    """Return whether a replaced revision runs ``OWNER TO`` a role by name, not by ``CURRENT_USER``."""
+def _named_owner_objects(replaced: Sequence[Script]) -> frozenset[str]:
+    """Return the bare names of the objects that a replaced revision gives an owner by name.
+
+    ``OWNER TO CURRENT_USER``, ``SESSION_USER``, and ``CURRENT_ROLE`` do not count, because they rely on the role that
+    runs the migration.
+    """
+    names: set[str] = set()
     for script in replaced:
         for node in ast.walk(ast.parse(Path(script.path).read_text(encoding="utf-8"))):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 for match in _SOURCE_OWNER_TO.finditer(node.value):
-                    if match.group(1).upper() not in {"CURRENT_USER", "SESSION_USER", "CURRENT_ROLE"}:
-                        return True
-    return False
+                    if match.group("role").upper() not in {"CURRENT_USER", "SESSION_USER", "CURRENT_ROLE"}:
+                        names.add(_bare_name(match.group("name")))
+    return frozenset(names)
+
+
+def _owned_object(statement: str) -> str | None:
+    """Return the bare name of the object in a ``pg_dump`` ``ALTER ... OWNER TO`` statement."""
+    match = _DUMP_OWNER_OBJECT.match(statement)
+    return _bare_name(match.group(1)) if match else None
+
+
+def _bare_name(name: str) -> str:
+    """Return the last part of a possibly qualified name, unquoted, or in lower case when it is not quoted."""
+    last = re.split(r'\.(?=(?:[^"]*"[^"]*")*[^"]*$)', name.split("(")[0].strip())[-1]
+    return _unquote(last) if last.startswith('"') else last.lower()
+
+
+def _touched_tables(statements: Sequence[str]) -> frozenset[str]:
+    """Return the bare names of the tables that ``extra_sql`` statements read or write."""
+    names: set[str] = set()
+    for statement in statements:
+        try:
+            names.update(_bare_name(name) for name in postgast.extract_tables(postgast.parse(statement)))
+        except postgast.PgQueryError:
+            continue
+    return frozenset(names)
 
 
 def _carried_extra(replaced: Sequence[Script]) -> list[str]:
@@ -731,19 +802,39 @@ def _check_copy(config: Config, plan: _Plan, revision_copy: Path) -> None:
 
 
 def _preflight(config: Config, script_dir: ScriptDirectory, url: URL, tmp: Path) -> None:
-    """Run ``env.py`` with one sentinel revision, and stop unless the sentinel's marker is in the scratch database."""
+    """Run ``env.py`` with one sentinel revision, and stop unless it ran in the scratch database and nowhere else."""
     copy = _ScriptCopy(config, script_dir, tmp)
     for script in script_dir.walk_revisions():
         copy.map(Path(script.path)).unlink()
+    trip = tmp / "tripped"
     (copy.locations[0] / "alembic_pg_autogen_squash_preflight.py").write_text(
-        _PREFLIGHT_TEMPLATE.format(expected=repr(url.database), marker=repr(_PREFLIGHT_MARKER)), encoding="utf-8"
+        _PREFLIGHT_TEMPLATE.format(expected=repr(url.database), marker=repr(_PREFLIGHT_MARKER), trip=repr(str(trip))),
+        encoding="utf-8",
     )
-    hint = "env.py must connect to the scratch database. It must read the sqlalchemy.url option or use "
-    hint += "config.attributes['connection']."
+    hint = "env.py must connect to the scratch database, and only to it. It must read the sqlalchemy.url option or "
+    hint += "use config.attributes['connection']."
+    connected: list[str] = []
+
+    def record(conn: sa.Connection) -> None:
+        connected.append(str(conn.engine.url.database))
+
+    event.listen(sa.Engine, "engine_connect", record)
     try:
         _run_upgrade(copy.config, url, "heads")
     except Exception as e:
         raise SquashError(f"The preflight failed, so the squash ran no revision of the chain: {e}\n{hint}") from e
+    finally:
+        event.remove(sa.Engine, "engine_connect", record)
+    if others := sorted(set(connected) - {str(url.database)}):
+        raise SquashError(
+            f"During the preflight, env.py also connected to {others}, so the squash ran no revision of the chain. "
+            f"env.py runs the migrations in more than one database.\n{hint}"
+        )
+    if trip.exists():
+        raise SquashError(
+            f"The preflight sentinel also ran in the database {trip.read_text(encoding='utf-8')!r}, so the squash ran "
+            f"no revision of the chain. env.py runs the migrations in more than one database.\n{hint}"
+        )
     engine = sa.create_engine(url, poolclass=NullPool)
     try:
         with engine.connect() as conn:
@@ -912,9 +1003,9 @@ def _catalog_state(url: URL) -> str:
         engine.dispose()
 
 
-def _data_differences(old: URL, new: URL, version: _VersionTable) -> list[str]:
-    """Compare the row count of each table and the state of each sequence."""
-    old_state, new_state = _data_state(old, version), _data_state(new, version)
+def _data_differences(old: URL, new: URL, version: _VersionTable, digest_tables: AbstractSet[str]) -> list[str]:
+    """Compare row counts, sequences, and the rows of the tables in ``digest_tables``."""
+    old_state, new_state = _data_state(old, version, digest_tables), _data_state(new, version, digest_tables)
     return [
         f"{name}: {old_state.get(name, 'absent')} with the old chain, {new_state.get(name, 'absent')} with the new"
         for name in sorted(old_state.keys() | new_state.keys())
@@ -922,15 +1013,21 @@ def _data_differences(old: URL, new: URL, version: _VersionTable) -> list[str]:
     ]
 
 
-def _data_state(url: URL, version: _VersionTable) -> Mapping[str, str]:
+def _data_state(url: URL, version: _VersionTable, digest_tables: AbstractSet[str]) -> Mapping[str, str]:
     engine = sa.create_engine(url, poolclass=NullPool)
     state: dict[str, str] = {}
     try:
         with engine.connect() as conn:
             for name, schema, table in conn.execute(sa.text(_TABLES_QUERY)).tuples():
-                if (schema, table) != (version.schema, version.name):
-                    count = conn.execute(sa.text(f"SELECT count(*) FROM {name}")).scalar_one()
-                    state[f"table {name}"] = f"{count} rows"
+                if (schema, table) == (version.schema, version.name):
+                    continue
+                count = conn.execute(sa.text(f"SELECT count(*) FROM {name}")).scalar_one()
+                state[f"table {name}"] = f"{count} rows"
+                if table in digest_tables:
+                    digest = conn.execute(
+                        sa.text(f"SELECT md5(coalesce(string_agg(r::text, ',' ORDER BY r::text), '')) FROM {name} r")
+                    ).scalar_one()
+                    state[f"rows of {name}"] = f"digest {digest}"
             for name in conn.execute(sa.text(_SEQUENCES_QUERY)).scalars():
                 last_value, is_called = conn.execute(sa.text(f"SELECT last_value, is_called FROM {name}")).one()
                 state[f"sequence {name}"] = f"last_value {last_value} is_called {is_called}"
@@ -1031,13 +1128,30 @@ _CREATE_SCHEMA: Final = re.compile(rf"CREATE\s+SCHEMA\s+{_IDENTIFIER}\s*$", re.I
 _DEFAULT_PRIVILEGES_FOR_ROLE: Final = re.compile(
     rf"(ALTER\s+DEFAULT\s+PRIVILEGES\s+)FOR\s+ROLE\s+{_IDENTIFIER}\s+", re.IGNORECASE
 )
-_MATVIEW_OWNER_TO: Final = re.compile(rf"ALTER\s+MATERIALIZED\s+VIEW\s+(\S+)\s+OWNER\s+TO\s+{_IDENTIFIER}\s*$", re.I)
-_SOURCE_OWNER_TO: Final = re.compile(r'\bOWNER\s+TO\s+"?(\w+)', re.IGNORECASE)
+# ``pg_dump`` 14 writes ``ALTER TABLE`` for a materialized view, newer versions write ``ALTER MATERIALIZED VIEW``.
+_MATVIEW_OWNER_TO: Final = re.compile(
+    rf"ALTER\s+(?:MATERIALIZED\s+VIEW|TABLE)\s+(\S+)\s+OWNER\s+TO\s+{_IDENTIFIER}\s*$", re.I
+)
+_NAME: Final = r'(?:"(?:[^"]|"")+"|[\w$]+)'
+_SOURCE_OWNER_TO: Final = re.compile(
+    rf"\bALTER\s+[A-Za-z ]+?\s+(?:IF\s+EXISTS\s+)?(?P<name>{_NAME}(?:\.{_NAME})?)\s*(?:\([^)]*\))?\s+"
+    r'OWNER\s+TO\s+"?(?P<role>\w+)',
+    re.IGNORECASE,
+)
+_DUMP_OWNER_OBJECT: Final = re.compile(
+    rf"ALTER\s+[A-Za-z ]+?\s+({_NAME}(?:\.{_NAME})?(?:\(.*\))?)\s+OWNER\s+TO\s", re.IGNORECASE | re.DOTALL
+)
+_ROLE_LIST: Final = rf"{_NAME}(?:\s*,\s*{_NAME})*"
+_STATEMENT_END: Final = r"\s*(?:;|\Z|\$\$|'|\bEND\b)"
 _GLOBAL_STATEMENT: Final = re.compile(
-    r"\b(?:CREATE|ALTER|DROP)\s+(?:ROLE|GROUP|TABLESPACE|USER\b(?!\s+MAPPING))\b"
-    r"|\bALTER\s+(?:DATABASE|SYSTEM)\b"
-    r"|\bGRANT\b(?:(?!\bON\b)[^;])*?\bTO\b"
-    r"|\bREVOKE\b(?:(?!\bON\b)[^;])*?\bFROM\b",
+    r"(?:\A|;|\$\$|\b(?:BEGIN|THEN|ELSE|LOOP)\b|\bEXECUTE\s+(?:format\s*\(\s*)?')\s*(?P<statement>"
+    rf"(?:CREATE|ALTER|DROP)\s+(?:ROLE|GROUP|TABLESPACE|USER(?!\s+MAPPING))\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?{_NAME}"
+    rf"|ALTER\s+DATABASE\s+{_NAME}"
+    r"|ALTER\s+SYSTEM\s+(?:SET|RESET)\b"
+    rf"|GRANT\s+{_ROLE_LIST}\s+TO\s+{_ROLE_LIST}(?:\s+WITH\s+\w+\s+OPTION)?(?:\s+GRANTED\s+BY\s+{_NAME})?(?={_STATEMENT_END})"
+    rf"|REVOKE\s+(?:ADMIN\s+OPTION\s+FOR\s+)?{_ROLE_LIST}\s+FROM\s+{_ROLE_LIST}(?:\s+(?:CASCADE|RESTRICT))?"
+    rf"(?={_STATEMENT_END})"
+    r")",
     re.IGNORECASE,
 )
 _PREFLIGHT_MARKER: Final = "public.alembic_pg_autogen_squash_preflight"
@@ -1115,11 +1229,14 @@ branch_labels = None
 depends_on = None
 
 EXPECTED = {expected}
+TRIP = {trip}
 
 
 def upgrade():
     found = op.get_bind().execute(sa.text("SELECT current_database()")).scalar()
     if found != EXPECTED:
+        with open(TRIP, "w", encoding="utf-8") as trip:
+            trip.write(str(found))
         raise RuntimeError(f"env.py connected to the database {{found!r}}, not to the scratch database {{EXPECTED!r}}")
     op.execute(sa.text("CREATE TABLE " + {marker} + " (ok int)"))
 

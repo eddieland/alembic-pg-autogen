@@ -33,8 +33,14 @@ or more programmatic migration commands" reads the connection:
 The connection has no open transaction. ``autocommit_block()`` and ``transaction_per_migration`` work as usual.
 
 Before the first upgrade of your chain, the squash runs a preflight. It runs your ``env.py`` with one sentinel revision
-and no other revision. The sentinel creates a marker table only when ``current_database()`` is the scratch database.
-The squash stops unless that marker exists afterward, also when ``env.py`` catches the sentinel's error.
+and no other revision. The squash stops in these cases, also when ``env.py`` catches the sentinel's error:
+
+- An engine connects to a database other than the scratch database during the preflight.
+- The sentinel runs in another database. It then writes a trip file before it raises.
+- The sentinel's marker table is missing from the scratch database.
+
+An ``env.py`` that migrates more than one database, for example a loop over two URLs, therefore stops the squash. The
+squash builds one database at a time, so it cannot squash such a chain.
 
 The preflight protects the revisions of your chain, not everything that ``env.py`` does. When ``env.py`` connects to
 another database, these changes can still happen there, also in a dry run:
@@ -67,8 +73,8 @@ Run the squash
 
 Add ``--dry-run`` to run every check and print the new revision without a change to a file. The other options are
 ``--name`` (the section of ``alembic.ini``), ``--version-table``, ``--version-table-schema``, ``--pg-dump``,
-``--pg-dump-arg`` (repeat it for more arguments), ``--extra-sql``, and ``--allow-data-loss`` (see
-`Rows and sequences`_).
+``--pg-dump-arg`` (repeat it for more arguments), ``--extra-sql`` and ``--allow-data-loss`` (see
+`Rows and sequences`_), and ``--allow-global-statements`` (see `Objects of the whole server`_).
 
 From Python:
 
@@ -161,8 +167,9 @@ setting that the server does not know. A newer ``pg_dump`` sets ``transaction_ti
 The body also differs from raw ``pg_dump`` output in these ways:
 
 - ``ALTER ... OWNER TO`` the role that ran the squash is removed, because the role that runs the migration owns new
-  objects already. When a replaced revision names a role in ``OWNER TO``, every ``OWNER TO`` stays. ``OWNER TO``
-  another role always stays, so that role must exist where the revision runs, as with the old chain.
+  objects already. It stays for an object that a replaced revision gave an owner by name, so the owner does not depend
+  on the role that runs the migration. It never stays for schema ``public``. ``OWNER TO`` another role always stays, so
+  that role must exist where the revision runs, as with the old chain.
 - ``ALTER DEFAULT PRIVILEGES FOR ROLE`` the role that ran the squash loses its ``FOR ROLE`` clause. It then applies to
   the role that runs the migration, as the replaced revision did.
 - ``COMMENT ON EXTENSION`` is removed, because only the owner of the extension can run it.
@@ -192,8 +199,14 @@ Put the rows that your chain needs into a SQL file and pass it with ``--extra-sq
     SELECT setval('kind_id_seq', 2);
 
 The new revision stores the statements in ``EXTRA_STATEMENTS`` and runs them after the schema. The comparison runs them
-too, so the squash checks them like the rest of the body. A later squash that replaces this revision carries
-``EXTRA_STATEMENTS`` forward. Do not edit the rows into the new file by hand, because a later squash does not keep them.
+too, so the squash checks them like the rest of the body. For each table that the statements touch, the comparison also
+checks the row contents, not only the row count.
+
+A later squash that replaces this revision carries ``EXTRA_STATEMENTS`` forward and lists them in a warning. A revision
+between the two squashes can change those rows. The row content check then stops the squash. Pass the current rows as
+``--extra-sql`` instead. Do not pass the same rows again while the carried statements still insert them, because the
+second ``INSERT`` fails with ``duplicate key``. Do not edit the rows into the new file by hand, because a later squash
+does not keep them.
 
 To accept the loss instead, run the squash again with ``--allow-data-loss``. The squash then reports the differences as
 warnings.
@@ -203,13 +216,18 @@ Objects of the whole server
 
 ``pg_dump`` does not dump roles, role memberships, tablespaces, or database and system settings. A difference of the
 server state cannot prove what a clean cluster needs, so the squash scans the string literals of the replaced revisions.
-It refuses the chain before it connects to the server when a string contains one of these statements:
+It refuses the chain before it connects to the server when a string contains one of these statements at the start of a
+statement: at the start of the string, or after ``;``, ``$$``, ``BEGIN``, ``THEN``, ``ELSE``, ``LOOP``, or
+``EXECUTE '``.
 
 - ``CREATE``, ``ALTER``, or ``DROP`` of a role, user, group, or tablespace
 - ``GRANT`` of a role and ``REVOKE`` of a role, without ``ON``
 - ``ALTER DATABASE`` and ``ALTER SYSTEM``
 
-Comments and the module docstring do not count. Move these statements into the setup of your cluster.
+Comments, docstrings, and the values of ``comment`` and ``doc`` keyword arguments do not count. A name must follow each
+keyword, so an enum label such as ``'create user'`` does not count either. Move these statements into the setup of your
+cluster. If a match is not such a statement, run the squash with ``--allow-global-statements``. The match then becomes
+a warning, and the server state check below still runs.
 
 As a second check, the squash compares the server state before and after each upgrade of the old chain. This check also
 covers a revision after the target and SQL that the scan cannot read, such as dynamic SQL. A difference stops the
