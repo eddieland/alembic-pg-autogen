@@ -100,7 +100,8 @@ It drops them at the end, also on failure. Other keyword arguments are `version_
 arguments), and `dry_run`.
 
 `squash()` returns a `SquashResult` named tuple. It holds the new file path, the removed file paths, the statement
-count, the server version, and the `pg_dump` version. A failed check raises `SquashError`. The command line prints the
+count, the server version, and the `pg_dump` version. It also holds the text of the new file as `source`, and the
+messages of the risk scan as `warnings` (see Risks). A failed check raises `SquashError`. The command line prints the
 message and exits with status 1.
 
 ### D3: The new revision takes `TARGET`'s ID
