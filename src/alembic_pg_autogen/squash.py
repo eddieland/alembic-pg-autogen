@@ -1238,7 +1238,7 @@ def upgrade():
         with open(TRIP, "w", encoding="utf-8") as trip:
             trip.write(str(found))
         raise RuntimeError(f"env.py connected to the database {{found!r}}, not to the scratch database {{EXPECTED!r}}")
-    op.execute(sa.text("CREATE TABLE " + {marker} + " (ok int)"))
+    op.execute(sa.text("CREATE TABLE IF NOT EXISTS " + {marker} + " (ok int)"))
 
 
 def downgrade():

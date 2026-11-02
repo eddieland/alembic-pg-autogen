@@ -84,3 +84,4 @@
 - [x] 7.5 Warn on carried `EXTRA_STATEMENTS`, and compare row digests of the tables that they touch. Verify with an
   `UPDATE` between two squashes.
 - [x] 7.6 Add `pg_dump` 14 and 16 runs with the bootstrap role `postgres` to `squash-pg-versions`.
+- [x] 7.7 Create the preflight marker with `IF NOT EXISTS`, so a tenant loop in one database passes the preflight.

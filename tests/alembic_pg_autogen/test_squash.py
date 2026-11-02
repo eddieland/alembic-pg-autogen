@@ -163,6 +163,25 @@ for url in (config.get_main_option("sqlalchemy.url"), os.environ["SQUASH_TEST_DE
 """
 
 
+TENANT_LOOP_ENV = """\
+from alembic import context
+from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
+
+config = context.config
+engine = create_engine(config.get_main_option("sqlalchemy.url"), poolclass=NullPool)
+for schema in ("tenant_a", "tenant_b"):
+    with engine.connect() as connection:
+        connection.exec_driver_sql(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+        connection.exec_driver_sql(f"SET search_path TO {schema}, public")
+        context.configure(connection=connection, version_table_schema=schema)
+        with context.begin_transaction():
+            context.run_migrations()
+        connection.commit()
+engine.dispose()
+"""
+
+
 def _rev(rev: str, down: str | tuple[str, ...] | None, body: str = "pass", *, extra: str = "") -> str:
     """Render a minimal revision file."""
     return (
@@ -1205,6 +1224,12 @@ class TestSquash:
 
         assert _version(decoy) == {"r01"}
         assert _tables(decoy) == {"account", "alembic_version"}
+
+    def test_preflight_with_a_tenant_loop_in_one_database(self, tmp_path: Path, pg_engine: Engine) -> None:
+        project = Project(tmp_path, {"r01": _rev("r01", None), "r02": _rev("r02", "r01")}, env=TENANT_LOOP_ENV)
+
+        with pytest.raises(SquashError, match="holds versions"):
+            squash(project.config(), "r02", server_url=pg_engine.url, dry_run=True)
 
     def test_global_statement_override(self, tmp_path: Path, pg_engine: Engine) -> None:
         label = 'LABEL = "Grant tokens to users"'
