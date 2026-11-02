@@ -5,9 +5,11 @@ from sqlalchemy import CheckConstraint, Column, MetaData, String, Table
 
 from alembic_pg_autogen import (
     CreateCheckConstraintNotValidOp,
+    CreateCheckConstraintTextOp,
     CreateFunctionOp,
     CreateTriggerOp,
     CreateViewOp,
+    DropCheckConstraintOp,
     DropFunctionOp,
     DropTriggerOp,
     DropViewOp,
@@ -27,6 +29,55 @@ TRG_A = TriggerInfo("public", "orders", "audit_trg", "CREATE TRIGGER …")
 TRG_B = TriggerInfo("public", "events", "notify_trg", "CREATE TRIGGER … v2")
 VIEW_A = ViewInfo("public", "active_users", "CREATE OR REPLACE VIEW public.active_users AS SELECT 1")
 VIEW_B = ViewInfo("reporting", "monthly_summary", "CREATE OR REPLACE VIEW reporting.monthly_summary AS SELECT 2")
+
+
+class TestCreateCheckConstraintTextOp:
+    def test_colons_of_bind_parameters_are_escaped(self):
+        op = CreateCheckConstraintTextOp("ck", "o", "code IN ('a :b') AND amount >= 0::numeric")
+
+        assert isinstance(op.condition, str)
+        assert op.condition == "code IN ('a \\:b') AND amount >= 0::numeric"
+
+    def test_to_constraint_compiles_the_original_text(self):
+        op = CreateCheckConstraintTextOp("ck", "o", "code IN ('a :b')")
+
+        constraint = op.to_constraint()
+
+        assert isinstance(constraint, CheckConstraint)
+        assert str(constraint.sqltext.compile()) == "code IN ('a :b')"
+
+    def test_is_an_alembic_check_constraint_add(self):
+        op = CreateCheckConstraintTextOp("ck", "o", "x > 0")
+
+        assert isinstance(op, CreateCheckConstraintOp)
+        assert isinstance(op.reverse(), DropConstraintOp)
+
+
+class TestDropCheckConstraintOp:
+    def test_is_an_alembic_check_drop(self):
+        op = DropCheckConstraintOp("ck", "o", "code LIKE 'A%'", schema="sales")
+
+        assert isinstance(op, DropConstraintOp)
+        assert (op.constraint_name, op.table_name, op.constraint_type, op.schema) == ("ck", "o", "check", "sales")
+
+    def test_reverse_restores_the_catalog_text(self):
+        reverse = DropCheckConstraintOp("ck", "o", "code IN ('a :b')", schema="sales").reverse()
+
+        assert type(reverse) is CreateCheckConstraintTextOp
+        assert (reverse.constraint_name, reverse.table_name, reverse.schema) == ("ck", "o", "sales")
+        assert isinstance(reverse.condition, str)
+        assert reverse.condition == "code IN ('a \\:b')"
+
+    def test_reverse_of_a_not_valid_constraint_is_not_valid(self):
+        reverse = DropCheckConstraintOp("ck", "o", "x > 0", validated=False).reverse()
+
+        assert type(reverse) is CreateCheckConstraintNotValidOp
+
+    def test_to_constraint_uses_the_catalog_text(self):
+        constraint = DropCheckConstraintOp("ck", "o", "x > 0").to_constraint()
+
+        assert isinstance(constraint, CheckConstraint)
+        assert constraint.name == "ck"
 
 
 class TestCreateFunctionOp:

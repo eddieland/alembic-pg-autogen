@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 from itertools import chain
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from alembic.operations import ops
 from alembic.util import DispatchPriority, PriorityDispatchResult
@@ -44,7 +44,12 @@ from sqlalchemy import CheckConstraint
 
 from alembic_pg_autogen.canonicalize import canonicalize_check_constraints, choose_check_constraint_names
 from alembic_pg_autogen.inspect import current_schema, inspect_check_constraints
-from alembic_pg_autogen.ops import CreateCheckConstraintNotValidOp, ValidateConstraintOp
+from alembic_pg_autogen.ops import (
+    CreateCheckConstraintNotValidOp,
+    CreateCheckConstraintTextOp,
+    DropCheckConstraintOp,
+    ValidateConstraintOp,
+)
 from alembic_pg_autogen.value_sets import ValueSetChange, compare_value_sets, parse_value_set
 
 if TYPE_CHECKING:
@@ -146,9 +151,7 @@ def _compare_check_constraint_expressions(
 
     if unnamed_constraints:
         # A reflected constraint whose name a named metadata constraint uses is already matched, so it cannot pair.
-        pairable = {
-            name: info for name, info in current.items() if name not in metadata_constraints and name_included(name)
-        }
+        pairable = {name: info for name, info in current.items() if name not in metadata_constraints}
         _compare_unnamed_check_constraints(
             autogen_context,
             modify_table_ops,
@@ -157,9 +160,11 @@ def _compare_check_constraint_expressions(
             resolved_schema=resolved_schema,
             table_name=table_name,
             conn_table=conn_table,
+            metadata_table=metadata_table,
             constraints=unnamed_constraints,
             candidates=pairable,
             name_included=name_included,
+            defer_validation=defer_validation,
         )
 
     # Only constraints that exist on both sides are ours to check.  Other additions and removals are Alembic's job.
@@ -220,7 +225,9 @@ def _compare_check_constraint_expressions(
             info.expression,
             desired,
         )
-        modify_table_ops.ops.append(ops.DropConstraintOp.from_constraint(conn_constraint))
+        modify_table_ops.ops.append(
+            DropCheckConstraintOp(info.name, table_name, info.expression, schema=schema, validated=info.validated)
+        )
         modify_table_ops.ops.append(
             _add_constraint_op(
                 metadata_constraint,
@@ -245,17 +252,26 @@ def _compare_unnamed_check_constraints(
     resolved_schema: str,
     table_name: str,
     conn_table: Table,
+    metadata_table: Table,
     constraints: Sequence[CheckConstraint],
     candidates: Mapping[str, CheckConstraintInfo],
     name_included: Callable[[str], bool],
+    defer_validation: bool,
 ) -> None:
     """Pair unnamed metadata constraints with reflected constraints by canonical expression.
 
     PostgreSQL names every constraint, so Alembic's plugin cannot match an unnamed model constraint and reports the
     catalog's copy as removed. This function pairs each unnamed constraint with a reflected constraint in *candidates*
     whose canonical expression is equal. For a pair, it discards Alembic's drop and applies the validation rule of a
-    named pair. An unnamed constraint with no pair gets an add under the name PostgreSQL chooses for it, so that the
-    downgrade can drop it. A reflected constraint with no pair keeps the drop that Alembic's plugin emitted.
+    named pair. A reflected constraint with no pair keeps the drop that Alembic's plugin emitted.
+
+    An unnamed constraint with no pair is either a changed value set or a new constraint. A changed value set has an
+    unpaired reflected value set on the same column. It gets the drop and add pair of a named change under the
+    reflected name, so a narrowing is added ``NOT VALID``. A new constraint gets an add under the name PostgreSQL
+    chooses for it, so that the downgrade can drop it.
+
+    *candidates* includes reflected constraints that ``include_name`` excludes. They pair like the others, so no
+    duplicate is added for them, but the comparator emits no operation for them.
 
     An expression can occur several times on each side. The copies pair in metadata order and in the order of
     *candidates*, which :func:`~alembic_pg_autogen.inspect.inspect_check_constraints` sorts by name. A count that
@@ -271,23 +287,7 @@ def _compare_unnamed_check_constraints(
         if expression is not None:
             compiled[index] = expression
 
-    canonical: dict[int, str] = {}
-    probes: dict[str, str] = {}
-    labels: dict[str, int] = {}
-    for index, expression in compiled.items():
-        # An expression that already matches a deparsed catalog expression needs no round trip.
-        match = next((info.expression for info in candidates.values() if _same_sql(expression, info.expression)), None)
-        if match is not None:
-            canonical[index] = match
-        elif candidates:
-            label = f"unnamed check constraint #{index} ({expression})"
-            probes[label] = expression
-            labels[label] = index
-    if probes:
-        normalized = canonicalize_check_constraints(
-            conn, schema=resolved_schema, table_name=table_name, expressions=probes
-        )
-        canonical.update({labels[label]: expression for label, expression in normalized.items()})
+    canonical = _canonical_expressions(conn, resolved_schema, table_name, compiled, candidates)
 
     reflected_by_expression: dict[str, list[CheckConstraintInfo]] = {}
     for info in candidates.values():
@@ -315,8 +315,26 @@ def _compare_unnamed_check_constraints(
         unpaired.extend(indexes[len(reflected) :])
     unpaired.sort()
 
-    _discard_drops(modify_table_ops, {info.name for _, info in paired}, table_name)
+    paired_names = {info.name for _, info in paired}
+    leftover = [info for name, info in candidates.items() if name not in paired_names and name_included(name)]
+    unknown = sorted(index for index in compiled if index not in canonical) if candidates else []
+    if unknown and leftover:
+        # A constraint whose probe failed may be the model's copy of a leftover constraint. Dropping that constraint
+        # would remove a rule the model still declares, so the drop waits for a run that can compare it.
+        log.warning(
+            "Keeping check constraints %s on table %r until the unnamed model constraints that could not be "
+            "canonicalized can be compared",
+            sorted(info.name for info in leftover),
+            table_name,
+        )
+        _discard_drops(modify_table_ops, {info.name for info in leftover}, table_name)
+        leftover = []
+
+    _discard_drops(modify_table_ops, {name for name in paired_names if name_included(name)}, table_name)
     for constraint, info in paired:
+        if not name_included(info.name):
+            log.debug("Paired unnamed check constraint with excluded %r on table %r", info.name, table_name)
+            continue
         log.debug("Paired unnamed check constraint with %r on table %r", info.name, table_name)
         if info.validated or _declares_not_valid(constraint):
             continue
@@ -328,10 +346,45 @@ def _compare_unnamed_check_constraints(
         )
         modify_table_ops.ops.append(ValidateConstraintOp(info.name, table_name, schema=schema))
 
+    changed = _match_value_set_changes(unpaired, canonical, leftover)
+    for index, info in changed.items():
+        constraint = constraints[index]
+        conn_constraint = _reflected_constraint(info.expression, info.name, conn_table, validated=info.validated)
+        if not autogen_context.run_object_filters(constraint, info.name, "check_constraint", False, conn_constraint):
+            continue
+        log.info(
+            "Detected changed unnamed check constraint %r on table %r: %r to %r",
+            info.name,
+            table_name,
+            info.expression,
+            canonical[index],
+        )
+        _discard_drops(modify_table_ops, {info.name}, table_name)
+        modify_table_ops.ops.append(
+            DropCheckConstraintOp(info.name, table_name, info.expression, schema=schema, validated=info.validated)
+        )
+        modify_table_ops.ops.append(
+            _add_constraint_op(
+                constraint,
+                table_name,
+                schema,
+                compiled[index],
+                current_expression=info.expression,
+                desired_expression=canonical[index],
+                defer_validation=defer_validation,
+                name=info.name,
+            )
+        )
+    unpaired = [index for index in unpaired if index not in changed]
+
     if not unpaired:
         return
     names = choose_check_constraint_names(
-        conn, schema=resolved_schema, table_name=table_name, expressions=[compiled[index] for index in unpaired]
+        conn,
+        schema=resolved_schema,
+        table_name=table_name,
+        expressions=[compiled[index] for index in unpaired],
+        reserved=_planned_constraint_names(metadata_table, autogen_context.dialect),
     )
     for index, name in zip(unpaired, names, strict=True):
         constraint = constraints[index]
@@ -343,6 +396,75 @@ def _compare_unnamed_check_constraints(
         modify_table_ops.ops.append(
             _create_check_constraint_op(constraint, table_name, schema, compiled[index], name=name)
         )
+
+
+def _canonical_expressions(
+    conn: Connection,
+    schema: str,
+    table_name: str,
+    compiled: Mapping[int, str],
+    candidates: Mapping[str, CheckConstraintInfo],
+) -> dict[int, str]:
+    """Return the canonical form of each compiled unnamed expression, keyed by its position.
+
+    An expression that already matches a deparsed candidate expression needs no round trip. Without candidates, nothing
+    can pair, so no expression is canonicalized. An expression whose probe fails is absent from the result.
+    """
+    canonical: dict[int, str] = {}
+    probes: dict[str, str] = {}
+    labels: dict[str, int] = {}
+    for index, expression in compiled.items():
+        match = next((info.expression for info in candidates.values() if _same_sql(expression, info.expression)), None)
+        if match is not None:
+            canonical[index] = match
+        elif candidates:
+            label = f"unnamed check constraint #{index} ({expression})"
+            probes[label] = expression
+            labels[label] = index
+    if probes:
+        normalized = canonicalize_check_constraints(conn, schema=schema, table_name=table_name, expressions=probes)
+        canonical.update({labels[label]: expression for label, expression in normalized.items()})
+    return canonical
+
+
+def _match_value_set_changes(
+    unpaired: Sequence[int], canonical: Mapping[int, str], leftover: Sequence[CheckConstraintInfo]
+) -> dict[int, CheckConstraintInfo]:
+    """Match each unpaired model value set with a leftover reflected value set on the same column.
+
+    The constraint that an unnamed non-native ``Enum`` derives has no name to match by. A changed member list
+    therefore leaves one unpaired constraint on each side. Both sides restrict the same column to a set of values, so
+    the two are one changed constraint. Each column matches at most once, in the order of *unpaired* and *leftover*.
+    """
+    reflected_by_column: dict[str, list[CheckConstraintInfo]] = {}
+    for info in leftover:
+        value_set = parse_value_set(info.expression)
+        if value_set is not None:
+            reflected_by_column.setdefault(value_set.column, []).append(info)
+    changed: dict[int, CheckConstraintInfo] = {}
+    for index in unpaired:
+        desired = canonical.get(index)
+        value_set = parse_value_set(desired) if desired is not None else None
+        if value_set is None or not reflected_by_column.get(value_set.column):
+            continue
+        changed[index] = reflected_by_column[value_set.column].pop(0)
+    return changed
+
+
+def _planned_constraint_names(table: Table, dialect: Dialect) -> set[str]:
+    """Return the resolved names of every named constraint on the metadata table.
+
+    Alembic adds the named constraints that the catalog lacks in the same migration, before the unnamed ones. An
+    unnamed constraint must not take one of those names.
+    """
+    names: set[str] = set()
+    for constraint in chain(table.constraints, *(column.constraints for column in table.columns)):
+        if constraint.name is None:
+            continue
+        name = dialect.identifier_preparer.format_constraint(constraint, _alembic_quote=False)
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
 
 
 def _metadata_check_constraints(table: Table, dialect: Dialect) -> dict[str, CheckConstraint]:
@@ -439,14 +561,22 @@ def _compile_check_expression(constraint: CheckConstraint, dialect: Dialect) -> 
 
     ``include_table=False`` matches SQLAlchemy's own DDL compiler, so a column expression such as the one a non-native
     ``Enum`` generates renders as ``status IN ('a', 'b')`` rather than ``orders.status IN ('a', 'b')``.
+
+    A dialect whose driver uses the ``format`` or ``pyformat`` parameter style doubles every ``%`` in compiled SQL,
+    including ``%`` in string literals and the modulo operator. The result is SQL text, not a driver statement, so the
+    doubling is undone. :func:`~sqlalchemy.text` doubles it again when a probe runs, and Alembic does the same when the
+    migration runs.
     """
     try:
-        return str(
+        compiled = str(
             constraint.sqltext.compile(dialect=dialect, compile_kwargs={"literal_binds": True, "include_table": False})
         )
     except Exception:
         log.warning("Could not compile check constraint %r; treating it as unchanged", constraint.name, exc_info=True)
         return None
+    if getattr(dialect.identifier_preparer, "_double_percents", False):
+        compiled = compiled.replace("%%", "%")
+    return compiled
 
 
 def _same_sql(left: str, right: str) -> bool:
@@ -471,21 +601,35 @@ def _declares_not_valid(constraint: CheckConstraint) -> bool:
     return bool(constraint.dialect_options["postgresql"]["not_valid"])
 
 
+def _dialect_kwargs(constraint: CheckConstraint) -> dict[str, Any]:
+    """Return the constraint's dialect keywords for an add operation, without ``postgresql_not_valid``.
+
+    Reading ``dialect_options`` fills in the default of each PostgreSQL keyword, so ``dialect_kwargs`` then holds
+    ``postgresql_not_valid=False``. Alembic 1.20 renders every keyword it receives. The flag is the choice between
+    :class:`CreateCheckConstraintTextOp` and :class:`CreateCheckConstraintNotValidOp`, so the operation does not carry
+    it.
+    """
+    return {key: value for key, value in constraint.dialect_kwargs.items() if key != "postgresql_not_valid"}
+
+
 def _reflected_constraint(expression: str, name: str, table: Table, *, validated: bool) -> CheckConstraint:
-    """Build the constraint object that stands for the catalog's current constraint in emitted operations."""
-    return CheckConstraint(expression, name=name, table=table, postgresql_not_valid=not validated)
+    """Build the constraint object that stands for the catalog's current constraint in the object filters."""
+    if validated:
+        return CheckConstraint(expression, name=name, table=table)
+    return CheckConstraint(expression, name=name, table=table, postgresql_not_valid=True)
 
 
 def _create_check_constraint_op(
     constraint: CheckConstraint, table_name: str, schema: str | None, expression: str, *, name: str | None = None
-) -> ops.CreateCheckConstraintOp:
-    """Build Alembic's own ``CreateCheckConstraintOp`` from the compiled expression text.
+) -> CreateCheckConstraintTextOp:
+    """Build a :class:`CreateCheckConstraintTextOp` from the compiled expression text.
 
     ``AddConstraintOp.from_constraint()`` would carry the metadata constraint's bound column expression instead.  When
     Alembic later calls ``to_constraint()`` on such an operation, to render or reverse it, SQLAlchemy auto-attaches the
     new ``CheckConstraint`` to the table those columns belong to, which is the user's metadata table.  A second
     constraint under the same name then shadows the declared one on the next run in the same process.  Text has no
-    columns, so nothing attaches, and Alembic renders the same ``create_check_constraint(...)`` call either way.
+    columns, so nothing attaches.  The subclass renders the text exactly, so a ``%`` or a ``:`` in it survives the
+    migration.
 
     A constraint that declares ``postgresql_not_valid=True`` becomes a :class:`CreateCheckConstraintNotValidOp`, because
     Alembic's renderer would otherwise drop the flag and the migration would validate existing rows at once.
@@ -496,10 +640,10 @@ def _create_check_constraint_op(
     constraint_name = name if name is not None else constraint.name
     if _declares_not_valid(constraint):
         return CreateCheckConstraintNotValidOp(
-            constraint_name, table_name, expression, schema=schema, **constraint.dialect_kwargs
+            constraint_name, table_name, expression, schema=schema, **_dialect_kwargs(constraint)
         )
-    return ops.CreateCheckConstraintOp(
-        constraint_name, table_name, expression, schema=schema, **constraint.dialect_kwargs
+    return CreateCheckConstraintTextOp(
+        constraint_name, table_name, expression, schema=schema, **_dialect_kwargs(constraint)
     )
 
 
@@ -512,6 +656,7 @@ def _add_constraint_op(
     current_expression: str,
     desired_expression: str,
     defer_validation: bool,
+    name: str | None = None,
 ) -> MigrateOperation:
     """Build the operation that adds the changed constraint.
 
@@ -526,9 +671,10 @@ def _add_constraint_op(
     if current_set is not None and desired_set is not None:
         change = compare_value_sets(current_set, desired_set)
     removes_values = change in _DEFERRED_CHANGES
+    constraint_name = name if name is not None else constraint.name
 
     if not _declares_not_valid(constraint) and not (defer_validation and removes_values):
-        return _create_check_constraint_op(constraint, table_name, schema, expression)
+        return _create_check_constraint_op(constraint, table_name, schema, expression, name=name)
 
     column: str | None = None
     removed: list[str] = []
@@ -538,16 +684,16 @@ def _add_constraint_op(
         removed = sorted(current_set.values - desired_set.values)
         log.info(
             "Value set of check constraint %r is %s; adding it NOT VALID (removed values: %r)",
-            constraint.name,
+            constraint_name,
             change.value,
             removed,
         )
     return CreateCheckConstraintNotValidOp(
-        constraint.name,
+        constraint_name,
         table_name,
         expression,
         schema=schema,
         column=column,
         removed_values=removed,
-        **constraint.dialect_kwargs,
+        **_dialect_kwargs(constraint),
     )

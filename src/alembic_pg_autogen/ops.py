@@ -6,13 +6,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from alembic.operations.ops import CreateCheckConstraintOp, MigrateOperation
+from alembic.operations.ops import CreateCheckConstraintOp, DropConstraintOp, MigrateOperation
 from typing_extensions import override
+
+from alembic_pg_autogen.canonicalize import escape_bind_colons
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from alembic.operations.ops import CreateIndexOp, DropConstraintOp, DropIndexOp
+    from alembic.operations.ops import CreateIndexOp, DropIndexOp
     from sqlalchemy import Constraint
     from sqlalchemy.sql.elements import ColumnElement, TextClause
 
@@ -228,7 +230,31 @@ class ValidateConstraintOp(MigrateOperation):
         return ("validate_constraint", self.schema, self.table_name, self.constraint_name)
 
 
-class CreateCheckConstraintNotValidOp(CreateCheckConstraintOp):
+class CreateCheckConstraintTextOp(CreateCheckConstraintOp):
+    r"""Create a check constraint from PostgreSQL SQL text, and render that text exactly as given.
+
+    Alembic's renderer compiles the condition with the dialect of the connection. A driver with the ``pyformat``
+    parameter style doubles each ``%`` in compiled SQL, so ``code LIKE 'A%'`` would render as ``code LIKE 'A%%'``. At
+    run time, ``op.create_check_constraint()`` passes the condition through :func:`~sqlalchemy.text`, which reads
+    ``:name`` as a bind parameter. This subclass escapes each such colon as ``\:`` in a string condition, and it
+    registers a renderer that writes the escaped text without the doubling.
+    """
+
+    def __init__(
+        self,
+        constraint_name: Any,
+        table_name: str,
+        condition: str | TextClause | ColumnElement[Any],
+        *,
+        schema: str | None = None,
+        **kw: Any,
+    ) -> None:
+        if isinstance(condition, str):
+            condition = escape_bind_colons(condition)
+        super().__init__(constraint_name, table_name, condition, schema=schema, **kw)
+
+
+class CreateCheckConstraintNotValidOp(CreateCheckConstraintTextOp):
     """Create a check constraint as ``NOT VALID``, so PostgreSQL skips the scan of existing rows.
 
     Alembic's own renderer drops ``postgresql_not_valid`` from ``op.kw``.  This subclass forces the flag into ``kw``, so
@@ -274,6 +300,48 @@ class CreateCheckConstraintNotValidOp(CreateCheckConstraintOp):
     def reverse(self) -> DropConstraintOp:
         """Reverse is dropping the constraint, exactly as for a validated one."""
         return super().reverse()
+
+
+class DropCheckConstraintOp(DropConstraintOp):
+    """Drop a check constraint, and re-create it from the catalog's SQL text on downgrade.
+
+    Alembic reverses its own ``DropConstraintOp`` to an add that it renders by compiling the condition. That add has
+    the problems that :class:`CreateCheckConstraintTextOp` solves, so this subclass reverses to that class instead.
+    A constraint that the catalog holds ``NOT VALID`` reverses to :class:`CreateCheckConstraintNotValidOp`.
+    """
+
+    expression: str
+    validated: bool
+
+    def __init__(
+        self,
+        constraint_name: str,
+        table_name: str,
+        expression: str,
+        *,
+        schema: str | None = None,
+        validated: bool = True,
+    ) -> None:
+        self.expression = expression
+        self.validated = validated
+        restore = _restore_op(constraint_name, table_name, expression, schema=schema, validated=validated)
+        super().__init__(constraint_name, table_name, type_="check", schema=schema, _reverse=restore)
+
+    @override
+    def reverse(self) -> CreateCheckConstraintTextOp:
+        """Reverse is re-creating the constraint from the catalog's SQL text."""
+        return _restore_op(
+            str(self.constraint_name), self.table_name, self.expression, schema=self.schema, validated=self.validated
+        )
+
+
+def _restore_op(
+    constraint_name: str, table_name: str, expression: str, *, schema: str | None, validated: bool
+) -> CreateCheckConstraintTextOp:
+    """Build the add that restores a dropped check constraint as the catalog held it."""
+    if validated:
+        return CreateCheckConstraintTextOp(constraint_name, table_name, expression, schema=schema)
+    return CreateCheckConstraintNotValidOp(constraint_name, table_name, expression, schema=schema)
 
 
 class NoOp(MigrateOperation):

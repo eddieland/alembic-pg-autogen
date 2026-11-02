@@ -138,9 +138,11 @@ def test_importing_package_registers_renderers():
         from alembic.autogenerate.render import renderers
         from alembic_pg_autogen import (
             CreateCheckConstraintNotValidOp,
+            CreateCheckConstraintTextOp,
             CreateFunctionOp,
             CreateTriggerOp,
             CreateViewOp,
+            DropCheckConstraintOp,
             DropFunctionOp,
             DropTriggerOp,
             DropViewOp,
@@ -170,6 +172,8 @@ def test_importing_package_registers_renderers():
             DropViewOp(view),
             ValidateConstraintOp("ck", "t"),
             CreateCheckConstraintNotValidOp("ck", "t", "x IN ('a')"),
+            CreateCheckConstraintTextOp("ck", "t", "x IN ('a')"),
+            DropCheckConstraintOp("ck", "t", "x IN ('a')"),
             NoOp("nothing"),
         ]
         for op in ops:

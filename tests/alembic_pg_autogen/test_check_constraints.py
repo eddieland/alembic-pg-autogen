@@ -30,8 +30,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql.base import PGDialect
 
-from alembic_pg_autogen import CheckConstraintInfo, CreateCheckConstraintNotValidOp, ValidateConstraintOp
+from alembic_pg_autogen import (
+    CheckConstraintInfo,
+    CreateCheckConstraintNotValidOp,
+    CreateCheckConstraintTextOp,
+    DropCheckConstraintOp,
+    ValidateConstraintOp,
+)
 from alembic_pg_autogen import compare_check_constraints as module
 from alembic_pg_autogen.compare_check_constraints import (
     VALIDATION_MODE_KEY,
@@ -48,7 +55,8 @@ from alembic_pg_autogen.inspect import inspect_check_constraints
 from .test_autogenerate import _autogenerate
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
+    from typing import Final
 
     from sqlalchemy.engine import Dialect
     from sqlalchemy.sql.elements import ColumnElement
@@ -86,7 +94,7 @@ class _StubAutogenContext:
     connection: object | None
     dialect: Dialect
     opts: dict[str, Any]
-    name_filter_result: bool
+    name_filter_result: bool | Callable[[str], bool]
     object_filter_result: bool
 
     def __init__(self, connection: object | None = None, opts: dict[str, Any] | None = None) -> None:
@@ -96,7 +104,9 @@ class _StubAutogenContext:
         self.name_filter_result = True
         self.object_filter_result = True
 
-    def run_name_filters(self, *_args: Any, **_kw: Any) -> bool:
+    def run_name_filters(self, name: str, *_args: Any, **_kw: Any) -> bool:
+        if callable(self.name_filter_result):
+            return self.name_filter_result(name)
         return self.name_filter_result
 
     def run_object_filters(self, *_args: Any, **_kw: Any) -> bool:
@@ -252,6 +262,22 @@ class TestSameSql:
         assert _same_sql(left, right) is expected
 
 
+class TestCompileCheckExpressionPercent:
+    """A ``pyformat`` dialect doubles ``%`` in compiled SQL; the comparator works with SQL text, so it undoes that."""
+
+    @pytest.mark.parametrize("dialect", [PG_DIALECT, PGDialect(paramstyle="named")], ids=["pyformat", "named"])
+    def test_percent_compiles_once(self, dialect: Dialect):
+        constraint = CheckConstraint("code LIKE 'A%' AND q % 2 = 0")
+
+        assert _compile_check_expression(constraint, dialect) == "code LIKE 'A%' AND q % 2 = 0"
+
+    def test_enum_value_with_a_percent_compiles_once(self):
+        table = Table("o", MetaData(), Column("code", Enum("10%", native_enum=False, create_constraint=True)))
+        (constraint,) = _unnamed_check_constraints(table, PG_DIALECT)
+
+        assert _compile_check_expression(constraint, PG_DIALECT) == "code IN ('10%')"
+
+
 class TestCompileCheckExpressionFailure:
     def test_expression_without_a_literal_renderer_returns_none(self):
         constraint = CheckConstraint(_jsonb_comparison(), name="ck_orders_payload")
@@ -360,7 +386,7 @@ class TestComparatorSkips:
 
         ops = self._run(table).ops
 
-        assert [type(op).__name__ for op in ops] == ["DropConstraintOp", "CreateCheckConstraintOp"]
+        assert [type(op).__name__ for op in ops] == ["DropCheckConstraintOp", "CreateCheckConstraintTextOp"]
 
 
 class TestTypeBoundOwnership(TestComparatorSkips):
@@ -398,7 +424,7 @@ class TestTypeBoundOwnership(TestComparatorSkips):
 
         ops = self._run(_enum_orders_table(Status), existing=[spurious]).ops
 
-        assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintNotValidOp]
+        assert [type(op) for op in ops] == [DropCheckConstraintOp, CreateCheckConstraintNotValidOp]
         assert ops[0] is not spurious
 
     def test_missing_enum_constraint_is_added(self, catalog: Any):
@@ -406,7 +432,7 @@ class TestTypeBoundOwnership(TestComparatorSkips):
 
         (op,) = self._run(_enum_orders_table(Status)).ops
 
-        assert type(op) is CreateCheckConstraintOp
+        assert type(op) is CreateCheckConstraintTextOp
         assert op.constraint_name == "ck_orders_status"
         assert probed == []
 
@@ -585,7 +611,7 @@ class TestUnnamedPairing(TestComparatorSkips):
 
         (op,) = self._run(_orders_table(CheckConstraint("amount > 0"))).ops
 
-        assert type(op) is CreateCheckConstraintOp
+        assert type(op) is CreateCheckConstraintTextOp
         assert op.constraint_name == "orders_amount_check"
         assert str(op.condition) == "amount > 0"
         assert calls == {"canonicalized": [], "named": [["amount > 0"]]}
@@ -661,13 +687,22 @@ class TestUnnamedPairing(TestComparatorSkips):
         assert ops == [drops[1]]
         assert "occurs 1 times in the model and 2 times" in caplog.text
 
-    def test_failed_probe_leaves_the_constraint_alone(self, unnamed_catalog: Any):
-        """Without a canonical form, the constraint may still match a catalog constraint, so nothing is added."""
+    def test_failed_probe_keeps_the_leftover_constraints(self, unnamed_catalog: Any, caplog: Any):
+        """Without a canonical form, the constraint may match a leftover catalog constraint, so nothing is dropped."""
         calls = unnamed_catalog({"orders_amount_check": "amount >= 0::numeric"}, {})
         drop = self._drop("orders_amount_check")
 
-        assert self._run(_orders_table(CheckConstraint("amount >= 0")), existing=[drop]).ops == [drop]
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            assert self._run(_orders_table(CheckConstraint("amount >= 0")), existing=[drop]).is_empty()
         assert calls["named"] == []
+        assert "Keeping check constraints ['orders_amount_check']" in caplog.text
+
+    def test_failed_probe_of_one_constraint_still_pairs_the_others(self, unnamed_catalog: Any):
+        """A rejected probe must not cost the other constraints their pairs."""
+        unnamed_catalog({"orders_amount_check": "amount >= 0::numeric"}, {"amount >= 0": "amount >= 0::numeric"})
+        table = _orders_table(CheckConstraint("amount >= 0"), CheckConstraint("qty > 0"))
+
+        assert self._run(table, existing=[self._drop("orders_amount_check")]).is_empty()
 
     def test_failed_name_probe_adds_nothing(self, unnamed_catalog: Any):
         unnamed_catalog({}, names=[None])
@@ -683,13 +718,28 @@ class TestUnnamedPairing(TestComparatorSkips):
         assert self._run(table).is_empty()
         assert calls["named"] == []
 
-    def test_name_filter_excludes_the_reflected_constraint_from_pairing(self, unnamed_catalog: Any):
+    def test_reflected_constraint_the_name_filter_excludes_still_pairs(self, unnamed_catalog: Any):
+        """An excluded catalog constraint counts in the add decision, so no duplicate ``orders_amount_check1`` appears."""
         calls = unnamed_catalog({"orders_amount_check": "amount > 0"}, names=["orders_amount_check1"])
+        context = _stub_context(connection=object())
+        context.name_filter_result = _excludes_orders_amount_check
+
+        assert self._run(_orders_table(CheckConstraint("amount > 0")), context).is_empty()
+        assert calls["named"] == []
+
+    def test_excluded_pair_emits_no_validation(self, unnamed_catalog: Any):
+        unnamed_catalog({"orders_amount_check": "amount > 0"}, not_valid=["orders_amount_check"])
+        context = _stub_context(connection=object())
+        context.name_filter_result = _excludes_orders_amount_check
+
+        assert self._run(_orders_table(CheckConstraint("amount > 0")), context).is_empty()
+
+    def test_name_filter_can_veto_the_add(self, unnamed_catalog: Any):
+        unnamed_catalog({}, names=["orders_amount_check"])
         context = _stub_context(connection=object())
         context.name_filter_result = False
 
         assert self._run(_orders_table(CheckConstraint("amount > 0")), context).is_empty()
-        assert calls["named"] == [["amount > 0"]]
 
     def test_object_filter_can_veto_the_add(self, unnamed_catalog: Any):
         unnamed_catalog({}, names=["orders_amount_check"])
@@ -709,6 +759,44 @@ class TestUnnamedPairing(TestComparatorSkips):
         reflected = Table("orders", MetaData(), Column("id", Integer, primary_key=True))
 
         assert self._run(table, conn_table=reflected).is_empty()
+        assert calls["named"] == []
+
+    def test_object_filter_can_veto_a_value_set_change(self, unnamed_catalog: Any):
+        unnamed_catalog(
+            {"orders_status_check": WIDER_STATUS},
+            {"status IN ('new', 'done')": CURRENT_STATUS},
+            names=["orders_status_check1"],
+        )
+        context = _stub_context(connection=object())
+        context.object_filter_result = False
+        drop = self._drop("orders_status_check")
+        table = Table(
+            "orders",
+            MetaData(),
+            Column("id", Integer, primary_key=True),
+            Column("status", Enum("new", "done", native_enum=False, create_constraint=True, length=16)),
+        )
+
+        assert self._run(table, context, existing=[drop]).ops == [drop]
+
+    def test_unnamed_enum_narrowing_drops_and_adds_not_valid_under_the_reflected_name(self, unnamed_catalog: Any):
+        calls = unnamed_catalog({"orders_status_check": WIDER_STATUS}, {"status IN ('new', 'done')": CURRENT_STATUS})
+        spurious = self._drop("orders_status_check")
+        table = Table(
+            "orders",
+            MetaData(),
+            Column("id", Integer, primary_key=True),
+            Column("status", Enum("new", "done", native_enum=False, create_constraint=True, length=16)),
+        )
+
+        ops = self._run(table, existing=[spurious]).ops
+
+        assert [type(op) for op in ops] == [DropCheckConstraintOp, CreateCheckConstraintNotValidOp]
+        assert ops[0] is not spurious
+        add = ops[1]
+        assert isinstance(add, CreateCheckConstraintNotValidOp)
+        assert add.constraint_name == "orders_status_check"
+        assert add.removed_values == ("shipped",)
         assert calls["named"] == []
 
     def test_unnamed_enum_constraint_pairs_with_the_catalog(self, unnamed_catalog: Any):
@@ -793,7 +881,7 @@ class TestValidationStateComparison(TestComparatorSkips):
 
         ops = self._run(table).ops
 
-        assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintOp]
+        assert [type(op) for op in ops] == [DropCheckConstraintOp, CreateCheckConstraintTextOp]
         drop = ops[0]
         assert isinstance(drop, DropConstraintOp)
         assert drop.to_constraint().dialect_options["postgresql"]["not_valid"] is True
@@ -832,7 +920,7 @@ class TestValueSetChanges(TestComparatorSkips):
 
         ops = self._run(_enum_orders_table(WiderStatus)).ops
 
-        assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintOp]
+        assert [type(op) for op in ops] == [DropCheckConstraintOp, CreateCheckConstraintTextOp]
 
     def test_narrowing_records_removed_values(self, catalog: Any):
         catalog({"ck_orders_status": CURRENT_STATUS}, {"ck_orders_status": NARROWER_STATUS})
@@ -890,14 +978,14 @@ class TestValueSetChanges(TestComparatorSkips):
 
         ops = self._run(table).ops
 
-        assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintOp]
+        assert [type(op) for op in ops] == [DropCheckConstraintOp, CreateCheckConstraintTextOp]
 
     def test_immediate_mode_keeps_the_validating_add(self, catalog: Any):
         catalog({"ck_orders_status": WIDER_STATUS}, {"ck_orders_status": CURRENT_STATUS})
 
         ops = self._run(_enum_orders_table(Status), opts={VALIDATION_MODE_KEY: "immediate"}).ops
 
-        assert [type(op) for op in ops] == [DropConstraintOp, CreateCheckConstraintOp]
+        assert [type(op) for op in ops] == [DropCheckConstraintOp, CreateCheckConstraintTextOp]
 
     def test_metadata_not_valid_uses_the_not_valid_add_for_any_expression(self, catalog: Any):
         catalog({"ck_orders_amount": "amount > 0::numeric"}, {"ck_orders_amount": "amount >= 0::numeric"})
@@ -1297,6 +1385,189 @@ class TestCheckConstraintAutogenerateIntegration:
         assert "op.create_check_constraint('orders_qty_check', 'orders', 'qty >= 0')" in second
         assert _check_constraint_names(alembic_project) == ["orders_amount_check", "orders_qty_check"]
 
+    def test_percent_in_an_unnamed_constraint_round_trips(self, alembic_project: AlembicProject):
+        """Compiled SQL doubles ``%``; the comparator must compare and render the single form."""
+        alembic_project.execute(
+            "CREATE TABLE o (id serial PRIMARY KEY, code varchar(9) CHECK (code LIKE 'A%'), q int CHECK (q % 2 = 0))"
+        )
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("code", String(9), CheckConstraint("code LIKE 'A%'")),
+            Column("q", Integer, CheckConstraint("q % 2 = 0")),
+        )
+
+        assert "check" not in _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+
+    def test_percent_in_a_new_enum_value_set_is_added_once(self, alembic_project: AlembicProject):
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, code varchar(9))")
+        alembic_project.execute("INSERT INTO o (code) VALUES ('10%')")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("code", Enum("10%", "20%", native_enum=False, create_constraint=True, length=9)),
+        )
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata)
+
+        assert "op.create_check_constraint('o_code_check', 'o', \"code IN ('10%', '20%')\")" in content
+        assert "check" not in _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+
+    def test_colon_in_an_enum_value_is_not_a_bind_parameter(self, alembic_project: AlembicProject):
+        # ``execute()`` runs the SQL through ``text()``, so the test escapes its own colon.
+        alembic_project.execute(
+            "CREATE TABLE o (id serial PRIMARY KEY, code varchar(9) CHECK (code IN ('a \\:b', 'c')))"
+        )
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("code", Enum("a :b", "c", native_enum=False, create_constraint=True, length=9)),
+        )
+
+        assert "check" not in _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+
+    def test_rejected_probe_keeps_the_other_pairs(self, alembic_project: AlembicProject):
+        """A new column's constraint fails its probe; the existing constraint must keep its pair and its catalog row."""
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, amount numeric CHECK (amount >= 0))")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("amount", Numeric(), CheckConstraint("amount >= 0")),
+            Column("qty", Integer, CheckConstraint("qty > 0")),
+        )
+
+        first = _upgrade_body(
+            _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+        )
+
+        assert "drop_constraint" not in first
+        assert "add_column" in first
+        assert _check_constraint_names(alembic_project, "o") == ["o_amount_check"]
+
+    def test_unnamed_add_avoids_a_named_add_of_the_same_migration(self, alembic_project: AlembicProject):
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, amount numeric)")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("amount", Numeric()),
+            CheckConstraint("amount > 0", name="o_amount_check"),
+            CheckConstraint("amount < 100"),
+        )
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+
+        assert "op.create_check_constraint('o_amount_check1', 'o', 'amount < 100')" in content
+        assert _check_constraint_names(alembic_project, "o") == ["o_amount_check", "o_amount_check1"]
+
+    def test_unnamed_add_avoids_a_constraint_name_of_another_table(self, alembic_project: AlembicProject):
+        """PostgreSQL avoids constraint names across the whole schema, and the TEMP copy cannot see them."""
+        alembic_project.execute("CREATE TABLE other (a int CONSTRAINT o_amount_check CHECK (a > 0))")
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, amount numeric)")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("amount", Numeric(), CheckConstraint("amount > 0")),
+        )
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata)
+
+        assert "op.create_check_constraint('o_amount_check1', 'o', 'amount > 0')" in content
+
+    def test_unnamed_enum_narrowing_is_added_not_valid(self, alembic_project: AlembicProject):
+        alembic_project.execute(
+            "CREATE TABLE o (id serial PRIMARY KEY, status varchar(16) CHECK (status IN ('a', 'b', 'c')))"
+        )
+        alembic_project.execute("INSERT INTO o (status) VALUES ('c')")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("status", Enum("a", "b", native_enum=False, create_constraint=True, length=16)),
+        )
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+
+        upgrade_body = _upgrade_body(content)
+        assert _dropped_names(upgrade_body) == ["o_status_check"]
+        assert (
+            "create_check_constraint('o_status_check', 'o', \"status IN ('a', 'b')\", postgresql_not_valid=True)"
+            in (upgrade_body)
+        )
+        assert "# Backfill those rows before the revision that validates o_status_check." in upgrade_body
+        with alembic_project.connect() as conn:
+            (info,) = inspect_check_constraints(conn, schemas=[alembic_project.schema], table_names=["o"])
+        assert info.validated is False
+
+    def test_excluded_catalog_constraint_is_not_added_again(self, alembic_project: AlembicProject):
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, amount numeric CHECK (amount > 0))")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("amount", Numeric(), CheckConstraint("amount > 0")),
+        )
+
+        content = _autogenerate(
+            alembic_project,
+            target_metadata=metadata,
+            autogenerate_plugins=_BYNAME_PLUGINS,
+            include_name=_excludes_o_amount_check,
+        )
+
+        assert "check" not in _upgrade_body(content)
+
+    def test_downgrade_restores_percent_and_colon_exactly(self, alembic_project: AlembicProject):
+        # ``execute()`` runs the SQL through ``text()``, so the test escapes its own colon.
+        alembic_project.execute(
+            "CREATE TABLE o (id serial PRIMARY KEY, code varchar(9),"
+            " CONSTRAINT ck_o_code CHECK (code LIKE 'A%' OR code = 'a \\:b'))"
+        )
+        before = _check_constraint_expressions(alembic_project, "o")
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("code", String(9)),
+            CheckConstraint("code LIKE 'B%'", name="ck_o_code"),
+        )
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata)
+        assert "op.create_check_constraint('ck_o_code', 'o', \"code LIKE 'B%'\")" in content
+        assert _check_constraint_expressions(alembic_project, "o") == ["code::text ~~ 'B%'::text"]
+
+        downgrade(alembic_project.config, "-1")
+        assert _check_constraint_expressions(alembic_project, "o") == before
+
+
+_BYNAME_PLUGINS: Final = [
+    "alembic.autogenerate.*",
+    "alembic.autogenerate.checkconstraint_byname",
+    "alembic_pg_autogen.*",
+]
+
+
+def _excludes_orders_amount_check(name: str) -> bool:
+    return name != "orders_amount_check"
+
+
+def _excludes_o_amount_check(name: str | None, type_: str, _parent_names: object) -> bool:
+    return not (type_ == "check_constraint" and name == "o_amount_check")
+
 
 def _unnamed_orders_table() -> Table:
     """The ``orders`` model of the proposal: four unnamed constraints, one of them from a non-native ``Enum``."""
@@ -1317,9 +1588,15 @@ def _dropped_names(body: str) -> list[str]:
     return re.findall(r"drop_constraint\((?:op\.f\()?'(\w+)'", body)
 
 
-def _check_constraint_names(project: AlembicProject) -> list[str]:
+def _check_constraint_expressions(project: AlembicProject, table_name: str) -> list[str]:
     with project.connect() as conn:
-        infos = inspect_check_constraints(conn, schemas=[project.schema], table_names=["orders"])
+        infos = inspect_check_constraints(conn, schemas=[project.schema], table_names=[table_name])
+    return [info.expression for info in infos]
+
+
+def _check_constraint_names(project: AlembicProject, table_name: str = "orders") -> list[str]:
+    with project.connect() as conn:
+        infos = inspect_check_constraints(conn, schemas=[project.schema], table_names=[table_name])
     return [info.name for info in infos]
 
 
@@ -1341,10 +1618,11 @@ def _status_constraint(project: AlembicProject) -> CheckConstraintInfo:
     return info
 
 
-def _autogenerate_and_upgrade(project: AlembicProject, metadata: MetaData) -> str:
+def _autogenerate_and_upgrade(project: AlembicProject, metadata: MetaData, **attrs: object) -> str:
     """Autogenerate the next revision, apply it, and return its source."""
     cfg = project.config
     cfg.attributes["target_metadata"] = metadata
+    cfg.attributes.update(attrs)
     versions = Path(cfg.get_main_option("script_location")) / "versions"  # pyright: ignore[reportArgumentType]
     before = set(versions.glob("*.py"))
     script = revision(cfg, message="test", autogenerate=True)

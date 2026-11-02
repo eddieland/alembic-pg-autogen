@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING
 
 from alembic.autogenerate.render import render_op, renderers
 from alembic.operations.ops import CreateCheckConstraintOp
+from sqlalchemy import text
 
 from alembic_pg_autogen.ops import (
     CreateCheckConstraintNotValidOp,
+    CreateCheckConstraintTextOp,
     CreateFunctionOp,
     CreateIndexConcurrentlyOp,
     CreateTriggerOp,
@@ -114,6 +116,23 @@ def _render_validate_constraint(autogen_context: AutogenContext, op: ValidateCon
     return _render_execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {preparer.quote(op.constraint_name)}")
 
 
+@renderers.dispatch_for(CreateCheckConstraintTextOp)
+def _render_create_check_constraint_text(autogen_context: AutogenContext, op: CreateCheckConstraintTextOp) -> str:
+    r"""Render Alembic's own ``create_check_constraint(...)`` call with the condition text exactly as the op holds it.
+
+    Alembic's renderer compiles the condition, which doubles each ``%`` on a ``pyformat`` dialect and removes the
+    escapes of ``\:``. The function compiles the condition the same way and puts the op's own text in place of that
+    one rendered string. Everything else in the call stays as Alembic renders it.
+    """
+    render_parent = renderers.dispatch(CreateCheckConstraintOp)
+    call = render_parent(autogen_context, op)
+    assert isinstance(call, str), call
+    if not isinstance(op.condition, str):
+        return call
+    compiled = autogen_context.migration_context.impl.render_ddl_sql_expr(text(op.condition))
+    return call.replace(repr(compiled), repr(op.condition), 1)
+
+
 @renderers.dispatch_for(CreateCheckConstraintNotValidOp)
 def _render_create_check_constraint_not_valid(
     autogen_context: AutogenContext, op: CreateCheckConstraintNotValidOp
@@ -121,13 +140,14 @@ def _render_create_check_constraint_not_valid(
     """Render Alembic's own ``create_check_constraint(...)`` call with ``postgresql_not_valid=True`` appended.
 
     Alembic's renderer for the parent class handles naming conventions, expression rendering, the schema argument, and
-    the ``batch_op.`` prefix, but it ignores dialect keywords.  Delegating to it and rewriting the closing parenthesis
-    keeps every one of those behaviors.  A narrowed value set also gets a comment that asks for a backfill.
+    the ``batch_op.`` prefix.  Before Alembic 1.20 it ignores dialect keywords.  Delegating to it and rewriting the
+    closing parenthesis keeps every one of those behaviors.  Alembic 1.20 renders the dialect keywords itself, so the
+    keyword is appended only when the call lacks it.  A narrowed value set also gets a comment that asks for a backfill.
     """
-    render_parent = renderers.dispatch(CreateCheckConstraintOp)
-    call = render_parent(autogen_context, op)
-    assert isinstance(call, str) and call.endswith(")"), call
-    call = f"{call[:-1]}, postgresql_not_valid=True)"
+    call = _render_create_check_constraint_text(autogen_context, op)
+    assert call.endswith(")"), call
+    if "postgresql_not_valid=" not in call:
+        call = f"{call[:-1]}, postgresql_not_valid=True)"
     if not op.removed_values:
         return [call]
 

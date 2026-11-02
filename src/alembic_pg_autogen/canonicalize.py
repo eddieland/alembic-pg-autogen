@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import re
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import CreateIndex
 
 from alembic_pg_autogen.inspect import IndexInfo, current_schema, inspect_functions, inspect_triggers, inspect_views
@@ -15,7 +17,7 @@ from alembic_pg_autogen.sentinels import IGNORED
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from sqlalchemy import Connection, Index
 
@@ -173,57 +175,58 @@ def canonicalize_check_constraints(
 ) -> Mapping[str, str]:
     """Canonicalize desired ``CHECK`` expressions by round-tripping them through PostgreSQL.
 
-    Each expression is added to the live table as a throwaway ``NOT VALID`` constraint inside a savepoint, read back
-    with ``pg_get_expr()``, and then rolled back — leaving the database unchanged.  ``NOT VALID`` keeps the round-trip
-    cheap: PostgreSQL skips the full-table validation scan, so no existing row is examined and rows that would violate
-    a newly declared constraint do not turn autogenerate into an error.
+    The function adds each expression as a throwaway ``NOT VALID`` constraint to an empty ``TEMP`` copy of the table,
+    inside a savepoint. It reads each one back with ``pg_get_expr()``, and then rolls back the savepoint, so the
+    database does not change. ``CREATE TEMP TABLE ... (LIKE ...)`` copies the column names, types, and collations that
+    the deparse uses, so the copy gives the same canonical form as the real table. The copy takes only an
+    ``ACCESS SHARE`` lock on the real table. An ``ALTER TABLE`` on the real table would take ``ACCESS EXCLUSIVE``, and
+    every reader of the table would wait behind autogenerate.
 
     The returned expressions are directly comparable with :attr:`CheckConstraintInfo.expression
     <alembic_pg_autogen.inspect.CheckConstraintInfo.expression>`, which is read back through the same
-    ``pg_get_expr()`` deparse.  That is the whole point of the round-trip: ``amount >= 0`` in a SQLAlchemy model and
+    ``pg_get_expr()`` deparse. That is the whole point of the round trip: ``amount >= 0`` in a SQLAlchemy model and
     ``(amount >= (0)::numeric)`` in the catalog are the same constraint, and only PostgreSQL can say so.
 
+    Each expression runs in its own nested savepoint. An expression that PostgreSQL rejects is absent from the result,
+    and the other expressions still normalize.
+
     Args:
-        conn: An open SQLAlchemy connection (may have an active transaction).
+        conn: An open SQLAlchemy connection with an active transaction.
         schema: Schema qualifying *table_name*, or *None* to resolve it through the connection's ``search_path``.
-        table_name: The table the constraints belong to.  It must already exist in the database.
-        expressions: Mapping of constraint name to the raw ``CHECK`` expression text to normalize.
+        table_name: The table the constraints belong to. It must already exist in the database.
+        expressions: Mapping of a key, such as the constraint name, to the raw ``CHECK`` expression text.
 
     Returns:
-        A mapping of constraint name to normalized expression.  Names whose expression could not be applied — an
-        invalid expression, a column that does not exist yet, a table the connection may not lock — are absent from
-        the result rather than raising, so a single unusable constraint cannot break autogenerate.
+        A mapping of key to normalized expression. Keys whose expression could not be applied are absent from the
+        result rather than raising, so a single unusable constraint cannot break autogenerate. Examples are an invalid
+        expression, a column that does not exist yet, and a connection without a transaction.
     """
     if not expressions:
         return {}
 
     preparer = conn.dialect.identifier_preparer
-    qualified = preparer.quote(table_name)
-    if schema is not None:
-        qualified = f"{preparer.quote_schema(schema)}.{qualified}"
-    probes = {f"{_PROBE_PREFIX}{index}": name for index, name in enumerate(expressions)}
-
-    savepoint = conn.begin_nested()
-    try:
-        for probe, name in probes.items():
-            # The expression is user-authored SQL from the model's own metadata, interpolated the same way the rest of
-            # this module interpolates user DDL.  It only ever runs inside this savepoint.
-            conn.execute(
-                text(
-                    f"ALTER TABLE {qualified} ADD CONSTRAINT {preparer.quote(probe)} "
-                    f"CHECK ({expressions[name]}) NOT VALID"
-                )
-            )
-        rows = conn.execute(text(_PROBE_QUERY), {"table": qualified, "names": list(probes)}).all()
-        normalized = {probes[row.name]: row.expression for row in rows}
-    except DBAPIError:
-        log.warning(
-            "Could not canonicalize check constraints on %s; treating them as unchanged", qualified, exc_info=True
-        )
-        normalized = {}
-    finally:
-        savepoint.rollback()
-        log.debug("Check constraint canonicalization savepoint rolled back")
+    normalized: dict[str, str] = {}
+    with _check_probe_clone(conn, schema=schema, table_name=table_name) as clone:
+        if clone is not None:
+            try:
+                probes: dict[str, str] = {}
+                for index, (key, expression) in enumerate(expressions.items()):
+                    probe = f"{_PROBE_PREFIX}{index}"
+                    statement = (
+                        f"ALTER TABLE {clone} ADD CONSTRAINT {preparer.quote(probe)} CHECK ({expression}) NOT VALID"
+                    )
+                    probe_savepoint = conn.begin_nested()
+                    if _execute_probe(conn, statement, expression, clone):
+                        probe_savepoint.commit()
+                        probes[probe] = key
+                    else:
+                        probe_savepoint.rollback()
+                if probes:
+                    rows = conn.execute(text(_PROBE_QUERY), {"table": clone, "names": list(probes)}).all()
+                    normalized = {probes[row.name]: row.expression for row in rows}
+            except SQLAlchemyError:
+                log.warning("Could not canonicalize check constraints on %s", clone, exc_info=True)
+                normalized = {}
 
     missing = set(expressions) - set(normalized)
     if missing:
@@ -238,51 +241,80 @@ def choose_check_constraint_names(
     schema: str | None,
     table_name: str,
     expressions: Sequence[str],
+    reserved: Iterable[str] = (),
 ) -> Sequence[str | None]:
     """Return the name that PostgreSQL gives each unnamed ``CHECK`` expression when it is added to a table.
 
     PostgreSQL names an unnamed constraint after the table and the referenced column, for example
-    ``orders_amount_check``. It appends a number after a collision and truncates the name at 63 bytes. This function
-    does not predict that rule. It adds each expression to the live table without a name, in the order given, inside a
-    savepoint. It reads back the name of each new constraint, and then rolls back the savepoint. Each constraint is
-    added ``NOT VALID``, so no row is examined.
+    ``orders_amount_check``. It appends a number while the name is taken by any constraint in the schema, and it
+    truncates the name at 63 bytes. This function does not predict that rule. It asks PostgreSQL. It creates an empty
+    ``TEMP`` copy of the table inside a savepoint and adds each expression to the copy without a name, in the order
+    given. When the copy chooses a name that the real schema or *reserved* already holds, the function adds a
+    placeholder constraint under that name and asks again. Then it rolls back the savepoint. The copy takes only an
+    ``ACCESS SHARE`` lock on the real table.
 
     The expressions are added one after the other. A later expression therefore sees the names of the earlier ones. A
     migration that adds the same constraints in the same order under the returned names gives the same result. Each
     expression runs in its own nested savepoint, so an expression that PostgreSQL rejects affects only its own entry.
 
     Args:
-        conn: An open SQLAlchemy connection (may have an active transaction).
+        conn: An open SQLAlchemy connection with an active transaction.
         schema: Schema qualifying *table_name*, or *None* to resolve it through the connection's ``search_path``.
         table_name: The table the constraints belong to. It must already exist in the database.
         expressions: The ``CHECK`` expression texts, in the order a migration adds them.
+        reserved: Names that the same migration creates before these constraints, such as the named constraints that
+            Alembic adds. PostgreSQL does not choose them.
 
     Returns:
         One name per expression, in the same order. The entry is *None* for an expression that PostgreSQL rejects, for
-        example one that references a column that does not exist yet. A warning is logged for each such expression.
+        example one that references a column that does not exist yet. Every entry is *None* when the copy cannot be
+        created. A warning is logged in both cases.
     """
     if not expressions:
         return []
 
+    names: list[str | None] = [None] * len(expressions)
+    with _check_probe_clone(conn, schema=schema, table_name=table_name) as clone:
+        if clone is None:
+            return names
+        try:
+            names = _choose_names(conn, clone, _qualified_table(conn, schema, table_name), expressions, reserved)
+        except SQLAlchemyError:
+            log.warning("Could not choose names for check constraints on %s", clone, exc_info=True)
+
+    return names
+
+
+def _choose_names(
+    conn: Connection, clone: str, real: str, expressions: Sequence[str], reserved: Iterable[str]
+) -> list[str | None]:
+    """Add each expression to *clone* without a name and return the names PostgreSQL chose, as the real table would.
+
+    The copy lives in ``pg_temp``, so PostgreSQL cannot see the constraint names of the real schema. When it chooses
+    one of those names, or a reserved name, the probe is rolled back and a placeholder takes the name. PostgreSQL
+    tries ``base``, ``base1``, ``base2`` in order, so the next probe gives the name that the real table would get.
+    """
     preparer = conn.dialect.identifier_preparer
-    qualified = preparer.quote(table_name)
-    if schema is not None:
-        qualified = f"{preparer.quote_schema(schema)}.{qualified}"
-
+    taken = set(conn.execute(text(_SCHEMA_CONSTRAINT_NAMES_QUERY), {"table": real}).scalars()) | set(reserved)
     names: list[str | None] = []
-    savepoint = conn.begin_nested()
-    try:
-        seen = set(conn.execute(text(_CONSTRAINT_NAMES_QUERY), {"table": qualified}).scalars())
-        for expression in expressions:
-            names.append(_add_unnamed_probe(conn, qualified, expression, seen))
-    except DBAPIError:
-        # Only the name query can fail here. A rejected expression is handled inside ``_add_unnamed_probe``.
-        log.warning("Could not choose names for check constraints on %s", qualified, exc_info=True)
-        names = [None] * len(expressions)
-    finally:
-        savepoint.rollback()
-        log.debug("Check constraint naming savepoint rolled back")
-
+    for expression in expressions:
+        statement = f"ALTER TABLE {clone} ADD CHECK ({expression}) NOT VALID"
+        name: str | None = None
+        while True:
+            before = set(conn.execute(text(_CONSTRAINT_NAMES_QUERY), {"table": clone}).scalars())
+            probe = conn.begin_nested()
+            if not _execute_probe(conn, statement, expression, clone):
+                probe.rollback()
+                break
+            (chosen,) = set(conn.execute(text(_CONSTRAINT_NAMES_QUERY), {"table": clone}).scalars()) - before
+            if chosen not in taken:
+                probe.commit()
+                name = chosen
+                taken.add(chosen)
+                break
+            probe.rollback()
+            conn.execute(text(f"ALTER TABLE {clone} ADD CONSTRAINT {preparer.quote(chosen)} CHECK (true)"))
+        names.append(name)
     return names
 
 
@@ -447,6 +479,9 @@ never equal a catalog shape, so it causes a permanent false difference.
 
 _PROBE_PREFIX = "_alembic_pg_autogen_probe_"
 
+_BIND_PARAMS = re.compile(r"(?<![:\w\x5c]):(\w+)(?!:)", re.UNICODE)
+"""The pattern that ``TextClause`` uses to find bind parameters. User-authored SQL escapes each match."""
+
 _PROBE_QUERY = """\
 SELECT
     con.conname AS name,
@@ -462,27 +497,83 @@ FROM pg_catalog.pg_constraint con
 WHERE con.conrelid = CAST(:table AS regclass)
 """
 
+_SCHEMA_CONSTRAINT_NAMES_QUERY = """\
+SELECT con.conname
+FROM pg_catalog.pg_constraint con
+WHERE con.connamespace = (SELECT c.relnamespace FROM pg_catalog.pg_class c WHERE c.oid = CAST(:table AS regclass))
+"""
 
-def _add_unnamed_probe(conn: Connection, qualified: str, expression: str, seen: set[str]) -> str | None:
-    """Add *expression* to the table without a name and return the name PostgreSQL chose, or *None* on rejection.
 
-    The probe runs in a nested savepoint. A rejected expression rolls back only that savepoint, so the probes before
-    it stay in place and the probes after it still see their names. *seen* holds the names already on the table, and
-    the new name is added to it.
+@contextmanager
+def _check_probe_clone(conn: Connection, *, schema: str | None, table_name: str) -> Iterator[str | None]:
+    """Yield the qualified name of an empty ``TEMP`` copy of the table, inside a savepoint, or *None* on failure.
+
+    The copy has the name of the target table inside ``pg_temp``. PostgreSQL names an unnamed constraint after its
+    table, so the shared name keeps the names that the copy chooses equal to those of the real table. The savepoint is
+    always rolled back, so the copy never outlives the block.
     """
-    probe = conn.begin_nested()
+    qualified = _qualified_table(conn, schema, table_name)
+    clone = f"{_TEMP_SCHEMA}.{conn.dialect.identifier_preparer.quote(table_name)}"
+
     try:
-        # The expression is user-authored SQL from the model's own metadata. It only ever runs in a savepoint.
-        conn.execute(text(f"ALTER TABLE {qualified} ADD CHECK ({expression}) NOT VALID"))
-        names = set(conn.execute(text(_CONSTRAINT_NAMES_QUERY), {"table": qualified}).scalars())
-    except DBAPIError:
-        probe.rollback()
-        log.warning("Could not choose a name for check expression %r on %s", expression, qualified, exc_info=True)
-        return None
-    probe.commit()
-    (name,) = names - seen
-    seen.add(name)
-    return name
+        savepoint = conn.begin_nested()
+    except SQLAlchemyError:
+        # An AUTOCOMMIT connection has no transaction to hold a savepoint.
+        log.warning("Could not open a savepoint to probe check constraints on %s", qualified, exc_info=True)
+        yield None
+        return
+
+    try:
+        try:
+            conn.execute(text(f"CREATE TEMP TABLE {clone} (LIKE {qualified})"))
+        except SQLAlchemyError:
+            # A temporary relation with the same name on this connection blocks the copy, as for indexes.
+            log.warning(
+                "Could not create a temporary probe clone of %s; treating its check constraints as unchanged",
+                qualified,
+                exc_info=True,
+            )
+            yield None
+        else:
+            yield clone
+    finally:
+        savepoint.rollback()
+        log.debug("Check constraint probe savepoint rolled back")
+
+
+def _qualified_table(conn: Connection, schema: str | None, table_name: str) -> str:
+    """Return *table_name* quoted, and qualified by *schema* when one is given."""
+    preparer = conn.dialect.identifier_preparer
+    qualified = preparer.quote(table_name)
+    if schema is not None:
+        qualified = f"{preparer.quote_schema(schema)}.{qualified}"
+    return qualified
+
+
+def _execute_probe(conn: Connection, statement: str, expression: str, clone: str) -> bool:
+    """Run one probe statement and return whether PostgreSQL accepted it.
+
+    The caller wraps the call in a nested savepoint, so a rejected statement rolls back only that savepoint. The
+    statement holds user-authored SQL from the model's own metadata, so its colons are escaped before
+    :func:`~sqlalchemy.text` reads them. ``SQLAlchemyError`` is caught, not ``DBAPIError``, because a statement error
+    raises before the server sees the statement.
+    """
+    try:
+        conn.execute(text(escape_bind_colons(statement)))
+    except SQLAlchemyError:
+        log.warning("Could not probe check expression %r on %s", expression, clone)
+        log.debug("Check expression probe failure for %r", expression, exc_info=True)
+        return False
+    return True
+
+
+def escape_bind_colons(sql: str) -> str:
+    r"""Escape each colon that :func:`~sqlalchemy.text` would read as a bind parameter, such as ``:b`` in ``'a :b'``.
+
+    The pattern is the one SQLAlchemy uses for bind parameters in ``TextClause``. A cast such as ``::numeric`` does not
+    match it. ``text()`` turns each ``\:`` back into a plain colon.
+    """
+    return _BIND_PARAMS.sub(r"\\\g<0>", sql)
 
 
 def _declared(ddl: Sequence[str] | Ignored) -> Sequence[str]:
