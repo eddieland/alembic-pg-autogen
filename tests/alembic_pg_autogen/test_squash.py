@@ -9,6 +9,7 @@ instead of skipping them.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import textwrap
@@ -1178,9 +1179,10 @@ class TestSquash:
         result = squash(project.config(), "r02", server_url=pg_engine.url)
 
         assert "REFRESH MATERIALIZED VIEW public.base WITH NO DATA" in result.source
-        assert result.source.index("REFRESH MATERIALIZED VIEW public.owned'") < result.source.index(
-            f"ALTER MATERIALIZED VIEW public.owned OWNER TO {owner}"
-        )
+        # pg_dump 14 writes ALTER TABLE for a materialized view owner, newer versions write ALTER MATERIALIZED VIEW.
+        owner_statement = re.search(rf"ALTER (?:MATERIALIZED VIEW|TABLE) public\.owned OWNER TO {owner}", result.source)
+        assert owner_statement is not None
+        assert result.source.index("REFRESH MATERIALIZED VIEW public.owned'") < owner_statement.start()
         fresh = make_db()
         command.upgrade(project.config(fresh), "head")
         populated = "SELECT relname FROM pg_class WHERE relkind = 'm' AND relispopulated"
