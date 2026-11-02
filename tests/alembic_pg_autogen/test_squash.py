@@ -1091,26 +1091,32 @@ class TestSquash:
         self, tmp_path: Path, pg_engine: Engine, make_db: Callable[[], sa.URL], make_role: Callable[..., str]
     ) -> None:
         owner = make_role()
-        project = Project(
-            tmp_path,
-            {
-                "r01": _rev(
-                    "r01",
-                    None,
-                    f"""
-                    op.execute("CREATE TABLE t (id int)")
-                    op.execute("CREATE FUNCTION ids() RETURNS SETOF int LANGUAGE sql AS 'SELECT id FROM t'")
-                    op.execute("CREATE MATERIALIZED VIEW by_function AS SELECT * FROM ids() AS id")
-                    op.execute("CREATE MATERIALIZED VIEW base AS SELECT id FROM t")
-                    op.execute("CREATE MATERIALIZED VIEW over_base AS SELECT id FROM base")
-                    op.execute("REFRESH MATERIALIZED VIEW base WITH NO DATA")
-                    op.execute("CREATE MATERIALIZED VIEW owned AS SELECT id FROM t")
-                    op.execute('ALTER MATERIALIZED VIEW owned OWNER TO "{owner}"')
-                    """,
-                ),
-                "r02": _rev("r02", "r01"),
-            },
+        with pg_engine.connect() as conn:
+            version = int(conn.execute(sa.text("SHOW server_version_num")).scalar_one())
+        # PostgreSQL 17 and newer refresh with a fixed safe search_path, so the old chain itself cannot use a function
+        # with an unqualified table name there.
+        by_function = (
+            """
+            op.execute("CREATE FUNCTION ids() RETURNS SETOF int LANGUAGE sql AS 'SELECT id FROM t'")
+            op.execute("CREATE MATERIALIZED VIEW by_function AS SELECT * FROM ids() AS id")
+            """
+            if version < 170000
+            else ""
         )
+        body = (
+            'op.execute("CREATE TABLE t (id int)")\n'
+            + textwrap.dedent(by_function)
+            + textwrap.dedent(
+                f"""
+                op.execute("CREATE MATERIALIZED VIEW base AS SELECT id FROM t")
+                op.execute("CREATE MATERIALIZED VIEW over_base AS SELECT id FROM base")
+                op.execute("REFRESH MATERIALIZED VIEW base WITH NO DATA")
+                op.execute("CREATE MATERIALIZED VIEW owned AS SELECT id FROM t")
+                op.execute('ALTER MATERIALIZED VIEW owned OWNER TO "{owner}"')
+                """
+            )
+        )
+        project = Project(tmp_path, {"r01": _rev("r01", None, body), "r02": _rev("r02", "r01")})
 
         result = squash(project.config(), "r02", server_url=pg_engine.url)
 
@@ -1121,7 +1127,8 @@ class TestSquash:
         fresh = make_db()
         command.upgrade(project.config(fresh), "head")
         populated = "SELECT relname FROM pg_class WHERE relkind = 'm' AND relispopulated"
-        assert _scalars(fresh, populated) == {"by_function", "over_base", "owned"}
+        expected: set[str] = {"over_base", "owned"} | ({"by_function"} if version < 170000 else set())
+        assert _scalars(fresh, populated) == expected
 
     def test_explicit_owner_of_the_squash_role_is_kept(self, tmp_path: Path, pg_engine: Engine) -> None:
         with pg_engine.connect() as conn:

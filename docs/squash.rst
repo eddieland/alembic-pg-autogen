@@ -170,8 +170,9 @@ The body also differs from raw ``pg_dump`` output in these ways:
 
 ``EXTRA_STATEMENTS`` holds the SQL of ``--extra-sql`` (see `Rows and sequences`_). ``POST_STATEMENTS`` refreshes each
 materialized view that the old chain left populated, in dependency order. These run after the settings are restored, so
-a function with an unqualified table name works. An unpopulated materialized view that a populated one reads is
-refreshed first and emptied again with ``WITH NO DATA``. The ``OWNER TO`` of a refreshed view runs after its refresh,
+a function with an unqualified table name works on PostgreSQL 16 and older. PostgreSQL 17 and newer refresh with a fixed
+safe ``search_path``, so there the old chain already needs qualified names. An unpopulated materialized view that a
+populated one reads is refreshed first and emptied again with ``WITH NO DATA``. The ``OWNER TO`` of a refreshed view runs after its refresh,
 because the old chain populated the view as the role that created it.
 
 Limits
