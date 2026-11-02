@@ -23,7 +23,8 @@ invisible to `alembic check`. A rebuilt or squashed schema loses it, and nothing
 
 ## Non-goals
 
-- **Default privileges** (`ALTER DEFAULT PRIVILEGES`). The issue excludes them until a user needs them.
+- **Managing default privileges** (`ALTER DEFAULT PRIVILEGES`). The issue excludes them until a user needs them. The
+  comparator leaves the privileges that they give unmanaged.
 - **Column privileges.** They are in `pg_attribute.attacl`. `canonicalize_grants()` rejects them.
 - **Other object types.** Sequences, functions, types, and databases have other privilege names.
 - **`GRANT ... ON ALL TABLES IN SCHEMA`.** The statement expands against the tables that exist when it runs. A desired
@@ -39,16 +40,17 @@ invisible to `alembic check`. A rebuilt or squashed schema loses it, and nothing
 
 ### Modified Capabilities
 
-- `catalog-inspector`: add `GrantInfo` and `inspect_grants()`
-- `canonicalization`: add `canonicalize_grants()`
-- `diff`: add `GrantOp` and `DiffResult.grant_ops`
-- `alembic-compare`: add the `pg_grants` key and the position of grant operations
+- `catalog-inspector`: add `GrantInfo` and `inspect_grants()` with three ACL sources
+- `canonicalization`: add `canonicalize_grants()` and `all_grant_privileges()`
+- `diff`: add `GrantOp` and `diff_grants()`
+- `alembic-compare`: add the `pg_grants` key, the position of grant operations, and the Alembic filters
 
 ## Impact
 
 - **Config**: the new key `pg_grants`. Configurations without the key behave as before.
 - **Behavior**: a configuration that declares `pg_grants` revokes undeclared grants in the inspected schemas. Initial
-  privileges in `pg_init_privs` and the privileges of the owner stay.
+  privileges, default privileges, `PUBLIC` on the `public` schema, the privileges of the owner, the version table, and
+  objects that the Alembic filters exclude stay.
 - **Backwards compatibility**: `CanonicalState` and `DiffResult` do not change, so unpacking into three names works.
 - **Dependencies**: none new. postgast already parses `GRANT`.
 - **Public API**: the new exports are `GrantInfo`, `inspect_grants`, `canonicalize_grants`, `GrantOp`, `diff_grants`,

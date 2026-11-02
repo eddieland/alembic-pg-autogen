@@ -32,7 +32,13 @@ from alembic_pg_autogen import (
     inspect_grants,
 )
 from alembic_pg_autogen.canonicalize import all_grant_privileges
-from alembic_pg_autogen.compare import _grant_migration_ops, _grant_states, _group_grants
+from alembic_pg_autogen.compare import (
+    _grant_migration_ops,
+    _grant_states,
+    _group_grants,
+    _in_compared_schemas,
+    _included_objects,
+)
 from alembic_pg_autogen.render import (
     _privilege_rank,
     _render_alter_grant_option,
@@ -313,6 +319,47 @@ class TestGrantMigrationOps:
             ("kept", False),
             ("orders", True),
         ]
+
+    def test_all_schemas_keep_every_grant(self):
+        grants = [_grant(schema="a"), _grant(schema="b")]
+        assert _in_compared_schemas(grants, None) == grants
+
+    def test_included_objects_apply_filters(self):
+        """``include_name`` sees schemas and tables, and ``include_object`` gets the metadata table when one exists."""
+        metadata = MetaData()
+        orders = Table("orders", metadata, Column("id", Integer))
+        seen: list[tuple[object, str, bool]] = []
+
+        class Ctx:
+            migration_context: Any = MagicMock(version_table="alembic_version", version_table_schema=None)
+            table_key_to_table: Any = metadata.tables
+
+            def __init__(self) -> None:
+                self.metadata: MetaData = metadata
+
+            def run_name_filters(self, name: str, type_: str, _parents: object) -> bool:
+                return not (type_ == "schema" and name == "hidden")
+
+            def run_object_filters(self, obj: object, name: str, _type: str, reflected: bool, _to: object) -> bool:
+                seen.append((obj, name, reflected))
+                return True
+
+        ctx: Any = Ctx()
+        objects = {
+            ("hidden", "SCHEMA", "hidden"),
+            ("shown", "SCHEMA", "shown"),
+            ("public", "TABLE", "orders"),
+            ("public", "TABLE", "dropped"),
+            ("public", "TABLE", "alembic_version"),
+        }
+
+        included = _included_objects(ctx, objects, "public")
+
+        assert included == {("shown", "SCHEMA", "shown"), ("public", "TABLE", "orders"), ("public", "TABLE", "dropped")}
+        by_name = {name: (obj, reflected) for obj, name, reflected in seen}
+        assert by_name["orders"] == (orders, False)
+        assert by_name["dropped"][1] is True
+        assert "alembic_version" not in by_name
 
     def test_group_grants_splits_by_object(self):
         groups = _group_grants([_grant(name="b"), _grant(name="a"), _grant("INSERT", name="a")])
