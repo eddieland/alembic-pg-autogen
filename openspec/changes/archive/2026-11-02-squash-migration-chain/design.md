@@ -52,7 +52,7 @@ builds a nine revision chain, squashes `r01` to `r07`, and proves these facts:
 
 **Non-Goals:**
 
-- Seed data and sequence positions. A schema-only dump holds neither.
+- Seed data in the dump. A schema-only dump holds no rows. The caller passes rows with `extra_sql` (D14).
 - Choice of `TARGET`
 - A body of Alembic operations instead of SQL. That body needs the dependency ordering from #24.
 - Databases older than `TARGET`
@@ -109,14 +109,20 @@ line prints the message and exits with status 1.
 `revision = TARGET` and `down_revision = None`. The revisions after `TARGET` keep `down_revision = TARGET`. A database
 at `TARGET` or later finds its revision in the new chain (fact 10). No database needs a `stamp`.
 
-Before any other work, the squash reads the old chain through `ScriptDirectory.revision_map`. The replaced set is
-`TARGET` plus every revision that `iterate_revisions(TARGET, "base")` returns. The squash raises `SquashError` in these
-cases:
+Before any other work, the squash reads the old chain through `ScriptDirectory.walk_revisions()`. The replaced set is
+`TARGET` plus every revision that `TARGET` reaches through `down_revision` and `depends_on`. The squash collects this
+set itself, because `depends_on` adds ancestors that a walk of `down_revision` alone misses. The squash raises
+`SquashError` in these cases:
 
 - A revision outside the replaced set names a replaced revision other than `TARGET` in `down_revision` or `depends_on`
   (fact 11).
-- A replaced revision other than `TARGET` has `branch_labels`. The labels of `TARGET` carry over to the new revision.
+- A replaced revision other than `TARGET` declares `branch_labels` in its file. Alembic copies a label to every revision
+  of its branch, so the squash reads `branch_labels` from each revision module, not from `Script`. The labels that
+  `TARGET` declares carry over to the new revision.
 - `TARGET` is not a revision in the chain.
+- A revision outside the replaced set imports the module of a replaced revision. The squash deletes that module, so the
+  import would fail after the squash. The check reads the `import` statements of each file with `ast`.
+- `<TARGET>_squashed.py` exists and is not a replaced file.
 
 Branches and merges inside the replaced set need no check. The squash removes all of them.
 
@@ -139,8 +145,9 @@ role stays in the body. Privileges stay in the body too. A `GRANT` in the old ch
 
 ### D5: The squash cleans the dump
 
-1. Remove the `\restrict KEY` line and the matching `\unrestrict KEY` line (facts 4 and 5). Remove no other line,
-   because a function body can hold the same text.
+1. Remove the `\restrict KEY` line and the matching `\unrestrict KEY` line (facts 4 and 5). The first line counts only
+   when it is the first line that is not blank and not a comment. The second counts only as the last such line. An older
+   `pg_dump` writes no wrapper, and a function body can hold the same text.
 1. Split the text with `postgast.split()`. A `PgQueryError` becomes `SquashError`.
 1. Remove the `--` comment lines before each statement. `pg_dump` writes these comments as headers. Comment lines inside
    a statement stay.
@@ -149,13 +156,24 @@ role stays in the body. Privileges stay in the body too. A `GRANT` in the old ch
 1. Remove `SET` and `set_config()` of a setting that the server does not know. `pg_dump` 17 and newer set
    `transaction_timeout`, which PostgreSQL 16 and older reject.
 1. Remove `COMMENT ON EXTENSION`. Only the owner of the extension can run it.
-1. Remove `ALTER ... OWNER TO` the role that ran the squash (D4).
+1. Remove `ALTER ... OWNER TO` the role that ran the squash (D4). When a string in a replaced revision runs `OWNER TO` a
+   role by name, keep every `OWNER TO`. That revision did not rely on the default owner, and a migration as another role
+   must keep the owner.
+1. Remove `FOR ROLE <role that ran the squash>` from `ALTER DEFAULT PRIVILEGES`. The replaced revision set default
+   privileges for the role that ran it. Without the clause, the statement does the same for the role that runs the new
+   revision. With the clause, a non-superuser migration role fails with `permission denied`.
 1. Rewrite `CREATE SCHEMA` of the version table schema as `CREATE SCHEMA IF NOT EXISTS`. `env.py` often creates that
    schema before Alembic creates the version table.
 
-The order of the statements does not change. `pg_dump` already orders objects by dependency (fact 2). A schema-only dump
-creates each materialized view `WITH NO DATA`. The squash appends `REFRESH MATERIALIZED VIEW` for each materialized view
-that is populated in the scratch database, in dependency order.
+The order of the statements does not change. `pg_dump` already orders objects by dependency (fact 2).
+
+A schema-only dump creates each materialized view `WITH NO DATA`. The squash puts `REFRESH MATERIALIZED VIEW` for each
+populated materialized view into `POST_STATEMENTS`, which run after the settings are restored. A function with an
+unqualified table name then finds its table. The order comes from the `_RETURN` rules of the views, so other rules
+cannot form a cycle. The squash skips the order when no materialized view is populated, and it reports a cycle as
+`SquashError`. An unpopulated materialized view that a populated one reads is refreshed first and emptied again with
+`WITH NO DATA` at the end. The `OWNER TO` of each refreshed view moves after its refresh, because the old chain
+populated the view as the role that created it.
 
 ### D6: Each statement runs as `sa.DDL` with `%` doubled
 
@@ -235,8 +253,9 @@ list of properties, at `TARGET` and at the heads:
   `ScriptDirectory.get_heads()`, which lists heads that a dependency already satisfies.
 - roles, role memberships, tablespaces, and `pg_db_role_setting` on the server (D13)
 
-At `TARGET` only, the squash also compares the row count of each table and the last value of each sequence. A difference
-raises `SquashError` unless the caller passes `allow_data_loss=True`. Then the differences become
+At `TARGET` only, the squash also compares the row count of each table, and `last_value` and `is_called` of each
+sequence. `pg_sequences.last_value` is NULL until the first `nextval()`, so the squash reads each sequence relation. A
+difference raises `SquashError` unless the caller passes `allow_data_loss=True`. Then the differences become
 `SquashResult.warnings`.
 
 On a difference, the squash raises `SquashError` with a unified diff and changes no file. With `dry_run=True`, the
@@ -273,24 +292,49 @@ open transaction, so `autocommit_block()` and `transaction_per_migration` work.
 The first version checked the version table after each upgrade. The review of #53 showed that this check runs after the
 upgrade commits: an `env.py` that reads `DATABASE_URL` migrated the real database first, also in a dry run.
 
-The squash now runs a preflight before the first real upgrade. The preflight copies the script directory without any
-revision and adds one sentinel revision. The sentinel raises unless `current_database()` is the name of a scratch
-database for the preflight. An `env.py` that connects elsewhere then runs no migration there. Alembic stops with
-`Can't locate revision` when that database has a version table. Otherwise the sentinel fails and its transaction rolls
-back.
+The squash now runs a preflight before the first upgrade of the chain. The preflight copies the script directory without
+any revision and adds one sentinel revision. The sentinel raises unless `current_database()` is the name of a scratch
+database for the preflight. In that database, it creates a marker table. The squash stops unless the marker exists
+afterward. A raised error alone is not enough proof, because an `env.py` can catch the error and continue.
+
+The preflight protects the revisions of the chain. It cannot stop code that `env.py` runs before `run_migrations()`,
+such as a committed `CREATE SCHEMA`, in the database that `env.py` chooses. Alembic also creates an empty version table
+there before it runs the sentinel. That table stays with an `AUTOCOMMIT` engine, or with an `env.py` that catches the
+sentinel's error. The documentation states both cases.
 
 ### D13: Objects of the whole server stop the squash
 
-`pg_dump` does not dump roles, tablespaces, or database and role settings. Both chains run on one server, so a role that
-the old chain creates also exists for the new chain, and the comparison passes. The squash therefore records these
-objects before the run and compares them after each upgrade of the old chain. A difference raises `SquashError`, also
-for a revision after `TARGET`, because the new chain would then fail with `already exists`. At the end, the squash drops
-the roles and tablespaces that the run created. It cannot undo other changes.
+`pg_dump` does not dump roles, role memberships, tablespaces, or database and system settings. A difference of the
+server state cannot prove what a clean cluster needs. The second review of #53 showed two gaps: an idempotent
+`CREATE ROLE` passes on a server that has the role, and a change that the squash cannot drop disappears from the next
+snapshot.
+
+The squash therefore scans the string literals of each replaced revision with `ast`, before it connects to the server.
+It refuses the chain when a string contains `CREATE`, `ALTER`, or `DROP` of a role, user, group, or tablespace, a role
+`GRANT` or `REVOKE` without `ON`, `ALTER DATABASE`, or `ALTER SYSTEM`. `CREATE USER MAPPING` does not count. Comments
+and the module docstring do not count.
+
+The state check stays as a second check. The squash records the server state before the run and compares it after each
+upgrade of the old chain. A difference raises `SquashError`, also for a revision after `TARGET`. The squash never drops
+a role or a tablespace, because a difference cannot tell which session made it. A concurrent `CREATE ROLE` would
+otherwise disappear. The error lists what remains, and the caller removes it.
+
+### D14: `extra_sql` carries seed rows
+
+A revision after `TARGET` can read a row that a replaced revision inserted. Without that row, the new chain fails. A row
+that the caller adds to the new file by hand disappears in a later squash. `squash()` therefore takes `extra_sql`, and
+the command line takes `--extra-sql FILE`. The squash splits the SQL with `postgast.split()` and stores the statements
+in `EXTRA_STATEMENTS`. The revision runs them after the settings are restored. The comparison runs them too, so the row
+count and sequence checks see them.
+
+A later squash reads `EXTRA_STATEMENTS` from each replaced revision module and puts them before the new `extra_sql`. The
+rows therefore move forward with each squash.
 
 ## Risks / Trade-offs
 
 **\[An `env.py` that ignores both ways\]** → `env.py` connects to the database that it chooses. Mitigation: the D12
-preflight runs no migration there. Code that `env.py` runs outside the migrations still runs there.
+preflight runs no revision of the chain there. Code that `env.py` runs outside the migrations, and an empty version
+table, can still reach that database.
 
 **\[`pg_dump` and server versions\]** → `pg_dump` refuses a server with a newer major version. The body also uses syntax
 of the server that the squash ran against. For example, PostgreSQL 15 adds `NULLS NOT DISTINCT`. Mitigation: the
@@ -301,7 +345,7 @@ versions.
 in one comparison come from one `pg_dump` binary. D5 removes `\restrict` whether or not it is present.
 
 **[Lost rows]** → A replaced revision that inserted reference rows loses them. Mitigation: D9 compares row counts and
-sequences at `TARGET` and stops by default. Row contents are not compared.
+sequences at `TARGET` and stops by default, and D14 carries rows forward. Row contents are not compared.
 
 **[A shared server]** → Another session that changes roles during the run stops the squash with a false difference.
 Mitigation: the documentation asks for a server that only the caller uses during the run.

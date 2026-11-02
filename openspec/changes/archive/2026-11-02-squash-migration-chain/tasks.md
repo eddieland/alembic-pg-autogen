@@ -52,3 +52,21 @@
   dependency-satisfied head and propagated labels.
 - [x] 5.11 Catch connection errors in `main()`, read `pyproject.toml`, and add a CI job that runs the squash tests with
   `pg_dump` 18 against PostgreSQL 14, 16, 17, and 18. Make a missing `pg_dump` fail CI.
+
+## 6. Second review of #53
+
+- [x] 6.1 Scan the string literals of the replaced revisions for statements that change objects of the whole server, and
+  never drop a role or a tablespace. Verify with a scan unit test, a `CREATE ROLE` chain, and dynamic SQL.
+- [x] 6.2 Make the preflight sentinel create a marker table, and stop unless the marker exists. Verify with an `env.py`
+  that catches errors.
+- [x] 6.3 Add `extra_sql` and `--extra-sql`, run it in the comparison, and carry it forward. Verify with seed rows that
+  a later revision reads, and a second squash.
+- [x] 6.4 Compare `last_value` and `is_called` of each sequence relation. Verify with `ALTER SEQUENCE ... RESTART`.
+- [x] 6.5 Order refreshes by `_RETURN` rules only, skip the order without populated views, and report cycles. Move the
+  refreshes after the settings restore, refresh unpopulated dependencies, and move `OWNER TO` after the refresh. Verify
+  each case.
+- [x] 6.6 Keep `OWNER TO` when a replaced revision names a role, and remove `FOR ROLE` of the squash role from
+  `ALTER DEFAULT PRIVILEGES`. Match the `\restrict` wrapper only in the preamble. Verify with tests.
+- [x] 6.7 Refuse an import of a replaced module and a name collision. Report a failing new chain as `SquashError`.
+  Verify with tests.
+- [x] 6.8 Correct D3, D9, D12, and D13 in the design, add D14, and use `#.` lists in `docs/squash.rst`.

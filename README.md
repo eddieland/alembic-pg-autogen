@@ -451,9 +451,9 @@ counts and sequences. Any difference stops the squash.
 
 The squash needs a `pg_dump` binary and a role that can create databases. Your `env.py` must read the `sqlalchemy.url`
 option or use `config.attributes["connection"]`. A preflight checks this before the first migration runs. A schema-only
-dump holds no rows, so a squash that loses rows stops unless you pass `--allow-data-loss`. Then add the rows to the new
-revision yourself. Read the [squash guide](https://alembic-pg-autogen.readthedocs.io/en/latest/squash.html) before the
-first run.
+dump holds no rows, so a squash that loses rows stops. Pass the rows in a SQL file with `--extra-sql`, or accept the
+loss with `--allow-data-loss`. The squash refuses a chain that creates roles or tablespaces. Read the
+[squash guide](https://alembic-pg-autogen.readthedocs.io/en/latest/squash.html) before the first run.
 
 ## Installation
 

@@ -10,7 +10,7 @@ database replays fewer revisions.
 ### Requirement: Squash entry point
 
 The module `alembic_pg_autogen.squash` SHALL provide
-`squash(config, target, *, server_url, version_table="alembic_version", version_table_schema="public", pg_dump="pg_dump", pg_dump_args=(), allow_data_loss=False, dry_run=False)`.
+`squash(config, target, *, server_url, version_table="alembic_version", version_table_schema="public", pg_dump="pg_dump", pg_dump_args=(), extra_sql=None, allow_data_loss=False, dry_run=False)`.
 It SHALL return a `SquashResult` NamedTuple with fields `revision_path`, `removed_paths`, `statement_count`,
 `server_version`, `pg_dump_version`, `source`, and `warnings`. It SHALL raise `SquashError` when a check fails. The
 package `__init__` SHALL NOT import the module.
@@ -42,7 +42,8 @@ package `__init__` SHALL NOT import the module.
 The replaced set SHALL be the target and every revision that the target reaches through `down_revision` and
 `depends_on`. The squash SHALL raise `SquashError` before it connects to the server in these cases: a revision outside
 the replaced set names a replaced revision other than the target, or a replaced revision other than the target declares
-branch labels in its file. Labels that Alembic propagates along a branch SHALL NOT count.
+branch labels in its file, a revision outside the replaced set imports the module of a replaced revision, or
+`<target>_squashed.py` exists and is not a replaced file. Labels that Alembic propagates along a branch SHALL NOT count.
 
 #### Scenario: Merge before the target
 
@@ -54,6 +55,16 @@ branch labels in its file. Labels that Alembic propagates along a branch SHALL N
 - **WHEN** revision `x` has `down_revision = "r01"` and the target is `r02`
 - **THEN** `SquashError` names `x` and `r01`
 
+#### Scenario: Import of a replaced module
+
+- **WHEN** revision `r03` runs `from r01 import helper` and the target is `r02`
+- **THEN** `SquashError` names `r03.py` and `r01.helper`
+
+#### Scenario: Name collision
+
+- **WHEN** a later revision file is named `r01_squashed.py` and the target is `r01`
+- **THEN** `SquashError` names that file before the squash connects to the server
+
 #### Scenario: Label on the target
 
 - **WHEN** only the target declares the branch label `core`
@@ -63,7 +74,8 @@ branch labels in its file. Labels that Alembic propagates along a branch SHALL N
 
 Before the first upgrade of the old chain, the squash SHALL run `env.py` against a scratch database with a copy of the
 script directory that holds only a sentinel revision. The sentinel SHALL raise unless `current_database()` is that
-scratch database. A failure SHALL raise `SquashError` that names the two ways `env.py` must support.
+scratch database, and SHALL otherwise create a marker table there. The squash SHALL raise `SquashError` that names the
+two ways `env.py` must support when the run fails or the marker does not exist afterward.
 
 #### Scenario: env.py that reads its own URL
 
@@ -71,13 +83,19 @@ scratch database. A failure SHALL raise `SquashError` that names the two ways `e
 - **THEN** `SquashError` reports a failed preflight, also with `dry_run=True`
 - **AND** that database stays at `r01` with the same tables
 
+#### Scenario: env.py that catches errors
+
+- **WHEN** `env.py` connects to another database and catches the error of `run_migrations()`
+- **THEN** `SquashError` states that the sentinel did not run in the scratch database
+
 ### Requirement: New revision file
 
 The new revision SHALL have `revision` equal to the target ID, `down_revision = None`, the branch labels that the target
 declares, and a module-level `squashed_revisions` tuple of the replaced IDs from base to the target. Its `upgrade()`
 SHALL save each session setting that the body changes with `current_setting(name, true)`, run each statement as
-`op.execute(sa.DDL(statement.replace("%", "%%")))`, and restore each saved setting that the server knows. Its
-`downgrade()` SHALL raise `NotImplementedError`. The file SHALL import nothing from this package.
+`op.execute(sa.DDL(statement.replace("%", "%%")))`, and restore each saved setting that the server knows. It SHALL then
+run `EXTRA_STATEMENTS` and `POST_STATEMENTS` the same way. Its `downgrade()` SHALL raise `NotImplementedError`. The file
+SHALL import nothing from this package.
 
 #### Scenario: Colon and percent in a statement
 
@@ -101,19 +119,42 @@ on failure. It SHALL build the body from `pg_dump --schema-only` of a scratch da
 target, with the version table excluded by a quoted pattern. It SHALL remove the `\restrict KEY` line and the matching
 `\unrestrict KEY` line and no other line, split the text with `postgast.split()`, and remove the comment lines before
 each statement. It SHALL remove `SET client_encoding`, `SET` and `set_config()` of a setting that the server does not
-know, `COMMENT ON EXTENSION`, and `ALTER ... OWNER TO` the role that ran the squash. It SHALL rewrite `CREATE SCHEMA` of
-the version table schema as `CREATE SCHEMA IF NOT EXISTS`. It SHALL append `REFRESH MATERIALIZED VIEW` for each
-populated materialized view, in dependency order.
+know, and `COMMENT ON EXTENSION`. It SHALL remove `ALTER ... OWNER TO` the role that ran the squash, unless a string in
+a replaced revision runs `OWNER TO` a role by name. It SHALL remove `FOR ROLE <role that ran the squash>` from
+`ALTER DEFAULT PRIVILEGES`. It SHALL rewrite `CREATE SCHEMA` of the version table schema as
+`CREATE SCHEMA IF NOT EXISTS`. The `\restrict` line SHALL count only as the first line that is not blank and not a
+comment.
+
+`POST_STATEMENTS` SHALL refresh each populated materialized view in the order of the `_RETURN` rules. An unpopulated
+materialized view that a populated one reads SHALL be refreshed first and emptied with `WITH NO DATA` at the end. The
+`OWNER TO` of a refreshed view SHALL move after its refresh. A cycle SHALL raise `SquashError`.
 
 #### Scenario: Comment inside a function body
 
-- **WHEN** a dumped function body contains a line that starts with `--` or `\restrict`
+- **WHEN** a dumped function body contains a line that starts with `--` or `\restrict`, with or without a wrapper
 - **THEN** the new revision keeps that line
 
 #### Scenario: Owner of another role
 
 - **WHEN** a replaced revision runs `ALTER TABLE t OWNER TO app_owner`
 - **THEN** the new revision keeps that statement, and a fresh database gets the owner `app_owner`
+
+#### Scenario: Default privileges
+
+- **WHEN** the dump holds `ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA public GRANT ...` and the squash runs as
+  `app`
+- **THEN** the body holds `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ...`
+
+#### Scenario: Materialized view refresh
+
+- **WHEN** a populated view reads an unpopulated one, a view reads an unqualified function, and a view belongs to a role
+  without table access
+- **THEN** a fresh database built from the new chain has the same populated views as the old chain
+
+#### Scenario: Rule cycle
+
+- **WHEN** a rule on `v1` inserts into `v2`, and `v2` selects from `v1`
+- **THEN** the squash proceeds
 
 #### Scenario: Newer pg_dump
 
@@ -141,8 +182,9 @@ Before it changes a file, the squash SHALL compare the two chains at the target 
 `pg_dump --schema-only` text with owners, the column order of each relation, `relispopulated` of each materialized view,
 and the rows of the two version tables. After each upgrade of the old chain, it SHALL compare roles, role memberships,
 tablespaces, and `pg_db_role_setting` with their state before the run. At the target, it SHALL also compare the row
-count of each table and the last value of each sequence. A difference SHALL raise `SquashError`, except that
-`allow_data_loss=True` SHALL turn a row count or sequence difference into an entry of `warnings`.
+count of each table, and `last_value` and `is_called` of each sequence relation. A difference SHALL raise `SquashError`,
+except that `allow_data_loss=True` SHALL turn a row count or sequence difference into an entry of `warnings`. The squash
+SHALL NOT drop a role or a tablespace. The error SHALL list the server changes that remain.
 
 #### Scenario: Different schema at the heads
 
@@ -160,11 +202,16 @@ count of each table and the last value of each sequence. A difference SHALL rais
 - **WHEN** a replaced revision inserts a row and `allow_data_loss` is false
 - **THEN** `SquashError` names the table and the sequence
 
-#### Scenario: Global objects
+#### Scenario: Sequence restart
 
-- **WHEN** a replaced revision or a revision after the target runs `CREATE ROLE`
-- **THEN** `SquashError` names the role, also with `dry_run=True`
-- **AND** the role does not exist after the squash
+- **WHEN** a replaced revision runs `ALTER SEQUENCE s RESTART WITH 1000`
+- **THEN** `SquashError` names the sequence with `last_value 1000 is_called False`
+
+#### Scenario: Global objects in dynamic SQL
+
+- **WHEN** a replaced revision or a revision after the target creates a role through dynamic SQL
+- **THEN** `SquashError` lists the role as a change that remains on the server
+- **AND** the role still exists after the squash
 
 #### Scenario: Dependency-satisfied head
 
@@ -175,6 +222,29 @@ count of each table and the last value of each sequence. A difference SHALL rais
 
 - **WHEN** `dry_run=True`
 - **THEN** every check runs, `source` holds the new file, and no file changes
+
+### Requirement: Statement scan of the replaced revisions
+
+Before it connects to the server, the squash SHALL scan the string literals of each replaced revision, without comments
+and the module docstring. It SHALL raise `SquashError` with the file and line of each match for `CREATE`, `ALTER`, or
+`DROP` of a role, user, group, or tablespace, a role `GRANT` or `REVOKE` without `ON`, `ALTER DATABASE`, and
+`ALTER SYSTEM`. `CREATE USER MAPPING` and object privileges SHALL NOT match.
+
+#### Scenario: CREATE ROLE in a replaced revision
+
+- **WHEN** a replaced revision runs `CREATE ROLE reader`
+- **THEN** `SquashError` names the file and line, and the squash creates no scratch database
+
+### Requirement: Extra SQL
+
+`squash()` SHALL take `extra_sql`, and the command line SHALL take `--extra-sql FILE`. The squash SHALL split the SQL
+with `postgast.split()` into `EXTRA_STATEMENTS`. The comparison SHALL run them with the new chain. A later squash SHALL
+put the `EXTRA_STATEMENTS` of each replaced revision module before the new `extra_sql`.
+
+#### Scenario: Seed rows that a later revision reads
+
+- **WHEN** a replaced revision inserts rows that a later revision reads, and `extra_sql` inserts the same rows
+- **THEN** the squash proceeds, and a later squash that replaces the new revision keeps the rows
 
 ### Requirement: Write
 
@@ -202,9 +272,9 @@ replaced revision.
 
 `python -m alembic_pg_autogen.squash` SHALL accept `--config` (repeatable, an ini file or `pyproject.toml`, as for the
 `alembic` command), `--name`, `--target`, `--server-url`, `--version-table`, `--version-table-schema`, `--pg-dump`, a
-repeatable `--pg-dump-arg`, `--allow-data-loss`, and `--dry-run`. Without `--config`, it SHALL read `alembic.ini` and
-`pyproject.toml` in the current directory. It SHALL exit with status 1 and print the message when a check fails or a
-connection fails.
+repeatable `--pg-dump-arg`, `--extra-sql`, `--allow-data-loss`, and `--dry-run`. Without `--config`, it SHALL read
+`alembic.ini` and `pyproject.toml` in the current directory. It SHALL exit with status 1 and print the message when a
+check fails or a connection fails.
 
 #### Scenario: Project with pyproject.toml only
 

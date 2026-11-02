@@ -32,11 +32,18 @@ or more programmatic migration commands" reads the connection:
 
 The connection has no open transaction. ``autocommit_block()`` and ``transaction_per_migration`` work as usual.
 
-Before the first real upgrade, the squash runs a preflight. It runs your ``env.py`` with one sentinel revision and no
-other revision. The sentinel fails unless ``current_database()`` is the scratch database. An ``env.py`` that connects
-to another database therefore runs no migration there. Alembic stops with ``Can't locate revision`` when that database
-has a version table, or the sentinel fails and its transaction rolls back. Code that ``env.py`` runs outside the
-migrations, such as a ``CREATE SCHEMA``, still runs in that database.
+Before the first upgrade of your chain, the squash runs a preflight. It runs your ``env.py`` with one sentinel revision
+and no other revision. The sentinel creates a marker table only when ``current_database()`` is the scratch database.
+The squash stops unless that marker exists afterward, also when ``env.py`` catches the sentinel's error.
+
+The preflight protects the revisions of your chain, not everything that ``env.py`` does. When ``env.py`` connects to
+another database, these changes can still happen there, also in a dry run:
+
+- Code in ``env.py`` that runs before ``run_migrations()``, such as a committed ``CREATE SCHEMA``.
+- An empty Alembic version table, when that database has none. Alembic creates it before it runs the sentinel. With an
+  ``AUTOCOMMIT`` engine, or an ``env.py`` that catches the sentinel's error, the table stays.
+
+Read your ``env.py`` before the first run.
 
 Choose the target
 -----------------
@@ -60,7 +67,8 @@ Run the squash
 
 Add ``--dry-run`` to run every check and print the new revision without a change to a file. The other options are
 ``--name`` (the section of ``alembic.ini``), ``--version-table``, ``--version-table-schema``, ``--pg-dump``,
-``--pg-dump-arg`` (repeat it for more arguments), and ``--allow-data-loss`` (see `Rows and sequences`_).
+``--pg-dump-arg`` (repeat it for more arguments), ``--extra-sql``, and ``--allow-data-loss`` (see
+`Rows and sequences`_).
 
 From Python:
 
@@ -80,17 +88,20 @@ From Python:
 What the squash does
 --------------------
 
-1. It reads the revision map. It refuses a revision after the target whose ``down_revision`` or ``depends_on`` names a
+#. It reads the revision map. It refuses a revision after the target whose ``down_revision`` or ``depends_on`` names a
    replaced revision other than the target. It refuses branch labels that a replaced revision other than the target
    declares.
-1. It runs the preflight in its own scratch database.
-1. It builds a scratch database with the old chain up to the target, and runs ``pg_dump --schema-only`` on it. The dump
+#. It refuses the chain when a string in a replaced revision changes an object of the whole server (see
+   `Objects of the whole server`_), when a later revision imports the module of a replaced revision, or when
+   ``<target>_squashed.py`` exists already.
+#. It runs the preflight in its own scratch database.
+#. It builds a scratch database with the old chain up to the target, and runs ``pg_dump --schema-only`` on it. The dump
    leaves out the version table.
-1. It writes the new revision into a temporary copy of your script directory and version locations, without the
+#. It writes the new revision into a temporary copy of your script directory and version locations, without the
    replaced files.
-1. It builds a second scratch database with the new revision and compares the two databases.
-1. It upgrades both scratch databases to the heads and compares them again.
-1. If every check passes, it writes ``<target>_squashed.py`` next to the old target file, then deletes the replaced
+#. It builds a second scratch database with the new revision and compares the two databases.
+#. It upgrades both scratch databases to the heads and compares them again.
+#. If every check passes, it writes ``<target>_squashed.py`` next to the old target file, then deletes the replaced
    files. It writes the new file to a temporary name first and renames it, so a failed write changes no file.
 
 Commit the result as one commit. A revert of that commit restores the old chain. No database needs a change.
@@ -107,7 +118,7 @@ the target and at the heads:
 - the rows of the Alembic version table
 - roles, role memberships, tablespaces, and database and role settings on the server
 
-At the target, it also compares the row count of each table and the last value of each sequence.
+At the target, it also compares the row count of each table, and ``last_value`` and ``is_called`` of each sequence.
 
 The comparison does not check row contents, statistics, or anything that a query of the system catalogs above does not
 show.
@@ -127,10 +138,13 @@ The new revision is a plain Alembic revision. It imports nothing from this packa
 
     SETTINGS = ("statement_timeout", "search_path", "check_function_bodies", ...)
     STATEMENTS = (...)
+    EXTRA_STATEMENTS = (...)
+    POST_STATEMENTS = (...)
 
 
     def upgrade():
-        ...  # save each setting, run each statement, restore each setting
+        ...  # save each setting, run STATEMENTS, restore each setting
+        ...  # then run EXTRA_STATEMENTS and POST_STATEMENTS
 
 
     def downgrade():
@@ -146,12 +160,19 @@ setting that the server does not know. A newer ``pg_dump`` sets ``transaction_ti
 
 The body also differs from raw ``pg_dump`` output in these ways:
 
-- ``ALTER ... OWNER TO`` the role that ran the squash is removed. The role that runs the migration owns new objects
-  already. ``OWNER TO`` another role stays, so that role must exist where the revision runs, as with the old chain.
+- ``ALTER ... OWNER TO`` the role that ran the squash is removed, because the role that runs the migration owns new
+  objects already. When a replaced revision names a role in ``OWNER TO``, every ``OWNER TO`` stays. ``OWNER TO``
+  another role always stays, so that role must exist where the revision runs, as with the old chain.
+- ``ALTER DEFAULT PRIVILEGES FOR ROLE`` the role that ran the squash loses its ``FOR ROLE`` clause. It then applies to
+  the role that runs the migration, as the replaced revision did.
 - ``COMMENT ON EXTENSION`` is removed, because only the owner of the extension can run it.
 - ``CREATE SCHEMA`` of the version table schema becomes ``CREATE SCHEMA IF NOT EXISTS``.
-- A ``REFRESH MATERIALIZED VIEW`` follows for each materialized view that the old chain left populated, in dependency
-  order.
+
+``EXTRA_STATEMENTS`` holds the SQL of ``--extra-sql`` (see `Rows and sequences`_). ``POST_STATEMENTS`` refreshes each
+materialized view that the old chain left populated, in dependency order. These run after the settings are restored, so
+a function with an unqualified table name works. An unpopulated materialized view that a populated one reads is
+refreshed first and emptied again with ``WITH NO DATA``. The ``OWNER TO`` of a refreshed view runs after its refresh,
+because the old chain populated the view as the role that created it.
 
 Limits
 ------
@@ -159,20 +180,41 @@ Limits
 Rows and sequences
 ~~~~~~~~~~~~~~~~~~
 
-A schema-only dump holds no rows. When a table has a different row count, or a sequence has a different last value, at
-the target, the squash stops and lists them. Run it again with ``--allow-data-loss`` to accept the loss. The squash then
-reports the differences as warnings. Add the rows to the new revision with ``op.bulk_insert()``.
+A schema-only dump holds no rows. When a table has a different row count, or a sequence has a different ``last_value``
+or ``is_called``, at the target, the squash stops and lists them.
+
+Put the rows that your chain needs into a SQL file and pass it with ``--extra-sql FILE`` (``extra_sql`` in Python):
+
+.. code-block:: sql
+
+    INSERT INTO kind (code) VALUES ('a'), ('b');
+    SELECT setval('kind_id_seq', 2);
+
+The new revision stores the statements in ``EXTRA_STATEMENTS`` and runs them after the schema. The comparison runs them
+too, so the squash checks them like the rest of the body. A later squash that replaces this revision carries
+``EXTRA_STATEMENTS`` forward. Do not edit the rows into the new file by hand, because a later squash does not keep them.
+
+To accept the loss instead, run the squash again with ``--allow-data-loss``. The squash then reports the differences as
+warnings.
 
 Objects of the whole server
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``pg_dump`` does not dump roles, tablespaces, or ``ALTER DATABASE ... SET``. When the old chain changes one of these,
-the squash stops, also when the change comes from a revision after the target. Both chains run on one server, so the
-check compares the server before and after the run. Another session that changes roles during the run also stops the
-squash.
+``pg_dump`` does not dump roles, role memberships, tablespaces, or database and system settings. A difference of the
+server state cannot prove what a clean cluster needs, so the squash scans the string literals of the replaced revisions.
+It refuses the chain before it connects to the server when a string contains one of these statements:
 
-At the end, the squash drops the roles and tablespaces that the run created. It cannot undo other changes, such as an
-``ALTER ROLE`` of an existing role.
+- ``CREATE``, ``ALTER``, or ``DROP`` of a role, user, group, or tablespace
+- ``GRANT`` of a role and ``REVOKE`` of a role, without ``ON``
+- ``ALTER DATABASE`` and ``ALTER SYSTEM``
+
+Comments and the module docstring do not count. Move these statements into the setup of your cluster.
+
+As a second check, the squash compares the server state before and after each upgrade of the old chain. This check also
+covers a revision after the target and SQL that the scan cannot read, such as dynamic SQL. A difference stops the
+squash. The squash never drops a role or a tablespace, because the difference cannot tell which session made it. The
+error lists what remains on the server, and you remove it. Another session that changes roles during the run also stops
+the squash, so use a server that only you use.
 
 Other limits
 ~~~~~~~~~~~~

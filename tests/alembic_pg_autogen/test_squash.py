@@ -25,7 +25,9 @@ from sqlalchemy.pool import NullPool
 
 from alembic_pg_autogen.squash import (
     SquashError,
+    _check_before_run,
     _config_files,
+    _global_statements,
     _libpq_uri,
     _plan,
     _strip_leading_comments,
@@ -112,6 +114,27 @@ with engine.connect() as connection:
     context.configure(connection=connection)
     with context.begin_transaction():
         context.run_migrations()
+engine.dispose()
+"""
+
+
+SWALLOW_ENV = """\
+import logging
+import os
+
+from alembic import context
+from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
+
+config = context.config
+engine = create_engine(os.environ["SQUASH_TEST_DECOY_URL"], poolclass=NullPool)
+with engine.connect() as connection:
+    context.configure(connection=connection)
+    with context.begin_transaction():
+        try:
+            context.run_migrations()
+        except Exception:
+            logging.getLogger("env").exception("migration failed, continuing")
 engine.dispose()
 """
 
@@ -262,10 +285,12 @@ def make_role(pg_engine: Engine) -> Generator[Callable[[], str]]:
     admin = sa.create_engine(pg_engine.url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
     created: list[str] = []
 
-    def factory() -> str:
-        name = f"sq_role_{uuid.uuid4().hex[:8]}"
-        with admin.connect() as conn:
-            conn.execute(sa.text(f'CREATE ROLE "{name}"'))
+    def factory(name: str | None = None) -> str:
+        """Create a role, or with ``name``, only register a role that a test creates, for the drop."""
+        if name is None:
+            name = f"sq_role_{uuid.uuid4().hex[:8]}"
+            with admin.connect() as conn:
+                conn.execute(sa.text(f'CREATE ROLE "{name}"'))
         created.append(name)
         return name
 
@@ -277,7 +302,7 @@ def make_role(pg_engine: Engine) -> Generator[Callable[[], str]]:
 
 
 @pytest.fixture
-def make_db(pg_engine: Engine, make_role: Callable[[], str]) -> Generator[Callable[[], sa.URL]]:
+def make_db(pg_engine: Engine, make_role: Callable[..., str]) -> Generator[Callable[[], sa.URL]]:
     """Create empty databases on the test server and drop them after the test, before the roles."""
     del make_role
     admin = sa.create_engine(pg_engine.url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
@@ -376,6 +401,20 @@ class TestCleanDump:
     def test_keeps_every_statement_without_options(self) -> None:
         statements = clean_dump("SET transaction_timeout = 0;\nALTER TABLE t OWNER TO app;\nCREATE SCHEMA meta;\n")
         assert statements == ["SET transaction_timeout = 0", "ALTER TABLE t OWNER TO app", "CREATE SCHEMA meta"]
+
+    def test_default_privileges_of_the_squash_role_apply_to_the_migrating_role(self) -> None:
+        dump = (
+            "ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA public GRANT SELECT ON TABLES TO reader;\n"
+            "ALTER DEFAULT PRIVILEGES FOR ROLE other GRANT SELECT ON TABLES TO reader;\n"
+        )
+        assert clean_dump(dump, default_privileges_role="app") == [
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO reader",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE other GRANT SELECT ON TABLES TO reader",
+        ]
+
+    def test_strip_restrict_without_a_wrapper_keeps_a_body_line(self) -> None:
+        dump = "SET x = 1;\nCREATE FUNCTION f() AS $$\n\\restrict keepme\nend $$;\n\\unrestrict keepme\n"
+        assert _strip_restrict(dump) == dump
 
     def test_unparsable_dump(self) -> None:
         with pytest.raises(SquashError, match="postgast cannot split the pg_dump output"):
@@ -500,6 +539,54 @@ class TestPlan:
             self._plan(tmp_path, {"r01": _rev("r01", None)}, "base")
 
 
+class TestChecksBeforeRun:
+    def _write(self, tmp_path: Path, body: str) -> Path:
+        path = tmp_path / "rev.py"
+        path.write_text(body)
+        return path
+
+    def test_global_statement_scan(self, tmp_path: Path) -> None:
+        body = textwrap.dedent(
+            '''\
+            """CREATE ROLE in the docstring does not count."""
+            # CREATE ROLE in a comment does not count.
+            from alembic import op
+
+
+            def upgrade():
+                op.execute("GRANT SELECT ON t TO reader")
+                op.execute("CREATE USER MAPPING FOR app SERVER s")
+                op.execute("GRANT reader TO app")
+                op.execute("ALTER ROLE app SET statement_timeout = '7s'")
+                op.execute("REVOKE reader FROM app")
+                op.execute("CREATE TABLESPACE fast LOCATION '/x'")
+                op.execute("ALTER DATABASE CURRENT SET work_mem = '64MB'")
+            '''
+        )
+        found = _global_statements(self._write(tmp_path, body))
+        assert [text for _, text in found] == [
+            "GRANT reader TO",
+            "ALTER ROLE",
+            "REVOKE reader FROM",
+            "CREATE TABLESPACE",
+            "ALTER DATABASE",
+        ]
+
+    def test_import_of_a_replaced_module(self, tmp_path: Path) -> None:
+        later = _rev("r03", "r02", "from r01 import helper\nhelper()")
+        project = Project(tmp_path, {"r01": _rev("r01", None), "r02": _rev("r02", "r01"), "r03": later})
+        script_dir = ScriptDirectory.from_config(project.config())
+        plan = _plan(script_dir, "r02")
+        with pytest.raises(SquashError, match=r"r03\.py imports r01\.helper"):
+            _check_before_run(script_dir, plan, project.versions / "r02_squashed.py")
+
+    def test_name_collision_with_a_later_file(self, tmp_path: Path) -> None:
+        project = Project(tmp_path, {"r01": _rev("r01", None), "r02_squashed": _rev("r03", "r01")})
+        with pytest.raises(SquashError, match=r"r01_squashed\.py exists"):
+            project.write("r01_squashed", _rev("r04", "r03"))
+            squash(project.config(), "r01", server_url="postgresql://unused", pg_dump="/nonexistent/pg_dump")
+
+
 class TestHelpers:
     def test_libpq_uri_has_no_password(self) -> None:
         url = sa.make_url("postgresql+psycopg://user:secret@db.example:5433/postgres?sslmode=require")
@@ -579,8 +666,8 @@ class TestSquash:
         assert result.pg_dump_version.startswith("pg_dump")
         assert "table public.account: 1 rows with the old chain, 0 rows with the new" in result.warnings
         assert (
-            "sequence public.account_id_seq: last_value 1 with the old chain, last_value unused with the new"
-            in result.warnings
+            "sequence public.account_id_seq: last_value 1 is_called True with the old chain, "
+            "last_value 1 is_called False with the new" in result.warnings
         )
         assert _leftovers(pg_engine) == []
 
@@ -659,7 +746,7 @@ class TestSquash:
         assert _tables(decoy) == set()
 
     def test_owner_of_another_role_is_replayed(
-        self, tmp_path: Path, pg_engine: Engine, make_db: Callable[[], sa.URL], make_role: Callable[[], str]
+        self, tmp_path: Path, pg_engine: Engine, make_db: Callable[[], sa.URL], make_role: Callable[..., str]
     ) -> None:
         owner = make_role()
         project = Project(
@@ -679,7 +766,7 @@ class TestSquash:
         command.upgrade(project.config(fresh), "head")
         assert _scalars(fresh, "SELECT tableowner FROM pg_tables WHERE tablename = 't'") == {owner}
 
-    def test_global_objects_refuse_and_are_removed(self, tmp_path: Path, pg_engine: Engine) -> None:
+    def test_global_statements_refuse_before_any_database(self, tmp_path: Path, pg_engine: Engine) -> None:
         role = f"sq_chain_{uuid.uuid4().hex[:8]}"
         project = Project(
             tmp_path,
@@ -690,23 +777,39 @@ class TestSquash:
         )
 
         for dry_run in (True, False):
-            with pytest.raises(SquashError, match=rf"(?s)belong to the whole server.*\+ role {role} "):
+            with pytest.raises(SquashError, match=r"(?s)change objects of the whole server.*r01\.py:\d+: CREATE ROLE"):
                 squash(project.config(), "r02", server_url=pg_engine.url, dry_run=dry_run)
             assert _leftovers(pg_engine) == []
 
         assert project.files() == {"r01.py", "r02.py"}
 
-    def test_global_objects_after_the_target(self, tmp_path: Path, pg_engine: Engine) -> None:
-        role = f"sq_chain_{uuid.uuid4().hex[:8]}"
+    def test_server_state_is_a_second_check_and_nothing_is_dropped(
+        self, tmp_path: Path, pg_engine: Engine, make_role: Callable[..., str]
+    ) -> None:
+        role = make_role(f"sq_chain_{uuid.uuid4().hex[:8]}")
+        hidden = f"op.execute(\"DO $$ BEGIN EXECUTE 'CREATE ' || 'ROLE {role}'; END $$\")"
+        project = Project(tmp_path, {"r01": _rev("r01", None, hidden), "r02": _rev("r02", "r01")})
+
+        with pytest.raises(
+            SquashError, match=rf"(?s)During the replaced revisions.*\+ role {role} .*Remove them yourself"
+        ):
+            squash(project.config(), "r02", server_url=pg_engine.url)
+
+        assert _leftovers(pg_engine) == [role]
+
+    def test_global_objects_after_the_target(
+        self, tmp_path: Path, pg_engine: Engine, make_role: Callable[..., str]
+    ) -> None:
+        role = make_role(f"sq_chain_{uuid.uuid4().hex[:8]}")
         project = Project(
             tmp_path,
             {"r01": _rev("r01", None), "r02": _rev("r02", "r01", f'op.execute("CREATE ROLE {role}")')},
         )
 
-        with pytest.raises(SquashError, match="Running the revisions after the target changed objects"):
+        with pytest.raises(SquashError, match="During the revisions after the target, objects of the whole server"):
             squash(project.config(), "r01", server_url=pg_engine.url)
 
-        assert _leftovers(pg_engine) == []
+        assert _leftovers(pg_engine) == [role]
 
     def test_inherited_column_order_is_compared(self, tmp_path: Path, pg_engine: Engine) -> None:
         project = Project(
@@ -899,6 +1002,141 @@ class TestSquash:
 
         assert project.files() == {"r01.py", "r02.py"}
         assert _leftovers(pg_engine) == []
+
+    def test_preflight_with_an_env_py_that_catches_errors(
+        self,
+        tmp_path: Path,
+        pg_engine: Engine,
+        make_db: Callable[[], sa.URL],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        revisions = {name: CHAIN[name] for name in ("r01", "r02", "r03")}
+        decoy = make_db()
+        command.upgrade(Project(tmp_path / "setup", revisions).config(decoy), "r01")
+        project = Project(tmp_path / "project", revisions, env=SWALLOW_ENV)
+        monkeypatch.setenv("SQUASH_TEST_DECOY_URL", decoy.render_as_string(hide_password=False))
+
+        with pytest.raises(SquashError, match="sentinel did not run in the scratch database"):
+            squash(project.config(), "r03", server_url=pg_engine.url, dry_run=True)
+
+        assert _version(decoy) == {"r01"}
+        assert _tables(decoy) == {"account", "alembic_version"}
+
+    def test_sequence_restart_is_compared(self, tmp_path: Path, pg_engine: Engine) -> None:
+        project = Project(
+            tmp_path,
+            {
+                "r01": _rev("r01", None, 'op.execute("CREATE SEQUENCE s")'),
+                "r02": _rev("r02", "r01", 'op.execute("ALTER SEQUENCE s RESTART WITH 1000")'),
+            },
+        )
+
+        with pytest.raises(SquashError, match=r"sequence public\.s: last_value 1000 is_called False with the old"):
+            squash(project.config(), "r02", server_url=pg_engine.url)
+
+    def test_extra_sql_is_checked_and_carried_forward(
+        self, tmp_path: Path, pg_engine: Engine, make_db: Callable[[], sa.URL]
+    ) -> None:
+        reads_seed = (
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM kind) THEN RAISE EXCEPTION 'seed missing'; END IF; END $$"
+        )
+        project = Project(
+            tmp_path,
+            {
+                "r01": _rev("r01", None, 'op.execute("CREATE TABLE kind (code text PRIMARY KEY)")'),
+                "r02": _rev("r02", "r01", "op.execute(\"INSERT INTO kind VALUES ('a'), ('b')\")"),
+                "r03": _rev("r03", "r02", f'op.execute("{reads_seed}")'),
+                "r04": _rev("r04", "r03", 'op.execute("CREATE TABLE later (id int)")'),
+            },
+        )
+
+        with pytest.raises(SquashError, match="seed missing"):
+            squash(project.config(), "r02", server_url=pg_engine.url, allow_data_loss=True)
+
+        result = squash(
+            project.config(), "r02", server_url=pg_engine.url, extra_sql="INSERT INTO kind VALUES ('a'), ('b');"
+        )
+        assert "EXTRA_STATEMENTS = (\n    \"INSERT INTO kind VALUES ('a'), ('b')\",\n)" in result.source
+
+        again = squash(project.config(), "r03", server_url=pg_engine.url)
+        assert "INSERT INTO kind VALUES ('a'), ('b')" in again.source
+        fresh = make_db()
+        command.upgrade(project.config(fresh), "head")
+        assert _scalars(fresh, "SELECT code FROM kind") == {"a", "b"}
+
+    def test_view_rule_cycle_and_populated_matview(self, tmp_path: Path, pg_engine: Engine) -> None:
+        project = Project(
+            tmp_path,
+            {
+                "r01": _rev(
+                    "r01",
+                    None,
+                    """
+                    op.execute("CREATE TABLE t (id int)")
+                    op.execute("CREATE VIEW v1 AS SELECT id FROM t")
+                    op.execute("CREATE VIEW v2 AS SELECT id FROM v1")
+                    op.execute("CREATE RULE r AS ON INSERT TO v1 DO INSTEAD INSERT INTO v2 VALUES (NEW.id)")
+                    op.execute("CREATE MATERIALIZED VIEW mv AS SELECT id FROM v2")
+                    """,
+                ),
+                "r02": _rev("r02", "r01"),
+            },
+        )
+
+        result = squash(project.config(), "r02", server_url=pg_engine.url)
+
+        assert "REFRESH MATERIALIZED VIEW public.mv" in result.source
+
+    def test_matview_refresh_cases(
+        self, tmp_path: Path, pg_engine: Engine, make_db: Callable[[], sa.URL], make_role: Callable[..., str]
+    ) -> None:
+        owner = make_role()
+        project = Project(
+            tmp_path,
+            {
+                "r01": _rev(
+                    "r01",
+                    None,
+                    f"""
+                    op.execute("CREATE TABLE t (id int)")
+                    op.execute("CREATE FUNCTION ids() RETURNS SETOF int LANGUAGE sql AS 'SELECT id FROM t'")
+                    op.execute("CREATE MATERIALIZED VIEW by_function AS SELECT * FROM ids() AS id")
+                    op.execute("CREATE MATERIALIZED VIEW base AS SELECT id FROM t")
+                    op.execute("CREATE MATERIALIZED VIEW over_base AS SELECT id FROM base")
+                    op.execute("REFRESH MATERIALIZED VIEW base WITH NO DATA")
+                    op.execute("CREATE MATERIALIZED VIEW owned AS SELECT id FROM t")
+                    op.execute('ALTER MATERIALIZED VIEW owned OWNER TO "{owner}"')
+                    """,
+                ),
+                "r02": _rev("r02", "r01"),
+            },
+        )
+
+        result = squash(project.config(), "r02", server_url=pg_engine.url)
+
+        assert "REFRESH MATERIALIZED VIEW public.base WITH NO DATA" in result.source
+        assert result.source.index("REFRESH MATERIALIZED VIEW public.owned'") < result.source.index(
+            f"ALTER MATERIALIZED VIEW public.owned OWNER TO {owner}"
+        )
+        fresh = make_db()
+        command.upgrade(project.config(fresh), "head")
+        populated = "SELECT relname FROM pg_class WHERE relkind = 'm' AND relispopulated"
+        assert _scalars(fresh, populated) == {"by_function", "over_base", "owned"}
+
+    def test_explicit_owner_of_the_squash_role_is_kept(self, tmp_path: Path, pg_engine: Engine) -> None:
+        with pg_engine.connect() as conn:
+            me = str(conn.execute(sa.text("SELECT current_user")).scalar_one())
+        project = Project(
+            tmp_path,
+            {
+                "r01": _rev("r01", None, 'op.execute("CREATE TABLE t (id int)")'),
+                "r02": _rev("r02", "r01", f"op.execute('ALTER TABLE t OWNER TO \"{me}\"')"),
+            },
+        )
+
+        result = squash(project.config(), "r02", server_url=pg_engine.url)
+
+        assert "ALTER TABLE public.t OWNER TO" in result.source
 
     def test_squash_of_every_revision(self, tmp_path: Path, pg_engine: Engine, make_db: Callable[[], sa.URL]) -> None:
         project = Project(tmp_path, CHAIN)
