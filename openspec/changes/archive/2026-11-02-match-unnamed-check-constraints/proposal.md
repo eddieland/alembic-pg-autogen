@@ -42,9 +42,9 @@ names on both sides. The same comparison can match an unnamed model constraint t
 
 **Duplicate expressions.** An expression can occur `n` times in the model and `m` times in the catalog. PostgreSQL
 accepts two equal expressions on one table (`t1_a_check`, `t1_a_check1`). The comparator pairs `min(n, m)` copies in
-catalog creation order (`pg_constraint.oid`). It treats the rest as unpaired and logs a warning with both counts. The
-issue proposes a fallback to the current behavior. That behavior drops every catalog copy, which is the defect this
-change removes.
+catalog name order. The design explains why name order replaces OID order. It treats the rest as unpaired and logs a
+warning with both counts. The issue proposes a fallback to the current behavior. That behavior drops every catalog copy,
+which is the defect this change removes.
 
 **The name of an add.** The add must carry a name. Alembic reverses `create_check_constraint(None, ...)` to
 `drop_constraint(None, ...)`, and that call raises `CompileError: ... it has no name`. The probe for an unpaired

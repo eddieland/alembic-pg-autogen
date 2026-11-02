@@ -232,6 +232,60 @@ def canonicalize_check_constraints(
     return normalized
 
 
+def choose_check_constraint_names(
+    conn: Connection,
+    *,
+    schema: str | None,
+    table_name: str,
+    expressions: Sequence[str],
+) -> Sequence[str | None]:
+    """Return the name that PostgreSQL gives each unnamed ``CHECK`` expression when it is added to a table.
+
+    PostgreSQL names an unnamed constraint after the table and the referenced column, for example
+    ``orders_amount_check``. It appends a number after a collision and truncates the name at 63 bytes. This function
+    does not predict that rule. It adds each expression to the live table without a name, in the order given, inside a
+    savepoint. It reads back the name of each new constraint, and then rolls back the savepoint. Each constraint is
+    added ``NOT VALID``, so no row is examined.
+
+    The expressions are added one after the other. A later expression therefore sees the names of the earlier ones. A
+    migration that adds the same constraints in the same order under the returned names gives the same result. Each
+    expression runs in its own nested savepoint, so an expression that PostgreSQL rejects affects only its own entry.
+
+    Args:
+        conn: An open SQLAlchemy connection (may have an active transaction).
+        schema: Schema qualifying *table_name*, or *None* to resolve it through the connection's ``search_path``.
+        table_name: The table the constraints belong to. It must already exist in the database.
+        expressions: The ``CHECK`` expression texts, in the order a migration adds them.
+
+    Returns:
+        One name per expression, in the same order. The entry is *None* for an expression that PostgreSQL rejects, for
+        example one that references a column that does not exist yet. A warning is logged for each such expression.
+    """
+    if not expressions:
+        return []
+
+    preparer = conn.dialect.identifier_preparer
+    qualified = preparer.quote(table_name)
+    if schema is not None:
+        qualified = f"{preparer.quote_schema(schema)}.{qualified}"
+
+    names: list[str | None] = []
+    savepoint = conn.begin_nested()
+    try:
+        seen = set(conn.execute(text(_CONSTRAINT_NAMES_QUERY), {"table": qualified}).scalars())
+        for expression in expressions:
+            names.append(_add_unnamed_probe(conn, qualified, expression, seen))
+    except DBAPIError:
+        # Only the name query can fail here. A rejected expression is handled inside ``_add_unnamed_probe``.
+        log.warning("Could not choose names for check constraints on %s", qualified, exc_info=True)
+        names = [None] * len(expressions)
+    finally:
+        savepoint.rollback()
+        log.debug("Check constraint naming savepoint rolled back")
+
+    return names
+
+
 def canonicalize_indexes(
     conn: Connection,
     *,
@@ -401,6 +455,34 @@ FROM pg_catalog.pg_constraint con
 WHERE con.conrelid = CAST(:table AS regclass)
   AND con.conname = ANY(:names)
 """
+
+_CONSTRAINT_NAMES_QUERY = """\
+SELECT con.conname
+FROM pg_catalog.pg_constraint con
+WHERE con.conrelid = CAST(:table AS regclass)
+"""
+
+
+def _add_unnamed_probe(conn: Connection, qualified: str, expression: str, seen: set[str]) -> str | None:
+    """Add *expression* to the table without a name and return the name PostgreSQL chose, or *None* on rejection.
+
+    The probe runs in a nested savepoint. A rejected expression rolls back only that savepoint, so the probes before
+    it stay in place and the probes after it still see their names. *seen* holds the names already on the table, and
+    the new name is added to it.
+    """
+    probe = conn.begin_nested()
+    try:
+        # The expression is user-authored SQL from the model's own metadata. It only ever runs in a savepoint.
+        conn.execute(text(f"ALTER TABLE {qualified} ADD CHECK ({expression}) NOT VALID"))
+        names = set(conn.execute(text(_CONSTRAINT_NAMES_QUERY), {"table": qualified}).scalars())
+    except DBAPIError:
+        probe.rollback()
+        log.warning("Could not choose a name for check expression %r on %s", expression, qualified, exc_info=True)
+        return None
+    probe.commit()
+    (name,) = names - seen
+    seen.add(name)
+    return name
 
 
 def _declared(ddl: Sequence[str] | Ignored) -> Sequence[str]:

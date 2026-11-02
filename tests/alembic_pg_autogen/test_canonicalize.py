@@ -18,6 +18,7 @@ from alembic_pg_autogen import (
     canonicalize_indexes,
     canonicalize_triggers,
     canonicalize_views,
+    choose_check_constraint_names,
     inspect_check_constraints,
     inspect_indexes,
 )
@@ -542,6 +543,83 @@ class TestCanonicalizeCheckConstraintsIntegration:
         )
 
         assert "ck_test_path" in normalized
+
+
+class TestChooseCheckConstraintNamesUnit:
+    def test_empty_input_never_touches_the_connection(self):
+        unusable = cast("Connection", object())
+
+        assert choose_check_constraint_names(unusable, schema="public", table_name="orders", expressions=[]) == []
+
+
+@pytest.mark.integration
+class TestChooseCheckConstraintNamesIntegration:
+    def test_names_follow_the_postgresql_rule(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_orders (amount numeric, qty int)"))
+
+        names = choose_check_constraint_names(
+            pg_conn,
+            schema="public",
+            table_name="test_ccn_orders",
+            expressions=["amount > 0", "qty <= amount", "1 = 1"],
+        )
+
+        assert names == ["test_ccn_orders_amount_check", "test_ccn_orders_check", "test_ccn_orders_check1"]
+
+    def test_existing_and_earlier_names_cause_a_suffix(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_taken (amount numeric CHECK (amount > 0))"))
+
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_ccn_taken", expressions=["amount < 10", "amount <> 5"]
+        )
+
+        assert names == ["test_ccn_taken_amount_check1", "test_ccn_taken_amount_check2"]
+
+    def test_leaves_the_database_unchanged(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_clean (amount numeric)"))
+        pg_conn.execute(text("INSERT INTO public.test_ccn_clean VALUES (-5)"))
+
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_ccn_clean", expressions=["amount >= 0"]
+        )
+
+        assert names == ["test_ccn_clean_amount_check"]
+        assert inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_ccn_clean"]) == []
+
+    def test_unusable_expression_gives_no_name_for_itself_only(
+        self, pg_conn: Connection, caplog: pytest.LogCaptureFixture
+    ):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_bad (amount numeric)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            names = choose_check_constraint_names(
+                pg_conn,
+                schema="public",
+                table_name="test_ccn_bad",
+                expressions=["amount > 0", "no_such_column > 0", "amount < 10"],
+            )
+
+        assert names == ["test_ccn_bad_amount_check", None, "test_ccn_bad_amount_check1"]
+        assert "Could not choose a name for check expression 'no_such_column > 0'" in caplog.text
+        assert inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_ccn_bad"]) == []
+
+    def test_missing_table_gives_no_names(self, pg_conn: Connection, caplog: pytest.LogCaptureFixture):
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            names = choose_check_constraint_names(
+                pg_conn, schema="public", table_name="test_ccn_missing", expressions=["amount > 0"]
+            )
+
+        assert names == [None]
+        assert "Could not choose names" in caplog.text
+
+    def test_resolves_unqualified_table_through_search_path(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE SCHEMA test_ccn_path"))
+        pg_conn.execute(text("CREATE TABLE test_ccn_path.orders (amount numeric)"))
+        pg_conn.execute(text("SET search_path TO test_ccn_path"))
+
+        names = choose_check_constraint_names(pg_conn, schema=None, table_name="orders", expressions=["amount >= 0"])
+
+        assert names == ["orders_amount_check"]
 
 
 @pytest.mark.integration

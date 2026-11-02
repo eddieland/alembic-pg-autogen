@@ -22,6 +22,7 @@ from alembic_pg_autogen.canonicalize import (
     canonicalize_indexes,
     canonicalize_triggers,
     canonicalize_views,
+    choose_check_constraint_names,
 )
 from alembic_pg_autogen.compare import SQLCreatable, setup
 from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, TriggerOp, ViewOp, diff
@@ -109,6 +110,7 @@ __all__: Final[Sequence[str]] = [
     "canonicalize_indexes",
     "canonicalize_triggers",
     "canonicalize_views",
+    "choose_check_constraint_names",
     "classify_value_set_change",
     "compare_value_sets",
     "current_schema",

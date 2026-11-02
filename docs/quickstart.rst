@@ -211,11 +211,21 @@ renamed that plugin to ``alembic.ext.checkconstraint_byname`` and no longer enab
    * - Name on **both** sides, database holds ``NOT VALID``
      - ``alembic_pg_autogen.checkconstraints``
      - ``ALTER TABLE ... VALIDATE CONSTRAINT``
+   * - No name in your models, equal expression in the database
+     - ``alembic_pg_autogen.checkconstraints``
+     - Nothing. The comparator discards the ``drop_constraint`` that Alembic emits
+   * - No name in your models, no equal expression in the database
+     - ``alembic_pg_autogen.checkconstraints``
+     - ``create_check_constraint`` under the name that PostgreSQL chooses
 
 Alembic's comparator matches constraints by name. For a name that exists on both sides, it always reports the two
 constraints as equal: ``DefaultImpl.compare_check_constraint`` returns ``Equal()``, and the PostgreSQL dialect does not
-override that method. This package claims that undecided case, and it claims nothing else. It ignores each name that
-exists on one side alone.
+override that method. This package claims that undecided case. It ignores each name that exists on one side alone.
+
+Alembic also skips each constraint without a name in your models. PostgreSQL names every constraint, so Alembic reports
+the database copy as removed. This package matches such a constraint by its canonical expression. For a match, it
+discards the drop. For a constraint with no match, it adds the constraint under the name that PostgreSQL chooses. A
+migration cannot drop a constraint without a name on downgrade, so the add needs that name.
 
 The two sets of names are disjoint, so no operation is ever emitted twice. You gain nothing when you disable Alembic's
 comparator, and you lose a lot. Alembic then detects no added constraint and no removed constraint, and this package
