@@ -106,6 +106,8 @@ def _compare_check_constraint_expressions(
     """Emit operations for check constraints whose expression, validation state, or existence changed."""
     # A table that exists on only one side is handled by Alembic: the constraint travels with the CREATE/DROP TABLE.
     if conn_table is None or metadata_table is None:
+        if metadata_table is not None:
+            _warn_about_column_constraints_of_a_new_table(metadata_table, table_name)
         return PriorityDispatchResult.CONTINUE
 
     conn = autogen_context.connection
@@ -281,7 +283,8 @@ def _compare_unnamed_check_constraints(
     for index, constraint in enumerate(constraints):
         # A column Alembic is about to add brings a type-bound constraint along, and a probe cannot reference it yet.
         if any(column.name not in conn_table.c for column in constraint.columns):
-            log.debug("Unnamed check constraint waits for its column on table %r", table_name)
+            # ``op.add_column()`` creates the constraint of a type with the column, so nothing is lost.
+            log.debug("Unnamed type-bound check constraint waits for its column on table %r", table_name)
             continue
         expression = _compile_check_expression(constraint, autogen_context.dialect)
         if expression is not None:
@@ -318,6 +321,13 @@ def _compare_unnamed_check_constraints(
     paired_names = {info.name for _, info in paired}
     leftover = [info for name, info in candidates.items() if name not in paired_names and name_included(name)]
     unknown = sorted(index for index in compiled if index not in canonical) if candidates else []
+    for index in unknown:
+        log.warning(
+            "Could not compare unnamed check constraint %r on table %r in this run. If it references a column that "
+            "this migration adds, the next autogenerate run compares it.",
+            compiled[index],
+            table_name,
+        )
     if unknown and leftover:
         # A constraint whose probe failed may be the model's copy of a leftover constraint. Dropping that constraint
         # would remove a rule the model still declares, so the drop waits for a run that can compare it.
@@ -388,7 +398,15 @@ def _compare_unnamed_check_constraints(
     )
     for index, name in zip(unpaired, names, strict=True):
         constraint = constraints[index]
-        if name is None or not name_included(name):
+        if name is None:
+            log.warning(
+                "Could not add unnamed check constraint %r on table %r in this run. If it references a column that "
+                "this migration adds, the next autogenerate run adds it.",
+                compiled[index],
+                table_name,
+            )
+            continue
+        if not name_included(name):
             continue
         if not autogen_context.run_object_filters(constraint, name, "check_constraint", False, None):
             continue
@@ -489,6 +507,28 @@ def _metadata_check_constraints(table: Table, dialect: Dialect) -> dict[str, Che
             continue
         constraints[name] = constraint
     return constraints
+
+
+def _warn_about_column_constraints_of_a_new_table(table: Table, table_name: str) -> None:
+    """Warn about unnamed column-level constraints that Alembic's ``create_table`` leaves out.
+
+    Alembic renders a new table's columns without their column-level ``CheckConstraint``. A named one gets its add from
+    Alembic's plugin on the next run, and an unnamed one gets its add from this comparator on the next run. A
+    constraint that a type generates is not affected, because the column's type creates it.
+    """
+    for column in table.columns:
+        for constraint in column.constraints:
+            if (
+                isinstance(constraint, CheckConstraint)
+                and constraint.name is None
+                and not getattr(constraint, "_type_bound", False)
+            ):
+                log.warning(
+                    "New table %r: Alembic's create_table does not create the unnamed check constraint on column %r. "
+                    "The next autogenerate run adds it.",
+                    table_name,
+                    column.name,
+                )
 
 
 def _unnamed_check_constraints(table: Table, dialect: Dialect) -> list[CheckConstraint]:

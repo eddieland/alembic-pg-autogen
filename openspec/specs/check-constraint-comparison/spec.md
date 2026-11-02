@@ -298,8 +298,15 @@ append an add under the returned name.
 #### Scenario: Text constraint on a new column is added on the next run
 
 - **WHEN** a column-level unnamed `CheckConstraint("qty >= 0")` sits on a column that the database table lacks
-- **THEN** the first run emits `add_column` and no add for the constraint
+- **THEN** the first run emits `add_column` and no add for the constraint, and logs a warning
 - **AND** the next run adds the constraint as `orders_qty_check`
+
+#### Scenario: Column-level constraint on a new table is added on the next run
+
+- **WHEN** the model declares a new table with a column-level unnamed `CheckConstraint("amount > 0")`
+- **THEN** the first run emits `create_table`, which leaves the constraint out, and the comparator logs a warning
+- **AND** the next run adds the constraint
+- **AND** a table-level unnamed constraint and an `Enum` constraint of the new table get no warning
 
 ### Requirement: Emitted operations keep the SQL text exactly
 

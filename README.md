@@ -148,11 +148,14 @@ comparator. Keep `alembic.autogenerate.checkconstraint_byname` enabled, so that 
 | No name in your models, equal expression in database  | `alembic_pg_autogen.checkconstraints`         | Nothing. The comparator discards the `drop_constraint` that Alembic emits                                                   |
 | No name in your models, no equal expression           | `alembic_pg_autogen.checkconstraints`         | `create_check_constraint` under the name that PostgreSQL chooses                                                            |
 
-The two sets of names are disjoint by construction. No operation is ever emitted twice, so you gain nothing when you
-disable Alembic's comparator. You lose the detection of added constraints and removed constraints, and our comparator
-reports nothing in their place. On PostgreSQL, Alembic's own expression check always reports equality:
-`DefaultImpl.compare_check_constraint` returns `Equal()`, and the PostgreSQL dialect does not override that method. That
-result is the gap our comparator fills, and the reason the two comparators never collide.
+The two sets of names are disjoint by construction, so each named constraint gets its operations from one comparator.
+For an unnamed constraint, our comparator discards the drop that Alembic emitted, and it avoids every name that the
+schema or the same migration already holds. One duplicate is known: on Alembic 1.20, a named non-native `Enum`
+constraint that the database lacks gets two identical adds. You gain nothing when you disable Alembic's comparator. You
+lose the detection of added constraints and removed constraints, and our comparator reports nothing in their place. On
+PostgreSQL, Alembic's own expression check always reports equality: `DefaultImpl.compare_check_constraint` returns
+`Equal()`, and the PostgreSQL dialect does not override that method. That result is the gap our comparator fills, and
+the reason the two comparators never collide.
 
 Remember one consequence. Your schema may drift only through constraints that you forgot to declare and constraints that
 you no longer want. This package then reports nothing, and Alembic emits every operation in the migration. That outcome
@@ -215,10 +218,12 @@ removed member.
 
 An expression can occur more than once on a table. The comparator pairs as many copies as both sides have. It pairs the
 database copies in name order and logs a warning when the counts differ. An unnamed constraint on a column that the same
-migration adds gets its add on the next run, because PostgreSQL cannot test the expression before the column exists.
-This rule does not apply to the constraint of a non-native `Enum`, because `add_column` creates that constraint. While a
-model constraint cannot be tested, the comparator also keeps the database constraints that no model constraint matched,
-and it logs a warning. It drops them on the next run.
+migration adds gets its add on the next run, because PostgreSQL cannot test the expression before the column exists. The
+same holds for an unnamed constraint declared on a column of a new table, because Alembic's `create_table` leaves
+column-level constraints out. The comparator logs a warning in both cases. This rule does not apply to the constraint of
+a non-native `Enum`, because the column's type creates that constraint. While a model constraint cannot be tested, the
+comparator also keeps the database constraints that no model constraint matched, and it logs a warning. It drops them on
+the next run.
 
 The comparator tests each expression on an empty `TEMP` copy of the table. The copy takes an `ACCESS SHARE` lock on the
 real table, so autogenerate does not block readers or writers. The emitted migration keeps the expression text exactly,

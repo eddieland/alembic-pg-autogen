@@ -998,6 +998,28 @@ class TestValueSetChanges(TestComparatorSkips):
         assert add.removed_values == ()
 
 
+class TestNewTableWarning:
+    def test_unnamed_column_constraint_of_a_new_table_warns(self, caplog: pytest.LogCaptureFixture):
+        table = Table(
+            "orders",
+            MetaData(),
+            Column("amount", Numeric(), CheckConstraint("amount > 0"), CheckConstraint("amount < 9", name="ck_named")),
+            Column("status", Enum("a", "b", native_enum=False, create_constraint=True)),
+            CheckConstraint("amount <> 5"),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            result = _compare_check_constraint_expressions(
+                _stub_context(connection=object()), ModifyTableOps("orders", []), "public", "orders", None, table
+            )
+
+        assert result is PriorityDispatchResult.CONTINUE
+        assert [record.getMessage() for record in caplog.records] == [
+            "New table 'orders': Alembic's create_table does not create the unnamed check constraint on column "
+            "'amount'. The next autogenerate run adds it."
+        ]
+
+
 class TestComparatorShortCircuits:
     """The comparator must stay out of the way when there is nothing it can compare."""
 
@@ -1364,7 +1386,9 @@ class TestCheckConstraintAutogenerateIntegration:
 
         assert _dropped_names(_upgrade_body(content)) == ["orders_amount_check1"]
 
-    def test_unnamed_constraint_on_a_new_column_is_added_on_the_next_run(self, alembic_project: AlembicProject):
+    def test_unnamed_constraint_on_a_new_column_is_added_on_the_next_run(
+        self, alembic_project: AlembicProject, caplog: pytest.LogCaptureFixture
+    ):
         """PostgreSQL cannot test ``qty >= 0`` before ``qty`` exists, and ``add_column`` does not create it."""
         alembic_project.execute("CREATE TABLE orders (id serial PRIMARY KEY, amount numeric)")
         metadata = MetaData()
@@ -1376,14 +1400,44 @@ class TestCheckConstraintAutogenerateIntegration:
             Column("qty", Integer, CheckConstraint("qty >= 0")),
         )
 
-        first = _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            first = _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
         assert "add_column" in first
         assert "create_check_constraint('orders_amount_check'" in first
         assert "qty >= 0" not in first
+        assert "Could not add unnamed check constraint 'qty >= 0' on table 'orders' in this run" in caplog.text
 
         second = _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
         assert "op.create_check_constraint('orders_qty_check', 'orders', 'qty >= 0')" in second
         assert _check_constraint_names(alembic_project) == ["orders_amount_check", "orders_qty_check"]
+
+    def test_unnamed_column_constraint_of_a_new_table_is_added_on_the_next_run(
+        self, alembic_project: AlembicProject, caplog: pytest.LogCaptureFixture
+    ):
+        """Alembic's ``create_table`` leaves column-level constraints out; table-level ones and types keep theirs."""
+        metadata = MetaData()
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("amount", Numeric(), CheckConstraint("amount > 0")),
+            Column("status", Enum("a", "b", native_enum=False, create_constraint=True)),
+            CheckConstraint("amount < 100"),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            first = _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+        assert "create_table" in first
+        assert (
+            "New table 'o': Alembic's create_table does not create the unnamed check constraint on column 'amount'"
+            in (caplog.text)
+        )
+        assert "column 'status'" not in caplog.text
+        assert _check_constraint_names(alembic_project, "o") == ["o_amount_check", "o_status_check"]
+
+        second = _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
+        assert "op.create_check_constraint('o_amount_check1', 'o', 'amount > 0')" in second
+        assert "check" not in _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
 
     def test_percent_in_an_unnamed_constraint_round_trips(self, alembic_project: AlembicProject):
         """Compiled SQL doubles ``%``; the comparator must compare and render the single form."""

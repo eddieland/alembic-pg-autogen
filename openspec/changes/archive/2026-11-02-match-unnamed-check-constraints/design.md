@@ -99,7 +99,12 @@ own `DropCheckConstraintOp` and `_add_constraint_op` under the reflected name. A
 With candidates, a constraint whose canonicalization failed may match a leftover candidate. Dropping that candidate
 would remove a rule the model still declares. The comparator therefore discards Alembic's drops of all leftover
 candidates and logs a warning. A text constraint on a column that the same migration adds fails its probes, so it gets
-its add on the next run.
+its add on the next run. The comparator logs a warning for it.
+
+Alembic's `create_table` renders a new table's columns without their column-level `CheckConstraint`. The comparator
+skips a table that only the model holds, so it logs a warning for each unnamed column-level constraint on such a table.
+The next run adds the constraint. A constraint that a type generates is not affected, because the column's type creates
+it with the column.
 
 ### D10: Text ops render their condition exactly
 
@@ -112,7 +117,8 @@ Alembic did not render it.
 
 ## Risks / Trade-offs
 
-- **Two migrations for a new column.** A column-level unnamed constraint on a new column needs a second run.
+- **Two migrations for a new column or table.** An unnamed constraint on a new column, or a column-level one on a new
+  table, needs a second run. A warning names it.
 - **Kept drops.** A failed probe can delay a correct drop by one run. The warning names the constraints.
 - **Names depend on the catalog at autogenerate time.** A named constraint added to another table in the same migration
   is not reserved. A collision makes the upgrade fail with a clear error.

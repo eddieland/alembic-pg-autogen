@@ -41,3 +41,6 @@
   and integration tests for each review scenario.
 - [x] 4.5 Append `postgresql_not_valid` only when Alembic did not render it, and leave the default `False` out of adds.
   Verify the full suite on Alembic 1.19.1 and 1.20.1.
+- [x] 4.6 Log a warning for an unnamed constraint that cannot be compared or added in this run, and for an unnamed
+  column-level constraint on a new table. Correct the README statement that no operation is emitted twice. Verify with a
+  unit test and integration tests for a new column and a new table.
