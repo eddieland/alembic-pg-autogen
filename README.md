@@ -357,6 +357,79 @@ for invalid indexes when a migration runs without supervision.
 The comparator skips indexes that implement a primary key, unique, or exclusion constraint. The constraint owns such an
 index, and Alembic compares the constraint.
 
+## Grants
+
+Alembic does not compare privileges. A `GRANT` in a migration is invisible to `alembic check`, and a rebuilt or squashed
+schema loses it without a warning. Declare table and schema grants as SQL in `pg_grants`:
+
+```python
+PG_GRANTS = [
+    "GRANT SELECT, INSERT ON orders TO app_writer",
+    "GRANT SELECT ON orders, order_totals TO app_reader WITH GRANT OPTION",
+    "GRANT USAGE ON SCHEMA public TO app_reader",
+]
+
+context.configure(
+    connection=connection,
+    target_metadata=target_metadata,
+    autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+    pg_grants=PG_GRANTS,
+)
+```
+
+The extension compares each privilege of each role on each object. It emits `GRANT` for a missing privilege and `REVOKE`
+for a privilege that you did not declare. A changed `WITH GRANT OPTION` gives `GRANT ... WITH GRANT OPTION` or
+`REVOKE GRANT OPTION FOR`. `GRANT ALL` expands to the privileges of your server version. The migration holds one
+statement for each object and role.
+
+```python
+def upgrade() -> None:
+    op.execute("REVOKE DELETE ON TABLE public.orders FROM app_writer")
+    op.create_table("order_totals", ...)
+    op.execute("GRANT SELECT ON TABLE public.order_totals TO app_reader WITH GRANT OPTION")
+```
+
+Revokes come first and grants come last. Thus a grant on a new table follows its `create_table`.
+
+These rules apply:
+
+- `pg_grants` follows the rules of [What gets managed](#what-gets-managed). A declared list revokes every other grant on
+  the tables, views, and schemas in the inspected schemas. This includes grants that a user added on an extension
+  object. The privileges that `CREATE EXTENSION` gives stay.
+
+- Autogenerate inspects the default schema only, unless you set `include_schemas=True`. The extension logs a warning for
+  each declared grant in a schema that it does not inspect, and emits nothing for it.
+
+- `include_name` and `include_object` apply to grants on tables, with type `"table"`, and to schemas, with type
+  `"schema"`. The default schema reaches `include_name` as `None`, as in Alembic. Views skip these filters, because
+  Alembic never sends a view through them. The Alembic version table is skipped. The extension logs a warning for each
+  declared grant that a filter removes.
+
+- The extension reads the declared statements without executing them. A grant can name a table that the same migration
+  creates. A name without a schema finds an existing table through the `search_path`, as `GRANT` does.
+
+- Each statement must be a `GRANT ... ON [TABLE]` or a `GRANT ... ON SCHEMA`. The extension rejects `REVOKE`,
+  `ON ALL TABLES IN SCHEMA`, `GRANTED BY`, sequences, functions, and column privileges with a `ValueError`.
+
+- A declared `GRANT ALL` renders as `GRANT ALL`, so a migration from a newer server runs on an older one. Privileges
+  that you name one by one render as a list, even when the list holds every privilege, because `ALL` on a newer server
+  holds more. After a server upgrade that adds a privilege, a declared `GRANT ALL` gives a `GRANT` for the new
+  privilege.
+
+- A revoke on a table or view that the same migration drops is implicit. The `DROP` removes the privileges, and
+  `downgrade()` grants them again. The extension logs a warning when `pg_grants` still declares a grant on that object.
+
+- The extension does not manage these privileges unless you declare them:
+
+  - Initial privileges in `pg_init_privs`. For example, `initdb` gives `USAGE` on the `public` schema to `PUBLIC`.
+  - Default privileges from `ALTER DEFAULT PRIVILEGES`, which each new table receives.
+  - The `initdb` defaults of `PUBLIC` on the `public` schema: `USAGE`, and `CREATE` before PostgreSQL 15. This rule also
+    covers a `public` schema that a script dropped and created again.
+
+  A `pg_grants` list without these privileges does not revoke them. A declared one is compared as usual.
+
+- The privileges of the owner of an object are implicit. The extension does not compare them.
+
 ## Installation
 
 ```bash

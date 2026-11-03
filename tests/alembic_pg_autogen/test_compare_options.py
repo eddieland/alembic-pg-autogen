@@ -45,6 +45,7 @@ class TestWarnUnrecognizedOptions:
             ("pg_view", "pg_views"),
             ("pg_function", "pg_functions"),
             ("pg_trigger", "pg_triggers"),
+            ("pg_grant", "pg_grants"),
             ("pg_functons", "pg_functions"),
             ("pg_veiws", "pg_views"),
             ("pg_check_constraint_validaton", "pg_check_constraint_validation"),
@@ -73,6 +74,7 @@ class TestWarnUnrecognizedOptions:
                 "pg_functions": [],
                 "pg_triggers": [],
                 "pg_views": [],
+                "pg_grants": [],
                 "pg_check_constraint_validation": "immediate",
             })
 

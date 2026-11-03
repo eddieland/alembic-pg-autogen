@@ -435,3 +435,47 @@ Index comparison is a separate Alembic plugin. To disable it, exclude the plugin
    )
 
 Requires Alembic 1.19 or newer.
+
+9. Grants
+---------
+
+Alembic does not compare privileges. Declare table and schema grants as SQL in ``pg_grants``:
+
+.. code-block:: python
+
+   PG_GRANTS = [
+       "GRANT SELECT, INSERT ON orders TO app_writer",
+       "GRANT SELECT ON orders TO app_reader WITH GRANT OPTION",
+       "GRANT USAGE ON SCHEMA public TO app_reader",
+   ]
+
+   context.configure(
+       connection=connection,
+       target_metadata=target_metadata,
+       autogenerate_plugins=["alembic.autogenerate.*", "alembic_pg_autogen.*"],
+       pg_grants=PG_GRANTS,
+   )
+
+The extension compares each privilege of each role on each object. It emits ``GRANT`` for a missing privilege and
+``REVOKE`` for a privilege that you did not declare. A changed ``WITH GRANT OPTION`` gives
+``GRANT ... WITH GRANT OPTION`` or ``REVOKE GRANT OPTION FOR``. Revokes come first in ``upgrade()`` and grants come last.
+Thus a grant on a new table follows its ``create_table``.
+
+These rules apply:
+
+- A declared list revokes every other grant on the tables, views, and schemas in the inspected schemas, including grants
+  that a user added on an extension object.
+- Autogenerate inspects the default schema only, unless you set ``include_schemas=True``. A declared grant in another
+  schema gives a warning and no operation.
+- ``include_name`` and ``include_object`` apply to grants on tables and schemas, not on views. The default schema
+  reaches ``include_name`` as ``None``. The Alembic version table is skipped. A declared grant that a filter removes
+  gives a warning.
+- The extension reads the statements without executing them. A name without a schema finds an existing table through
+  the ``search_path``.
+- A declared ``GRANT ALL`` renders as ``GRANT ALL``. Privileges named one by one render as a list.
+- A revoke on a table or view that the same migration drops is implicit. ``downgrade()`` grants the privileges again.
+- The extension rejects ``REVOKE``, ``ON ALL TABLES IN SCHEMA``, ``GRANTED BY``, sequences, functions, and column
+  privileges.
+- Unless declared, the extension does not manage initial privileges in ``pg_init_privs``, default privileges from
+  ``ALTER DEFAULT PRIVILEGES``, or the ``initdb`` defaults of ``PUBLIC`` on the ``public`` schema. It never compares the
+  privileges of the object owner.

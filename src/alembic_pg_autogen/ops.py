@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Constraint
     from sqlalchemy.sql.elements import ColumnElement, TextClause
 
-    from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
+    from alembic_pg_autogen.inspect import FunctionInfo, GrantInfo, TriggerInfo, ViewInfo
 
 
 class CreateFunctionOp(MigrateOperation):
@@ -196,6 +196,94 @@ class DropViewOp(MigrateOperation):
         return ("drop_view", self.current.schema, self.current.name)
 
 
+class GrantPrivilegesOp(MigrateOperation):
+    """Grant privileges on one table or schema to one role with ``GRANT``.
+
+    Each item of ``grants`` holds one privilege. All items must have the same object, grantee, and ``grantable`` flag,
+    so the operation renders as one statement. ``grantable`` adds ``WITH GRANT OPTION``.
+
+    ``all_privileges`` renders ``ALL`` in place of the privilege list. The comparator sets it when ``grants`` holds
+    every privilege of the object type on the server that runs autogenerate. ``ALL`` then means the set of the server
+    that runs the migration, so a migration from PostgreSQL 17 does not send ``MAINTAIN`` to PostgreSQL 14.
+    """
+
+    grants: tuple[GrantInfo, ...]
+    all_privileges: bool
+
+    def __init__(self, grants: Sequence[GrantInfo], *, all_privileges: bool = False) -> None:
+        self.grants = _check_grant_group(grants)
+        self.all_privileges = all_privileges
+
+    @override
+    def reverse(self) -> RevokePrivilegesOp:
+        """Reverse is revoking the granted privileges."""
+        return RevokePrivilegesOp(self.grants, all_privileges=self.all_privileges)
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, str, str, str, str, tuple[str, ...]]:
+        """Return a hashable tuple for debugging and comparison."""
+        return ("grant_privileges", *_grant_group_key(self.grants))
+
+
+class RevokePrivilegesOp(MigrateOperation):
+    """Revoke privileges on one table or schema from one role with ``REVOKE``.
+
+    ``grants`` and ``all_privileges`` have the same rules as in :class:`GrantPrivilegesOp`. ``grants`` holds the
+    privileges as the catalog stores them, so :meth:`reverse` restores ``WITH GRANT OPTION`` when the role had it.
+
+    ``implicit`` marks a revoke that the ``DROP`` of the object in the same migration does. The operation then renders
+    as a comment, because a ``REVOKE`` before the ``DROP`` can fail with "dependent privileges exist" where the
+    ``DROP`` alone succeeds. :meth:`reverse` still grants the privileges, so ``downgrade()`` restores them after it
+    creates the object again.
+    """
+
+    grants: tuple[GrantInfo, ...]
+    all_privileges: bool
+    implicit: bool
+
+    def __init__(self, grants: Sequence[GrantInfo], *, all_privileges: bool = False, implicit: bool = False) -> None:
+        self.grants = _check_grant_group(grants)
+        self.all_privileges = all_privileges
+        self.implicit = implicit
+
+    @override
+    def reverse(self) -> GrantPrivilegesOp:
+        """Reverse is granting the revoked privileges again."""
+        return GrantPrivilegesOp(self.grants, all_privileges=self.all_privileges)
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, str, str, str, str, tuple[str, ...]]:
+        """Return a hashable tuple for debugging and comparison."""
+        return ("revoke_privileges", *_grant_group_key(self.grants))
+
+
+class AlterGrantOptionOp(MigrateOperation):
+    """Add or remove the grant option of privileges that a role already holds.
+
+    ``grants`` holds the privileges with the *new* ``grantable`` flag. When the flag is ``True``, the operation renders
+    ``GRANT ... WITH GRANT OPTION``. When it is ``False``, the operation renders ``REVOKE GRANT OPTION FOR ...``. Both
+    statements keep the privilege itself. ``all_privileges`` has the same rule as in :class:`GrantPrivilegesOp`.
+    """
+
+    grants: tuple[GrantInfo, ...]
+    all_privileges: bool
+
+    def __init__(self, grants: Sequence[GrantInfo], *, all_privileges: bool = False) -> None:
+        self.grants = _check_grant_group(grants)
+        self.all_privileges = all_privileges
+
+    @override
+    def reverse(self) -> AlterGrantOptionOp:
+        """Reverse is the opposite change of the grant option."""
+        flipped = [grant._replace(grantable=not grant.grantable) for grant in self.grants]
+        return AlterGrantOptionOp(flipped, all_privileges=self.all_privileges)
+
+    @override
+    def to_diff_tuple(self) -> tuple[str, str, str, str, str, tuple[str, ...], bool]:
+        """Return a hashable tuple for debugging and comparison."""
+        return ("alter_grant_option", *_grant_group_key(self.grants), self.grants[0].grantable)
+
+
 class ValidateConstraintOp(MigrateOperation):
     """Validate a ``NOT VALID`` check constraint with ``ALTER TABLE ... VALIDATE CONSTRAINT``.
 
@@ -343,3 +431,25 @@ class DropIndexConcurrentlyOp(MigrateOperation):
     def to_diff_tuple(self) -> tuple[str, object]:
         """Return a tuple equal to the Alembic ``remove_index`` diff entry."""
         return ("remove_index", self.inner.to_index())
+
+
+def _check_grant_group(grants: Sequence[GrantInfo]) -> tuple[GrantInfo, ...]:
+    """Return *grants* as a tuple after a check that one ``GRANT`` or ``REVOKE`` statement can hold them all.
+
+    Raises:
+        ValueError: If *grants* is empty, or if two items differ in object, grantee, or ``grantable``.
+    """
+    if not grants:
+        raise ValueError("A grant operation needs at least one privilege")
+    first = grants[0]
+    target = (first.schema, first.object_type, first.name, first.grantee, first.grantable)
+    for grant in grants[1:]:
+        if (grant.schema, grant.object_type, grant.name, grant.grantee, grant.grantable) != target:
+            raise ValueError(f"A grant operation needs one object, grantee, and grant option: {grants!r}")
+    return tuple(grants)
+
+
+def _grant_group_key(grants: Sequence[GrantInfo]) -> tuple[str, str, str, str, tuple[str, ...]]:
+    """Return ``(object_type, schema, name, grantee, privileges)`` for :meth:`MigrateOperation.to_diff_tuple`."""
+    first = grants[0]
+    return (first.object_type, first.schema, first.name, first.grantee, tuple(grant.privilege for grant in grants))

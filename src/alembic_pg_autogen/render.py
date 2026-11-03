@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING
 
 from alembic.autogenerate.render import render_op, renderers
 from alembic.operations.ops import CreateCheckConstraintOp
+from sqlalchemy.dialects.postgresql.base import PGDialect
 
 from alembic_pg_autogen.ops import (
+    AlterGrantOptionOp,
     CreateCheckConstraintNotValidOp,
     CreateFunctionOp,
     CreateIndexConcurrentlyOp,
@@ -19,16 +21,31 @@ from alembic_pg_autogen.ops import (
     DropIndexConcurrentlyOp,
     DropTriggerOp,
     DropViewOp,
+    GrantPrivilegesOp,
     NoOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
     ReplaceViewOp,
+    RevokePrivilegesOp,
     ValidateConstraintOp,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from typing import Final
+
     from alembic.autogenerate.api import AutogenContext
     from alembic.operations.ops import MigrateOperation
+
+    from alembic_pg_autogen.inspect import GrantInfo
+
+_PREPARER: Final = PGDialect(paramstyle="named").identifier_preparer
+"""Quote identifiers for DDL that ``op.execute()`` runs.
+
+The preparer of a ``pyformat`` dialect, such as psycopg, doubles each ``%`` in an identifier. ``op.execute()`` does not
+undo that, so a table named ``50%off`` would become ``"50%%off"`` in the migration and fail. The ``named`` paramstyle
+does not double ``%``. The quoting rules and reserved words are the same, because the dialect is the same.
+"""
 
 
 @renderers.dispatch_for(CreateFunctionOp)
@@ -88,30 +105,60 @@ def _render_replace_view(_autogen_context: AutogenContext, op: ReplaceViewOp) ->
 
 
 @renderers.dispatch_for(DropViewOp)
-def _render_drop_view(autogen_context: AutogenContext, op: DropViewOp) -> str:
+def _render_drop_view(_autogen_context: AutogenContext, op: DropViewOp) -> str:
     """Render a DROP VIEW via op.execute().
 
     Unlike the other renderers, this one builds DDL from catalog identifiers rather than echoing a definition that
-    PostgreSQL already quoted, so the schema and view name go through the dialect's identifier preparer.  Without it a
-    view named ``Order Summary`` or ``orderView`` would render a migration that fails at runtime.
+    PostgreSQL already quoted, so the schema and view name go through :data:`_PREPARER`.  Without it a view named
+    ``Order Summary`` or ``orderView`` would render a migration that fails at runtime.
     """
-    preparer = autogen_context.dialect.identifier_preparer
-    qualified = f"{preparer.quote_schema(op.current.schema)}.{preparer.quote(op.current.name)}"
+    qualified = f"{_PREPARER.quote_schema(op.current.schema)}.{_PREPARER.quote(op.current.name)}"
     return _render_execute(f"DROP VIEW {qualified}")
 
 
+@renderers.dispatch_for(GrantPrivilegesOp)
+def _render_grant_privileges(_autogen_context: AutogenContext, op: GrantPrivilegesOp) -> str:
+    """Render a ``GRANT ... ON ... TO ...`` via op.execute()."""
+    privileges, target, grantee = _grant_parts(op.grants, all_privileges=op.all_privileges)
+    option = " WITH GRANT OPTION" if op.grants[0].grantable else ""
+    return _render_execute(f"GRANT {privileges} ON {target} TO {grantee}{option}")
+
+
+@renderers.dispatch_for(RevokePrivilegesOp)
+def _render_revoke_privileges(_autogen_context: AutogenContext, op: RevokePrivilegesOp) -> str:
+    """Render a ``REVOKE ... ON ... FROM ...`` via op.execute(), or a comment when the ``DROP`` does the revoke.
+
+    The implicit form renders ``pass`` before the comment, so a body that holds nothing else stays valid Python. The
+    statement in the comment goes through ``repr()``. An identifier can hold a line break, and a raw line break would
+    end the comment and turn the rest of the identifier into Python source.
+    """
+    privileges, target, grantee = _grant_parts(op.grants, all_privileges=op.all_privileges)
+    statement = f"REVOKE {privileges} ON {target} FROM {grantee}"
+    if op.implicit:
+        return f"pass  # The DROP of the object in this migration does: {statement!r}"
+    return _render_execute(statement)
+
+
+@renderers.dispatch_for(AlterGrantOptionOp)
+def _render_alter_grant_option(_autogen_context: AutogenContext, op: AlterGrantOptionOp) -> str:
+    """Render ``GRANT ... WITH GRANT OPTION`` or ``REVOKE GRANT OPTION FOR ...`` via op.execute()."""
+    privileges, target, grantee = _grant_parts(op.grants, all_privileges=op.all_privileges)
+    if op.grants[0].grantable:
+        return _render_execute(f"GRANT {privileges} ON {target} TO {grantee} WITH GRANT OPTION")
+    return _render_execute(f"REVOKE GRANT OPTION FOR {privileges} ON {target} FROM {grantee}")
+
+
 @renderers.dispatch_for(ValidateConstraintOp)
-def _render_validate_constraint(autogen_context: AutogenContext, op: ValidateConstraintOp) -> str:
+def _render_validate_constraint(_autogen_context: AutogenContext, op: ValidateConstraintOp) -> str:
     """Render an ALTER TABLE ... VALIDATE CONSTRAINT via op.execute().
 
-    The identifiers come from the catalog, so they go through the dialect's identifier preparer as in
-    :func:`_render_drop_view`.  The schema qualifier is omitted when the operation carries no schema.
+    The identifiers come from the catalog, so they go through :data:`_PREPARER` as in :func:`_render_drop_view`.  The
+    schema qualifier is omitted when the operation carries no schema.
     """
-    preparer = autogen_context.dialect.identifier_preparer
-    table = preparer.quote(op.table_name)
+    table = _PREPARER.quote(op.table_name)
     if op.schema is not None:
-        table = f"{preparer.quote_schema(op.schema)}.{table}"
-    return _render_execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {preparer.quote(op.constraint_name)}")
+        table = f"{_PREPARER.quote_schema(op.schema)}.{table}"
+    return _render_execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {_PREPARER.quote(op.constraint_name)}")
 
 
 @renderers.dispatch_for(CreateCheckConstraintNotValidOp)
@@ -172,6 +219,49 @@ def _render_autocommit_block(autogen_context: AutogenContext, inner: MigrateOper
     body = "\n".join(render_op(autogen_context, inner))
     indented = "\n".join(f"    {line}" if line else line for line in body.splitlines())
     return f"with op.get_context().autocommit_block():\n{indented}"
+
+
+def _grant_parts(grants: Sequence[GrantInfo], *, all_privileges: bool) -> tuple[str, str, str]:
+    """Return the privilege list, the target, and the grantee of a ``GRANT`` or ``REVOKE`` statement.
+
+    The identifiers come from the catalog or from parsed DDL, so they go through :data:`_PREPARER` as in
+    :func:`_render_drop_view`.  The grantee ``public`` is the ``PUBLIC`` pseudo-role and renders as the keyword.
+    *all_privileges* renders ``ALL`` in place of the privilege list.
+    """
+    first = grants[0]
+    if all_privileges:
+        privileges = "ALL"
+    else:
+        privileges = ", ".join(sorted((grant.privilege for grant in grants), key=_privilege_rank))
+    if first.object_type == "SCHEMA":
+        target = f"SCHEMA {_PREPARER.quote_schema(first.name)}"
+    else:
+        target = f"TABLE {_PREPARER.quote_schema(first.schema)}.{_PREPARER.quote(first.name)}"
+    grantee = "PUBLIC" if first.grantee == "public" else _PREPARER.quote(first.grantee)
+    return privileges, target, grantee
+
+
+_PRIVILEGE_ORDER: Final = (
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+    "MAINTAIN",
+    "USAGE",
+    "CREATE",
+)
+"""The order of privileges in a rendered statement. It is the order of the PostgreSQL documentation."""
+
+
+def _privilege_rank(privilege: str) -> tuple[int, str]:
+    """Sort key that puts known privileges in documentation order and unknown privileges after them."""
+    try:
+        return (_PRIVILEGE_ORDER.index(privilege), privilege)
+    except ValueError:
+        return (len(_PRIVILEGE_ORDER), privilege)
 
 
 def _render_execute(ddl: str) -> str:
