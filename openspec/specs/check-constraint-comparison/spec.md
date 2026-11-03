@@ -103,6 +103,13 @@ on PostgreSQL, and it SHALL skip every other type-bound constraint.
 - **WHEN** the metadata uses a naming convention such as `{"ck": "ck_%(table_name)s_%(constraint_name)s"}`
 - **THEN** the constraint is matched under the name it would actually be created with
 
+#### Scenario: Catalog names are final under a naming convention
+
+- **WHEN** the metadata uses the naming convention `{"ck": "ck_%(table_name)s_%(constraint_name)s"}` and the expression
+  of `ck_o_foo` changes
+- **THEN** the migration renders the catalog name as `op.f('ck_o_foo')` in the drop, the add, and the downgrade
+- **AND** the upgrade drops `ck_o_foo`, not `ck_o_ck_o_foo`
+
 #### Scenario: Non-native enum constraints are compared
 
 - **WHEN** a column uses `Enum(native_enum=False, create_constraint=True, name="status")`

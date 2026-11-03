@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from alembic.operations.ops import CreateCheckConstraintOp, DropConstraintOp, MigrateOperation
+from sqlalchemy.sql.elements import conv
 from typing_extensions import override
 
 from alembic_pg_autogen.canonicalize import escape_bind_colons
@@ -396,6 +397,11 @@ class DropCheckConstraintOp(DropConstraintOp):
     Alembic reverses its own ``DropConstraintOp`` to an add that it renders by compiling the condition. That add has
     the problems that :class:`CreateCheckConstraintTextOp` solves, so this subclass reverses to that class instead.
     A constraint that the catalog holds ``NOT VALID`` reverses to :class:`CreateCheckConstraintNotValidOp`.
+
+    The name is the catalog's own, so it is wrapped in :class:`~sqlalchemy.sql.elements.conv`, as Alembic wraps the
+    names it reflects. Alembic renders it as ``op.f(...)``. Without the marker, a naming convention such as
+    ``ck_%(table_name)s_%(constraint_name)s`` in the target metadata applies again at upgrade time, and the migration
+    drops ``ck_o_ck_o_foo`` instead of ``ck_o_foo``.
     """
 
     expression: str
@@ -412,6 +418,7 @@ class DropCheckConstraintOp(DropConstraintOp):
     ) -> None:
         self.expression = expression
         self.validated = validated
+        constraint_name = constraint_name if isinstance(constraint_name, conv) else conv(constraint_name)
         restore = _restore_op(constraint_name, table_name, expression, schema=schema, validated=validated)
         super().__init__(constraint_name, table_name, type_="check", schema=schema, _reverse=restore)
 
@@ -419,7 +426,11 @@ class DropCheckConstraintOp(DropConstraintOp):
     def reverse(self) -> CreateCheckConstraintTextOp:
         """Reverse is re-creating the constraint from the catalog's SQL text."""
         return _restore_op(
-            str(self.constraint_name), self.table_name, self.expression, schema=self.schema, validated=self.validated
+            conv(str(self.constraint_name)),
+            self.table_name,
+            self.expression,
+            schema=self.schema,
+            validated=self.validated,
         )
 
 
