@@ -442,6 +442,41 @@ class TestTypeBoundOwnership(TestComparatorSkips):
         assert op.constraint_name == "ck_orders_status"
         assert probed == []
 
+    def test_alembics_add_of_a_missing_enum_constraint_is_replaced(self, catalog: Any):
+        """Alembic 1.20 adds the missing constraint too; a second add of the same name fails the upgrade."""
+        catalog({}, {})
+        alembics = CreateCheckConstraintOp("ck_orders_status", "orders", "status IN ('new', 'done')")
+
+        (op,) = self._run(_enum_orders_table(Status), existing=[alembics]).ops
+
+        assert type(op) is CreateCheckConstraintTextOp
+        assert op.constraint_name == "ck_orders_status"
+
+    def test_alembics_add_of_another_constraint_is_kept(self, catalog: Any):
+        catalog({}, {})
+        other = CreateCheckConstraintOp("ck_orders_amount", "orders", "amount > 0")
+
+        ops = self._run(_enum_orders_table(Status), existing=[other]).ops
+
+        assert ops[0] is other
+        assert [type(op) for op in ops] == [CreateCheckConstraintOp, CreateCheckConstraintTextOp]
+
+    def test_alembics_add_stays_when_a_filter_skips_the_constraint(self, catalog: Any):
+        catalog({}, {})
+        alembics = CreateCheckConstraintOp("ck_orders_status", "orders", "status IN ('new', 'done')")
+        context = _stub_context(connection=object())
+        context.object_filter_result = False
+
+        assert self._run(_enum_orders_table(Status), context, existing=[alembics]).ops == [alembics]
+
+    def test_alembics_add_for_a_column_alembic_is_adding_is_discarded(self, catalog: Any):
+        """``op.add_column()`` creates the constraint, so Alembic's extra add would fail the upgrade."""
+        catalog({}, {})
+        alembics = CreateCheckConstraintOp("ck_orders_status", "orders", "status IN ('new', 'done')")
+        reflected = Table("orders", MetaData(), Column("id", Integer, primary_key=True))
+
+        assert self._run(_enum_orders_table(Status), conn_table=reflected, existing=[alembics]).is_empty()
+
     def test_constraint_of_a_column_alembic_is_adding_is_left_to_add_column(self, catalog: Any):
         """``op.add_column()`` creates the constraint with the column; a second add would fail the upgrade."""
         catalog({}, {})
@@ -1309,6 +1344,33 @@ class TestCheckConstraintAutogenerateIntegration:
         assert "create_check_constraint" in upgrade_body
         assert "ck_orders_status" in upgrade_body
         assert "drop_constraint" not in upgrade_body
+
+    def test_missing_enum_constraint_is_added_once_with_alembics_plugin(self, alembic_project: AlembicProject):
+        """Alembic 1.20 also adds a missing type-bound constraint; the migration must hold one add."""
+        alembic_project.execute("CREATE TABLE orders (id serial PRIMARY KEY, status varchar(16))")
+        metadata = _enum_orders_table(Status).metadata
+
+        content = _upgrade_body(
+            _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+        )
+
+        assert content.count("create_check_constraint('ck_orders_status'") == 1
+        assert _check_constraint_names(alembic_project) == ["ck_orders_status"]
+        assert "ck_orders_status" not in _upgrade_body(
+            _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+        )
+
+    def test_new_enum_column_upgrades_with_alembics_plugin(self, alembic_project: AlembicProject):
+        alembic_project.execute("CREATE TABLE orders (id serial PRIMARY KEY)")
+        metadata = _enum_orders_table(Status).metadata
+
+        content = _upgrade_body(
+            _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+        )
+
+        assert "add_column" in content
+        assert "create_check_constraint" not in content
+        assert _check_constraint_names(alembic_project) == ["ck_orders_status"]
 
     def test_new_enum_column_upgrades_with_one_constraint(self, alembic_project: AlembicProject):
         """Regression test: the comparator once added the constraint that ``add_column`` already creates."""

@@ -142,6 +142,7 @@ def _compare_check_constraint_expressions(
         # the column's type generates.  Adding it here too would fail the upgrade with a duplicate constraint.
         if any(column.name not in conn_table.c for column in constraint.columns):
             log.debug("Type-bound check constraint %r waits for its column on table %r", name, table_name)
+            _discard_adds(modify_table_ops, name, table_name)
             continue
         if not autogen_context.run_object_filters(constraint, name, "check_constraint", False, None):
             continue
@@ -149,6 +150,7 @@ def _compare_check_constraint_expressions(
         if expression is None:
             continue
         log.info("Detected missing type-bound check constraint %r on table %r", name, table_name)
+        _discard_adds(modify_table_ops, name, table_name)
         modify_table_ops.ops.append(_create_check_constraint_op(constraint, table_name, schema, expression))
 
     if unnamed_constraints:
@@ -588,6 +590,27 @@ def _discard_drops(modify_table_ops: ModifyTableOps, names: AbstractSet[str], ta
                 op.constraint_name,
                 table_name,
             )
+            continue
+        kept.append(op)
+    modify_table_ops.ops[:] = kept
+
+
+def _discard_adds(modify_table_ops: ModifyTableOps, name: str, table_name: str) -> None:
+    """Remove an add that Alembic's plugin emitted for a type-bound constraint this comparator owns.
+
+    Since Alembic 1.19.2, the plugin collects type-bound constraints on its metadata side, so it adds a missing one as
+    well. A second add of the same name fails the upgrade with ``DuplicateObject``. This comparator keeps its own add,
+    because :class:`CreateCheckConstraintTextOp` renders the text exactly and keeps ``postgresql_not_valid``. For a
+    constraint that ``op.add_column()`` creates with its column, no add is needed at all.
+    """
+    kept: list[MigrateOperation] = []
+    for op in modify_table_ops.ops:
+        if (
+            isinstance(op, ops.CreateCheckConstraintOp)
+            and not isinstance(op, CreateCheckConstraintTextOp)
+            and str(op.constraint_name) == name
+        ):
+            log.info("Discarding Alembic's add of type-bound check constraint %r on table %r", name, table_name)
             continue
         kept.append(op)
     modify_table_ops.ops[:] = kept
