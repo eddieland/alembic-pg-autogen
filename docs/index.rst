@@ -16,6 +16,7 @@ declare your DDL strings, and ``alembic revision --autogenerate`` writes the ``C
 
    quickstart
    migrating
+   squash
    api
 
 Documentation for language models

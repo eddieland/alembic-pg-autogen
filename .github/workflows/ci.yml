@@ -8,8 +8,8 @@ on:
     # Use ["main", "master"] for CI only on the default branch.
     # Use ["**"] for CI on all branches.
     branches: ["main", "master"]
+  # Every base branch, so a pull request stacked on another pull request also runs CI.
   pull_request:
-    branches: ["main", "master"]
 
 permissions:
   contents: read
@@ -70,13 +70,24 @@ jobs:
       - name: Type check (basedpyright)
         run: uv run basedpyright --stats src tests
 
+      # The squash tests need pg_dump. With ALEMBIC_PG_AUTOGEN_REQUIRE_PG_DUMP, a missing pg_dump fails them.
+      - name: Install pg_dump
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          pg_dump --version
+
       - name: Run tests with coverage
         if: matrix.python-version == '3.12'
         run: uv run pytest --cov --cov-report=xml
+        env:
+          ALEMBIC_PG_AUTOGEN_REQUIRE_PG_DUMP: "1"
 
       - name: Run tests
         if: matrix.python-version != '3.12'
         run: uv run pytest
+        env:
+          ALEMBIC_PG_AUTOGEN_REQUIRE_PG_DUMP: "1"
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
@@ -85,3 +96,53 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: false
+
+  # pg_dump must be at least as new as the server. A newer pg_dump writes settings and syntax that an older server
+  # does not know, and an older pg_dump writes some statements in an older form. This job runs the squash tests with
+  # pg_dump 18 against each server version, and with a pg_dump of the same version as the server. The last two runs
+  # use the bootstrap role postgres, which owns schema public on PostgreSQL 14.
+  squash-pg-versions:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pg-version: "14", pg-dump: "18", pg-user: "test" }
+          - { pg-version: "16", pg-dump: "18", pg-user: "test" }
+          - { pg-version: "17", pg-dump: "18", pg-user: "test" }
+          - { pg-version: "18", pg-dump: "18", pg-user: "test" }
+          - { pg-version: "14", pg-dump: "14", pg-user: "postgres" }
+          - { pg-version: "16", pg-dump: "16", pg-user: "postgres" }
+    name: squash-pg-versions (server ${{ matrix.pg-version }}, pg_dump ${{ matrix.pg-dump }}, ${{ matrix.pg-user }})
+
+    steps:
+      - name: Checkout (official GitHub action)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Install uv (official Astral action)
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.10.2"
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Install pg_dump from the PostgreSQL apt repository
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y "postgresql-client-${{ matrix.pg-dump }}"
+          echo "/usr/lib/postgresql/${{ matrix.pg-dump }}/bin" >> "$GITHUB_PATH"
+
+      - name: Run the squash tests
+        run: |
+          pg_dump --version
+          uv run pytest tests/alembic_pg_autogen/test_squash.py --pg-version "${{ matrix.pg-version }}"
+        env:
+          ALEMBIC_PG_AUTOGEN_REQUIRE_PG_DUMP: "1"
+          ALEMBIC_PG_AUTOGEN_TEST_PG_USER: ${{ matrix.pg-user }}
