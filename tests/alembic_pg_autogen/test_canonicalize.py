@@ -6,7 +6,7 @@ from collections.abc import Generator
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import Column, Connection, Integer, MetaData, Table, Text, text
+from sqlalchemy import Column, Connection, Integer, MetaData, Table, Text, create_engine, text
 from sqlalchemy.engine import Engine
 
 from alembic_pg_autogen import (
@@ -18,6 +18,7 @@ from alembic_pg_autogen import (
     canonicalize_indexes,
     canonicalize_triggers,
     canonicalize_views,
+    choose_check_constraint_names,
     inspect_check_constraints,
     inspect_indexes,
 )
@@ -532,6 +533,48 @@ class TestCanonicalizeCheckConstraintsIntegration:
 
         assert inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_cck_clean"]) == []
 
+    def test_colon_and_percent_in_literals_round_trip(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cck_text (code text, q int)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn,
+            schema="public",
+            table_name="test_cck_text",
+            expressions={"colon": "code IN ('a :b', 'c')", "percent": "code LIKE 'A%' AND q % 2 = 0"},
+        )
+
+        assert normalized == {
+            "colon": "code = ANY (ARRAY['a :b'::text, 'c'::text])",
+            "percent": "code ~~ 'A%'::text AND (q % 2) = 0",
+        }
+
+    def test_failed_readback_gives_no_expressions(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+        monkeypatch.setattr(canonicalize_module, "_PROBE_QUERY", "SELECT no_such_column")
+        pg_conn.execute(text("CREATE TABLE public.test_cck_readback (amount numeric)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_check_constraints(
+                pg_conn, schema="public", table_name="test_cck_readback", expressions={"ck": "amount >= 0"}
+            )
+
+        assert normalized == {}
+        assert "Could not canonicalize check constraints" in caplog.text
+
+    def test_one_rejected_expression_keeps_the_others(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cck_mixed (amount numeric)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn,
+            schema="public",
+            table_name="test_cck_mixed",
+            expressions={"bad": "qty > 0", "good": "amount >= 0"},
+        )
+
+        assert normalized == {"good": "amount >= 0::numeric"}
+
     def test_resolves_unqualified_table_through_search_path(self, pg_conn: Connection):
         pg_conn.execute(text("CREATE SCHEMA test_cck_path"))
         pg_conn.execute(text("CREATE TABLE test_cck_path.orders (amount numeric)"))
@@ -542,6 +585,295 @@ class TestCanonicalizeCheckConstraintsIntegration:
         )
 
         assert "ck_test_path" in normalized
+
+
+class TestChooseCheckConstraintNamesUnit:
+    def test_empty_input_never_touches_the_connection(self):
+        unusable = cast("Connection", object())
+
+        assert choose_check_constraint_names(unusable, schema="public", table_name="orders", expressions=[]) == []
+
+
+@pytest.mark.integration
+class TestChooseCheckConstraintNamesIntegration:
+    def test_names_follow_the_postgresql_rule(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_orders (amount numeric, qty int)"))
+
+        names = choose_check_constraint_names(
+            pg_conn,
+            schema="public",
+            table_name="test_ccn_orders",
+            expressions=["amount > 0", "qty <= amount", "1 = 1"],
+        )
+
+        assert names == ["test_ccn_orders_amount_check", "test_ccn_orders_check", "test_ccn_orders_check1"]
+
+    def test_existing_and_earlier_names_cause_a_suffix(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_taken (amount numeric CHECK (amount > 0))"))
+
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_ccn_taken", expressions=["amount < 10", "amount <> 5"]
+        )
+
+        assert names == ["test_ccn_taken_amount_check1", "test_ccn_taken_amount_check2"]
+
+    def test_leaves_the_database_unchanged(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_clean (amount numeric)"))
+        pg_conn.execute(text("INSERT INTO public.test_ccn_clean VALUES (-5)"))
+
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_ccn_clean", expressions=["amount >= 0"]
+        )
+
+        assert names == ["test_ccn_clean_amount_check"]
+        assert inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_ccn_clean"]) == []
+
+    def test_unusable_expression_gives_no_name_for_itself_only(
+        self, pg_conn: Connection, caplog: pytest.LogCaptureFixture
+    ):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_bad (amount numeric)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            names = choose_check_constraint_names(
+                pg_conn,
+                schema="public",
+                table_name="test_ccn_bad",
+                expressions=["amount > 0", "no_such_column > 0", "amount < 10"],
+            )
+
+        assert names == ["test_ccn_bad_amount_check", None, "test_ccn_bad_amount_check1"]
+        assert "Could not probe check expression 'no_such_column > 0'" in caplog.text
+        assert inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_ccn_bad"]) == []
+
+    def test_missing_table_gives_no_names(self, pg_conn: Connection, caplog: pytest.LogCaptureFixture):
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            names = choose_check_constraint_names(
+                pg_conn, schema="public", table_name="test_ccn_missing", expressions=["amount > 0"]
+            )
+
+        assert names == [None]
+        assert "Could not create a temporary probe clone" in caplog.text
+
+    def test_names_of_other_tables_in_the_schema_cause_a_suffix(self, pg_conn: Connection):
+        """PostgreSQL avoids constraint names across the schema, and the TEMP copy lives in another schema."""
+        pg_conn.execute(
+            text("CREATE TABLE public.test_ccn_other (a int CONSTRAINT test_ccn_wide_a_check CHECK (a > 0))")
+        )
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_wide (a int)"))
+
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_ccn_wide", expressions=["a > 0"]
+        )
+
+        assert names == ["test_ccn_wide_a_check1"]
+
+    def test_reserved_names_cause_a_suffix(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_reserved (a int)"))
+
+        names = choose_check_constraint_names(
+            pg_conn,
+            schema="public",
+            table_name="test_ccn_reserved",
+            expressions=["a > 0", "a < 9"],
+            reserved=["test_ccn_reserved_a_check", "test_ccn_reserved_a_check2"],
+        )
+
+        assert names == ["test_ccn_reserved_a_check1", "test_ccn_reserved_a_check3"]
+
+    def test_failed_catalog_query_gives_no_names(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+        monkeypatch.setattr(canonicalize_module, "_SCHEMA_CONSTRAINT_NAMES_QUERY", "SELECT no_such_column")
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_query (a int)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            names = choose_check_constraint_names(
+                pg_conn, schema="public", table_name="test_ccn_query", expressions=["a > 0"]
+            )
+
+        assert names == [None]
+        assert "Could not choose names" in caplog.text
+
+    def test_colon_in_a_literal_is_not_a_bind_parameter(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_ccn_colon (code text)"))
+
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_ccn_colon", expressions=["code IN ('a :b', 'c')"]
+        )
+
+        assert names == ["test_ccn_colon_code_check"]
+
+    def test_resolves_unqualified_table_through_search_path(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE SCHEMA test_ccn_path"))
+        pg_conn.execute(text("CREATE TABLE test_ccn_path.orders (amount numeric)"))
+        pg_conn.execute(text("SET search_path TO test_ccn_path"))
+
+        names = choose_check_constraint_names(pg_conn, schema=None, table_name="orders", expressions=["amount >= 0"])
+
+        assert names == ["orders_amount_check"]
+
+
+@pytest.mark.integration
+class TestCheckProbeRetryOnTheRealTable:
+    """An expression that the ``TEMP`` copy rejects for a reason other than an unknown column gets one more try."""
+
+    def test_function_of_the_row_type_canonicalizes(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_o (a int)"))
+        pg_conn.execute(
+            text("CREATE FUNCTION public.test_cpr_ok(public.test_cpr_o) RETURNS boolean LANGUAGE sql AS 'SELECT true'")
+        )
+        before = pg_conn.execute(text("SHOW lock_timeout")).scalar()
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cpr_o", expressions={"ck": "test_cpr_ok(test_cpr_o)"}
+        )
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_cpr_o", expressions=["a > 0", "test_cpr_ok(test_cpr_o)"]
+        )
+
+        assert normalized == {"ck": "test_cpr_ok(test_cpr_o.*)"}
+        assert names == ["test_cpr_o_a_check", "test_cpr_o_check"]
+        assert pg_conn.execute(text("SHOW lock_timeout")).scalar() == before
+        assert inspect_check_constraints(pg_conn, schemas=["public"], table_names=["test_cpr_o"]) == []
+
+    def test_unknown_column_is_not_retried(self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch):
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+        tried: list[str] = []
+        real_probe_table = canonicalize_module._check_probe_real_table
+
+        def recording_probe_table(*args: Any, **kwargs: Any) -> Any:
+            tried.append(kwargs["table_name"])
+            return real_probe_table(*args, **kwargs)
+
+        monkeypatch.setattr(canonicalize_module, "_check_probe_real_table", recording_probe_table)
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_col (a int)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cpr_col", expressions={"ck": "qty > 0"}
+        )
+
+        assert normalized == {}
+        assert tried == []
+
+    def test_blocked_copy_falls_back_to_the_real_table(self, pg_conn: Connection):
+        """A temporary relation with the table's name blocks the copy; the real table still answers."""
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_busy (a int)"))
+        pg_conn.execute(text("CREATE TEMP TABLE test_cpr_busy (b int)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cpr_busy", expressions={"ck": "a > 0"}
+        )
+        names = choose_check_constraint_names(
+            pg_conn, schema="public", table_name="test_cpr_busy", expressions=["a > 0"]
+        )
+
+        assert normalized == {"ck": "a > 0"}
+        assert names == ["test_cpr_busy_a_check"]
+
+    def test_lock_limit_that_cannot_be_set_skips_the_real_table(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+        monkeypatch.setattr(canonicalize_module, "_REAL_TABLE_LOCK_TIMEOUT", "not a duration")
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_limit (a int)"))
+        pg_conn.execute(text("CREATE TEMP TABLE test_cpr_limit (b int)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_check_constraints(
+                pg_conn, schema="public", table_name="test_cpr_limit", expressions={"ck": "a > 0"}
+            )
+
+        assert normalized == {}
+        assert "Could not limit the lock wait" in caplog.text
+
+    def test_statement_error_is_not_retried(
+        self, pg_conn: Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """Without the escape, ``:b`` is a bind parameter, and SQLAlchemy raises before the server sees the probe."""
+        canonicalize_module = importlib.import_module("alembic_pg_autogen.canonicalize")
+
+        def no_escape(sql: str) -> str:
+            return sql
+
+        monkeypatch.setattr(canonicalize_module, "escape_bind_colons", no_escape)
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_bind (a text)"))
+
+        with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+            normalized = canonicalize_check_constraints(
+                pg_conn, schema="public", table_name="test_cpr_bind", expressions={"ck": "a = 'x :b'"}
+            )
+
+        assert normalized == {}
+        assert "Could not probe check expression \"a = 'x :b'\" on pg_temp.test_cpr_bind" in caplog.text
+
+    def test_posix_character_class_is_not_a_bind_parameter(self, pg_conn: Connection):
+        pg_conn.execute(text("CREATE TABLE public.test_cpr_posix (a text)"))
+
+        normalized = canonicalize_check_constraints(
+            pg_conn, schema="public", table_name="test_cpr_posix", expressions={"ck": "a ~ '^[[:alpha:]]+$'"}
+        )
+
+        assert normalized == {"ck": "a ~ '^[[:alpha:]]+$'::text"}
+
+
+@pytest.mark.integration
+class TestCheckProbeLocking:
+    """The probes run on a TEMP copy, so readers of the real table never wait for autogenerate."""
+
+    def test_probes_do_not_wait_for_an_open_reader(self, pg_engine: Engine):
+        with pg_engine.connect() as setup:
+            setup.execute(text("DROP TABLE IF EXISTS public.test_cpl_orders"))
+            setup.execute(text("CREATE TABLE public.test_cpl_orders (amount numeric)"))
+            setup.commit()
+        try:
+            with pg_engine.connect() as reader, pg_engine.connect() as probe:
+                reader.execute(text("SELECT * FROM public.test_cpl_orders"))
+                probe.execute(text("SET lock_timeout = '2s'"))
+
+                normalized = canonicalize_check_constraints(
+                    probe, schema="public", table_name="test_cpl_orders", expressions={"ck": "amount >= 0"}
+                )
+                names = choose_check_constraint_names(
+                    probe, schema="public", table_name="test_cpl_orders", expressions=["amount >= 0"]
+                )
+
+                assert normalized == {"ck": "amount >= 0::numeric"}
+                assert names == ["test_cpl_orders_amount_check"]
+                reader.rollback()
+                probe.rollback()
+        finally:
+            with pg_engine.connect() as cleanup:
+                cleanup.execute(text("DROP TABLE public.test_cpl_orders"))
+                cleanup.commit()
+
+    def test_autocommit_connection_degrades_instead_of_raising(
+        self, pg_engine: Engine, caplog: pytest.LogCaptureFixture
+    ):
+        with pg_engine.connect() as setup:
+            setup.execute(text("DROP TABLE IF EXISTS public.test_cpl_auto"))
+            setup.execute(text("CREATE TABLE public.test_cpl_auto (amount numeric)"))
+            setup.commit()
+        try:
+            # A separate engine, because the shared one opens a transaction on checkout to set ``search_path``.
+            autocommit = create_engine(pg_engine.url, isolation_level="AUTOCOMMIT")
+            with autocommit.connect() as conn:
+                with caplog.at_level(logging.WARNING, logger="alembic_pg_autogen.canonicalize"):
+                    normalized = canonicalize_check_constraints(
+                        conn, schema="public", table_name="test_cpl_auto", expressions={"ck": "amount >= 0"}
+                    )
+                    names = choose_check_constraint_names(
+                        conn, schema="public", table_name="test_cpl_auto", expressions=["amount >= 0"]
+                    )
+
+            autocommit.dispose()
+            assert normalized == {}
+            assert names == [None]
+            assert "Could not open a savepoint" in caplog.text
+        finally:
+            with pg_engine.connect() as cleanup:
+                cleanup.execute(text("DROP TABLE public.test_cpl_auto"))
+                cleanup.commit()
 
 
 @pytest.mark.integration

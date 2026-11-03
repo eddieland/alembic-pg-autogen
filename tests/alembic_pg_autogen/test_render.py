@@ -11,10 +11,12 @@ from alembic.operations.ops import ModifyTableOps, UpgradeOps
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import CheckConstraint, Column, MetaData, String, Table
 from sqlalchemy.dialects.postgresql.base import PGDialect
+from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
 
 from alembic_pg_autogen.inspect import FunctionInfo, TriggerInfo, ViewInfo
 from alembic_pg_autogen.ops import (
     CreateCheckConstraintNotValidOp,
+    CreateCheckConstraintTextOp,
     CreateFunctionOp,
     CreateTriggerOp,
     CreateViewOp,
@@ -30,6 +32,7 @@ from alembic_pg_autogen.ops import (
 from alembic_pg_autogen.render import (
     _quote_ddl,
     _render_create_check_constraint_not_valid,
+    _render_create_check_constraint_text,
     _render_create_function,
     _render_create_trigger,
     _render_create_view,
@@ -53,9 +56,11 @@ def _ctx() -> MagicMock:
     return ctx
 
 
-def _autogen_context(**opts: object) -> AutogenContext:
+def _autogen_context(*, dialect: PGDialect | None = None, **opts: object) -> AutogenContext:
     """Return a real AutogenContext, which Alembic's own check constraint renderer needs for its prefixes."""
-    migration_context = MigrationContext.configure(dialect=PGDialect(), opts={"as_sql": True})
+    migration_context = MigrationContext.configure(
+        dialect=dialect if dialect is not None else PGDialect(), opts={"as_sql": True}
+    )
     ctx = AutogenContext(migration_context, autogenerate=False)
     ctx.opts.update({"alembic_module_prefix": "op.", "sqlalchemy_module_prefix": "sa.", "user_module_prefix": None})
     ctx.opts.update(opts)
@@ -382,6 +387,69 @@ class TestRenderValidateConstraint:
         ctx = _ctx()
         _render_validate_constraint(ctx, ValidateConstraintOp("ck", "orders"))
         assert len(ctx.imports) == 0
+
+
+class TestRenderCreateCheckConstraintText:
+    """Alembic compiles the condition with the live dialect; psycopg's ``pyformat`` style doubles each ``%``."""
+
+    def test_percent_renders_once_on_a_pyformat_dialect(self):
+        op = CreateCheckConstraintTextOp("ck_o_code", "o", "code LIKE 'A%' AND q % 2 = 0")
+
+        call = _render_create_check_constraint_text(_autogen_context(dialect=PGDialect_psycopg()), op)
+
+        assert call == """op.create_check_constraint('ck_o_code', 'o', "code LIKE 'A%' AND q % 2 = 0")"""
+
+    def test_colon_renders_escaped_for_text(self):
+        op = CreateCheckConstraintTextOp("ck_o_code", "o", "code IN ('a :b', 'c')")
+
+        call = _render_create_check_constraint_text(_autogen_context(dialect=PGDialect_psycopg()), op)
+
+        assert call == r"""op.create_check_constraint('ck_o_code', 'o', "code IN ('a \\:b', 'c')")"""
+
+    def test_posix_character_class_renders_unchanged(self):
+        op = CreateCheckConstraintTextOp("ck", "o", "a ~ '^[[:alpha:]]+$'")
+
+        call = _render_create_check_constraint_text(_autogen_context(dialect=PGDialect_psycopg()), op)
+
+        assert call == """op.create_check_constraint('ck', 'o', "a ~ '^[[:alpha:]]+$'")"""
+
+    def test_cast_is_not_escaped(self):
+        op = CreateCheckConstraintTextOp("ck", "o", "amount >= 0::numeric")
+
+        assert isinstance(op.condition, str)
+        assert op.condition == "amount >= 0::numeric"
+
+    def test_clause_condition_renders_as_alembic_renders_it(self):
+        table = Table("o", MetaData(), Column("code", String()))
+        op = CreateCheckConstraintTextOp("ck", "o", table.c.code == "a")
+
+        call = _render_create_check_constraint_text(_autogen_context(), op)
+
+        assert call.startswith("op.create_check_constraint('ck', 'o', ")
+
+    def test_not_valid_op_renders_percent_once(self):
+        op = CreateCheckConstraintNotValidOp("ck", "o", "code LIKE 'A%'")
+
+        (line,) = _render_create_check_constraint_not_valid(_autogen_context(dialect=PGDialect_psycopg()), op)
+
+        assert line == """op.create_check_constraint('ck', 'o', "code LIKE 'A%'", postgresql_not_valid=True)"""
+
+    def test_keyword_rendered_by_alembic_is_not_repeated(self, monkeypatch: pytest.MonkeyPatch):
+        """Alembic 1.20 renders dialect keywords itself; a second ``postgresql_not_valid`` is a ``SyntaxError``."""
+        from alembic_pg_autogen import render as module
+
+        rendered = "op.create_check_constraint('ck', 'o', 'x > 0', postgresql_not_valid=True)"
+
+        def render_with_the_keyword(*_args: object) -> str:
+            return rendered
+
+        monkeypatch.setattr(module, "_render_create_check_constraint_text", render_with_the_keyword)
+
+        (line,) = _render_create_check_constraint_not_valid(
+            _autogen_context(), CreateCheckConstraintNotValidOp("ck", "o", "x > 0")
+        )
+
+        assert line == rendered
 
 
 class TestRenderCreateCheckConstraintNotValid:
