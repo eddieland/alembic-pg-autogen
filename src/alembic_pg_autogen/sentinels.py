@@ -34,9 +34,9 @@ class _IgnoredSentinel(enum.Enum):
 IGNORED: Final = _IgnoredSentinel.IGNORED
 """Marks a PostgreSQL object type as unmanaged.
 
-Pass this instead of a DDL sequence to ``pg_functions``, ``pg_views``, or ``pg_triggers`` to leave that object type
-entirely alone: nothing is inspected, nothing is diffed, and no operations are emitted for it — in particular, existing
-objects of that type are **not** dropped.
+Pass this instead of a DDL sequence to ``pg_functions``, ``pg_views``, ``pg_triggers``, or ``pg_grants`` to leave that
+object type entirely alone: nothing is inspected, nothing is diffed, and no operations are emitted for it — in
+particular, existing objects of that type are **not** dropped.
 
 Omitting the key entirely means the same thing; the sentinel is for recording the opt-out at the configuration site, and
 for assigning it conditionally.

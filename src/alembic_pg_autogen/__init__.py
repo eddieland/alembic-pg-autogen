@@ -16,30 +16,36 @@ import alembic_pg_autogen.compare_indexes as _compare_indexes_mod
 import alembic_pg_autogen.render  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from alembic_pg_autogen.canonicalize import (
     CanonicalState,
+    DeclaredGrants,
     canonicalize,
     canonicalize_check_constraints,
     canonicalize_functions,
+    canonicalize_grants,
     canonicalize_indexes,
     canonicalize_triggers,
     canonicalize_views,
     choose_check_constraint_names,
+    parse_grants,
 )
 from alembic_pg_autogen.compare import SQLCreatable, setup
-from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, TriggerOp, ViewOp, diff
+from alembic_pg_autogen.diff import Action, DiffResult, FunctionOp, GrantOp, TriggerOp, ViewOp, diff, diff_grants
 from alembic_pg_autogen.inspect import (
     CheckConstraintInfo,
     FunctionInfo,
+    GrantInfo,
     IndexInfo,
     TriggerInfo,
     ViewInfo,
     current_schema,
     inspect_check_constraints,
     inspect_functions,
+    inspect_grants,
     inspect_indexes,
     inspect_triggers,
     inspect_views,
 )
 from alembic_pg_autogen.ops import (
+    AlterGrantOptionOp,
     CreateCheckConstraintNotValidOp,
     CreateCheckConstraintTextOp,
     CreateFunctionOp,
@@ -51,10 +57,12 @@ from alembic_pg_autogen.ops import (
     DropIndexConcurrentlyOp,
     DropTriggerOp,
     DropViewOp,
+    GrantPrivilegesOp,
     NoOp,
     ReplaceFunctionOp,
     ReplaceTriggerOp,
     ReplaceViewOp,
+    RevokePrivilegesOp,
     ValidateConstraintOp,
 )
 from alembic_pg_autogen.rewriters import skip_drop_index_for_dropped_tables
@@ -77,6 +85,7 @@ if TYPE_CHECKING:
 
 __all__: Final[Sequence[str]] = [
     "Action",
+    "AlterGrantOptionOp",
     "CanonicalState",
     "CheckConstraintInfo",
     "CreateCheckConstraintNotValidOp",
@@ -85,6 +94,7 @@ __all__: Final[Sequence[str]] = [
     "CreateIndexConcurrentlyOp",
     "CreateTriggerOp",
     "CreateViewOp",
+    "DeclaredGrants",
     "DiffResult",
     "DropCheckConstraintOp",
     "DropFunctionOp",
@@ -93,6 +103,9 @@ __all__: Final[Sequence[str]] = [
     "DropViewOp",
     "FunctionInfo",
     "FunctionOp",
+    "GrantInfo",
+    "GrantOp",
+    "GrantPrivilegesOp",
     "IGNORED",
     "Ignored",
     "IndexInfo",
@@ -100,6 +113,7 @@ __all__: Final[Sequence[str]] = [
     "ReplaceFunctionOp",
     "ReplaceTriggerOp",
     "ReplaceViewOp",
+    "RevokePrivilegesOp",
     "SQLCreatable",
     "TriggerInfo",
     "TriggerOp",
@@ -111,6 +125,7 @@ __all__: Final[Sequence[str]] = [
     "canonicalize",
     "canonicalize_check_constraints",
     "canonicalize_functions",
+    "canonicalize_grants",
     "canonicalize_indexes",
     "canonicalize_triggers",
     "canonicalize_views",
@@ -119,11 +134,14 @@ __all__: Final[Sequence[str]] = [
     "compare_value_sets",
     "current_schema",
     "diff",
+    "diff_grants",
     "inspect_check_constraints",
     "inspect_functions",
+    "inspect_grants",
     "inspect_indexes",
     "inspect_triggers",
     "inspect_views",
+    "parse_grants",
     "parse_value_set",
     "setup",
     "skip_drop_index_for_dropped_tables",
