@@ -48,6 +48,7 @@ from alembic_pg_autogen.ops import (
     CreateCheckConstraintNotValidOp,
     CreateCheckConstraintTextOp,
     DropCheckConstraintOp,
+    NoOp,
     ValidateConstraintOp,
 )
 from alembic_pg_autogen.value_sets import ValueSetChange, compare_value_sets, parse_value_set
@@ -349,6 +350,8 @@ def _compare_unnamed_check_constraints(
             table_name,
         )
         _discard_drops(modify_table_ops, {info.name for info in leftover}, table_name)
+        # A ``NoOp`` makes ``alembic check`` fail, so the kept constraints cannot hide drift in CI.
+        modify_table_ops.ops.append(NoOp(_kept_constraints_reason(leftover, [compiled[index] for index in unknown])))
         leftover = []
 
     _discard_drops(modify_table_ops, {name for name in paired_names if name_included(name)}, table_name)
@@ -495,6 +498,16 @@ def _planned_constraint_names(table: Table, dialect: Dialect) -> set[str]:
         if isinstance(name, str) and name:
             names.add(name)
     return names
+
+
+def _kept_constraints_reason(kept: Sequence[CheckConstraintInfo], rejected: Sequence[str]) -> str:
+    """Return the one-line reason of the ``NoOp`` that stands for constraints kept after a failed comparison."""
+    names = ", ".join(sorted(info.name for info in kept))
+    expressions = ", ".join(repr(expression) for expression in rejected)
+    return (
+        f"Kept check constraints {names}: PostgreSQL rejected the unnamed model constraint {expressions}. "
+        "Fix the expression, or add the column it references."
+    )
 
 
 def _metadata_check_constraints(table: Table, dialect: Dialect) -> dict[str, CheckConstraint]:
