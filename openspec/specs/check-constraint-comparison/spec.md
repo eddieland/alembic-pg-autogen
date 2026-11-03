@@ -266,6 +266,8 @@ SHALL be a candidate.
 - **THEN** the comparator emits no add for it
 - **AND** it discards Alembic's drops of the candidates that no constraint paired with, and logs a warning
 - **AND** the warning says that those constraints stay until every unnamed model constraint can be compared
+- **AND** the comparator appends a `NoOp` whose reason names the kept constraints and the rejected expression, so the
+  migration renders `pass  # Kept check constraints ...` and `alembic check` fails
 
 #### Scenario: A failed probe does not cost the others their pairs
 
