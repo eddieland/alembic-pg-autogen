@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from alembic.operations import ops
 from alembic.util import DispatchPriority, PriorityDispatchResult
 from sqlalchemy import CheckConstraint
+from sqlalchemy.sql.elements import conv
 
 from alembic_pg_autogen.canonicalize import canonicalize_check_constraints, choose_check_constraint_names
 from alembic_pg_autogen.inspect import current_schema, inspect_check_constraints
@@ -393,7 +394,8 @@ def _compare_unnamed_check_constraints(
                 current_expression=info.expression,
                 desired_expression=canonical[index],
                 defer_validation=defer_validation,
-                name=info.name,
+                # The catalog's own name is final, so a naming convention must not apply to it again.
+                name=conv(info.name),
             )
         )
     unpaired = [index for index in unpaired if index not in changed]

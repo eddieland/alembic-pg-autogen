@@ -1547,6 +1547,50 @@ class TestCheckConstraintAutogenerateIntegration:
         assert "op.create_check_constraint('o_check', 'o', 'ok(o)')" in content
         assert "check" not in _upgrade_body(_autogenerate_and_upgrade(alembic_project, metadata))
 
+    def test_changed_constraint_under_a_naming_convention_upgrades_and_downgrades(
+        self, alembic_project: AlembicProject
+    ):
+        """Without ``op.f()``, the convention applies again at upgrade time and names ``ck_o_ck_o_foo``."""
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, a int, CONSTRAINT ck_o_foo CHECK (a > 0))")
+        metadata = MetaData(naming_convention={"ck": "ck_%(table_name)s_%(constraint_name)s"})
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("a", Integer),
+            CheckConstraint("a > 1", name="foo"),
+        )
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+
+        assert "op.drop_constraint(op.f('ck_o_foo'), 'o', type_='check')" in content
+        assert "op.create_check_constraint(op.f('ck_o_foo'), 'o', 'a > 1')" in content
+        assert _check_constraint_expressions(alembic_project, "o") == ["a > 1"]
+        assert "check" not in _upgrade_body(
+            _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+        )
+
+        downgrade(alembic_project.config, "-2")
+        assert _check_constraint_names(alembic_project, "o") == ["ck_o_foo"]
+        assert _check_constraint_expressions(alembic_project, "o") == ["a > 0"]
+
+    def test_unnamed_value_set_change_under_a_naming_convention_upgrades(self, alembic_project: AlembicProject):
+        """A convention without ``%(constraint_name)s`` leaves an unnamed ``Enum`` unnamed; the reflected name is final."""
+        alembic_project.execute(
+            "CREATE TABLE o (id serial PRIMARY KEY, status varchar(16) CHECK (status IN ('a', 'b', 'c')))"
+        )
+        metadata = MetaData(naming_convention={"ix": "ix_%(column_0_label)s"})
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("status", Enum("a", "b", native_enum=False, create_constraint=True, length=16)),
+        )
+
+        _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+
+        assert _check_constraint_names(alembic_project, "o") == ["o_status_check"]
+
     def test_percent_in_an_unnamed_constraint_round_trips(self, alembic_project: AlembicProject):
         """Compiled SQL doubles ``%``; the comparator must compare and render the single form."""
         alembic_project.execute(
@@ -1665,7 +1709,7 @@ class TestCheckConstraintAutogenerateIntegration:
         upgrade_body = _upgrade_body(content)
         assert _dropped_names(upgrade_body) == ["o_status_check"]
         assert (
-            "create_check_constraint('o_status_check', 'o', \"status IN ('a', 'b')\", postgresql_not_valid=True)"
+            "create_check_constraint(op.f('o_status_check'), 'o', \"status IN ('a', 'b')\", postgresql_not_valid=True)"
             in (upgrade_body)
         )
         assert "# Backfill those rows before the revision that validates o_status_check." in upgrade_body

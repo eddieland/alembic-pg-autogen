@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from alembic.operations.ops import CreateCheckConstraintOp, DropConstraintOp, MigrateOperation
 from sqlalchemy import CheckConstraint, Column, MetaData, String, Table
+from sqlalchemy.sql.elements import conv
 
 from alembic_pg_autogen import (
     CreateCheckConstraintNotValidOp,
@@ -73,6 +74,14 @@ class TestDropCheckConstraintOp:
         assert (reverse.constraint_name, reverse.table_name, reverse.schema) == ("ck", "o", "sales")
         assert isinstance(reverse.condition, str)
         assert reverse.condition == "code IN ('a \\:b')"
+
+    def test_name_is_marked_final(self):
+        """Alembic renders a ``conv`` name as ``op.f()``, so a naming convention does not apply to it again."""
+        op = DropCheckConstraintOp("ck_o_foo", "o", "a > 0")
+
+        assert isinstance(op.constraint_name, conv)
+        assert isinstance(op.reverse().constraint_name, conv)
+        assert op.reverse().constraint_name == "ck_o_foo"
 
     def test_reverse_of_a_not_valid_constraint_is_not_valid(self):
         reverse = DropCheckConstraintOp("ck", "o", "x > 0", validated=False).reverse()
