@@ -24,6 +24,7 @@ def test_check_constraint_exports_present():
     assert "CheckConstraintInfo" in alembic_pg_autogen.__all__
     assert "inspect_check_constraints" in alembic_pg_autogen.__all__
     assert "canonicalize_check_constraints" in alembic_pg_autogen.__all__
+    assert "choose_check_constraint_names" in alembic_pg_autogen.__all__
     assert "current_schema" in alembic_pg_autogen.__all__
 
 
@@ -31,6 +32,7 @@ def test_check_constraint_exports_importable():
     from alembic_pg_autogen import (
         CheckConstraintInfo,
         canonicalize_check_constraints,
+        choose_check_constraint_names,
         current_schema,
         inspect_check_constraints,
     )
@@ -38,6 +40,7 @@ def test_check_constraint_exports_importable():
     assert CheckConstraintInfo is not None
     assert inspect_check_constraints is not None
     assert canonicalize_check_constraints is not None
+    assert choose_check_constraint_names is not None
     assert current_schema is not None
 
 
@@ -135,9 +138,11 @@ def test_importing_package_registers_renderers():
         from alembic.autogenerate.render import renderers
         from alembic_pg_autogen import (
             CreateCheckConstraintNotValidOp,
+            CreateCheckConstraintTextOp,
             CreateFunctionOp,
             CreateTriggerOp,
             CreateViewOp,
+            DropCheckConstraintOp,
             DropFunctionOp,
             DropTriggerOp,
             DropViewOp,
@@ -167,6 +172,8 @@ def test_importing_package_registers_renderers():
             DropViewOp(view),
             ValidateConstraintOp("ck", "t"),
             CreateCheckConstraintNotValidOp("ck", "t", "x IN ('a')"),
+            CreateCheckConstraintTextOp("ck", "t", "x IN ('a')"),
+            DropCheckConstraintOp("ck", "t", "x IN ('a')"),
             NoOp("nothing"),
         ]
         for op in ops:
