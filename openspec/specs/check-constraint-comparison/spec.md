@@ -103,6 +103,13 @@ on PostgreSQL, and it SHALL skip every other type-bound constraint.
 - **WHEN** the metadata uses a naming convention such as `{"ck": "ck_%(table_name)s_%(constraint_name)s"}`
 - **THEN** the constraint is matched under the name it would actually be created with
 
+#### Scenario: Catalog names are final under a naming convention
+
+- **WHEN** the metadata uses the naming convention `{"ck": "ck_%(table_name)s_%(constraint_name)s"}` and the expression
+  of `ck_o_foo` changes
+- **THEN** the migration renders the catalog name as `op.f('ck_o_foo')` in the drop, the add, and the downgrade
+- **AND** the upgrade drops `ck_o_foo`, not `ck_o_ck_o_foo`
+
 #### Scenario: Non-native enum constraints are compared
 
 - **WHEN** a column uses `Enum(native_enum=False, create_constraint=True, name="status")`
@@ -146,9 +153,9 @@ raising.
 
 ### Requirement: Type-bound constraints are owned end to end
 
-Alembic's `checkconstraint_byname` plugin excludes type-bound constraints from its metadata side. For each type-bound
-constraint that SQLAlchemy creates on PostgreSQL, the comparator SHALL therefore manage existence as well as the
-expression.
+Before Alembic 1.19.2, Alembic's `checkconstraint_byname` plugin excludes type-bound constraints from its metadata side.
+Later releases include them. For each type-bound constraint that SQLAlchemy creates on PostgreSQL, the comparator SHALL
+therefore manage existence as well as the expression, and it SHALL leave one add in the migration.
 
 #### Scenario: Alembic's drop of a declared enum constraint is discarded
 
@@ -174,6 +181,18 @@ expression.
 - **WHEN** a type-bound constraint that PostgreSQL creates is absent from the catalog and its model declaration carries
   `postgresql_not_valid=True`
 - **THEN** a `CreateCheckConstraintNotValidOp` is appended, so the rendered migration keeps the flag
+
+#### Scenario: Alembic's add of a missing enum constraint is replaced
+
+- **WHEN** Alembic's plugin appended a `CreateCheckConstraintOp` for a missing type-bound constraint
+- **AND** the comparator adds the same constraint
+- **THEN** the comparator removes Alembic's operation, so the migration holds one add
+- **AND** an add that Alembic emitted for another name stays
+
+#### Scenario: Alembic's add for a column Alembic is adding is discarded
+
+- **WHEN** Alembic's plugin appended a `CreateCheckConstraintOp` for a type-bound constraint of a new column
+- **THEN** the comparator removes that operation, because `op.add_column()` creates the constraint
 
 #### Scenario: Constraint of a column Alembic is adding is left to add_column
 

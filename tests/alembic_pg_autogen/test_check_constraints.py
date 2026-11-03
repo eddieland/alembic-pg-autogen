@@ -443,6 +443,41 @@ class TestTypeBoundOwnership(TestComparatorSkips):
         assert op.constraint_name == "ck_orders_status"
         assert probed == []
 
+    def test_alembics_add_of_a_missing_enum_constraint_is_replaced(self, catalog: Any):
+        """Alembic 1.20 adds the missing constraint too; a second add of the same name fails the upgrade."""
+        catalog({}, {})
+        alembics = CreateCheckConstraintOp("ck_orders_status", "orders", "status IN ('new', 'done')")
+
+        (op,) = self._run(_enum_orders_table(Status), existing=[alembics]).ops
+
+        assert type(op) is CreateCheckConstraintTextOp
+        assert op.constraint_name == "ck_orders_status"
+
+    def test_alembics_add_of_another_constraint_is_kept(self, catalog: Any):
+        catalog({}, {})
+        other = CreateCheckConstraintOp("ck_orders_amount", "orders", "amount > 0")
+
+        ops = self._run(_enum_orders_table(Status), existing=[other]).ops
+
+        assert ops[0] is other
+        assert [type(op) for op in ops] == [CreateCheckConstraintOp, CreateCheckConstraintTextOp]
+
+    def test_alembics_add_stays_when_a_filter_skips_the_constraint(self, catalog: Any):
+        catalog({}, {})
+        alembics = CreateCheckConstraintOp("ck_orders_status", "orders", "status IN ('new', 'done')")
+        context = _stub_context(connection=object())
+        context.object_filter_result = False
+
+        assert self._run(_enum_orders_table(Status), context, existing=[alembics]).ops == [alembics]
+
+    def test_alembics_add_for_a_column_alembic_is_adding_is_discarded(self, catalog: Any):
+        """``op.add_column()`` creates the constraint, so Alembic's extra add would fail the upgrade."""
+        catalog({}, {})
+        alembics = CreateCheckConstraintOp("ck_orders_status", "orders", "status IN ('new', 'done')")
+        reflected = Table("orders", MetaData(), Column("id", Integer, primary_key=True))
+
+        assert self._run(_enum_orders_table(Status), conn_table=reflected, existing=[alembics]).is_empty()
+
     def test_constraint_of_a_column_alembic_is_adding_is_left_to_add_column(self, catalog: Any):
         """``op.add_column()`` creates the constraint with the column; a second add would fail the upgrade."""
         catalog({}, {})
@@ -1316,6 +1351,33 @@ class TestCheckConstraintAutogenerateIntegration:
         assert "ck_orders_status" in upgrade_body
         assert "drop_constraint" not in upgrade_body
 
+    def test_missing_enum_constraint_is_added_once_with_alembics_plugin(self, alembic_project: AlembicProject):
+        """Alembic 1.20 also adds a missing type-bound constraint; the migration must hold one add."""
+        alembic_project.execute("CREATE TABLE orders (id serial PRIMARY KEY, status varchar(16))")
+        metadata = _enum_orders_table(Status).metadata
+
+        content = _upgrade_body(
+            _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+        )
+
+        assert content.count("create_check_constraint('ck_orders_status'") == 1
+        assert _check_constraint_names(alembic_project) == ["ck_orders_status"]
+        assert "ck_orders_status" not in _upgrade_body(
+            _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+        )
+
+    def test_new_enum_column_upgrades_with_alembics_plugin(self, alembic_project: AlembicProject):
+        alembic_project.execute("CREATE TABLE orders (id serial PRIMARY KEY)")
+        metadata = _enum_orders_table(Status).metadata
+
+        content = _upgrade_body(
+            _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+        )
+
+        assert "add_column" in content
+        assert "create_check_constraint" not in content
+        assert _check_constraint_names(alembic_project) == ["ck_orders_status"]
+
     def test_new_enum_column_upgrades_with_one_constraint(self, alembic_project: AlembicProject):
         """Regression test: the comparator once added the constraint that ``add_column`` already creates."""
         alembic_project.execute("CREATE TABLE orders (id serial PRIMARY KEY)")
@@ -1578,6 +1640,50 @@ class TestCheckConstraintAutogenerateIntegration:
         assert "drop_constraint" not in content
         assert _check_constraint_names(alembic_project, "o") == ["o_a_check", "o_a_check1", "raw_rule"]
 
+    def test_changed_constraint_under_a_naming_convention_upgrades_and_downgrades(
+        self, alembic_project: AlembicProject
+    ):
+        """Without ``op.f()``, the convention applies again at upgrade time and names ``ck_o_ck_o_foo``."""
+        alembic_project.execute("CREATE TABLE o (id serial PRIMARY KEY, a int, CONSTRAINT ck_o_foo CHECK (a > 0))")
+        metadata = MetaData(naming_convention={"ck": "ck_%(table_name)s_%(constraint_name)s"})
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("a", Integer),
+            CheckConstraint("a > 1", name="foo"),
+        )
+
+        content = _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+
+        assert "op.drop_constraint(op.f('ck_o_foo'), 'o', type_='check')" in content
+        assert "op.create_check_constraint(op.f('ck_o_foo'), 'o', 'a > 1')" in content
+        assert _check_constraint_expressions(alembic_project, "o") == ["a > 1"]
+        assert "check" not in _upgrade_body(
+            _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+        )
+
+        downgrade(alembic_project.config, "-2")
+        assert _check_constraint_names(alembic_project, "o") == ["ck_o_foo"]
+        assert _check_constraint_expressions(alembic_project, "o") == ["a > 0"]
+
+    def test_unnamed_value_set_change_under_a_naming_convention_upgrades(self, alembic_project: AlembicProject):
+        """A convention without ``%(constraint_name)s`` leaves an unnamed ``Enum`` unnamed; the reflected name is final."""
+        alembic_project.execute(
+            "CREATE TABLE o (id serial PRIMARY KEY, status varchar(16) CHECK (status IN ('a', 'b', 'c')))"
+        )
+        metadata = MetaData(naming_convention={"ix": "ix_%(column_0_label)s"})
+        Table(
+            "o",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("status", Enum("a", "b", native_enum=False, create_constraint=True, length=16)),
+        )
+
+        _autogenerate_and_upgrade(alembic_project, metadata, autogenerate_plugins=_BYNAME_PLUGINS)
+
+        assert _check_constraint_names(alembic_project, "o") == ["o_status_check"]
+
     def test_percent_in_an_unnamed_constraint_round_trips(self, alembic_project: AlembicProject):
         """Compiled SQL doubles ``%``; the comparator must compare and render the single form."""
         alembic_project.execute(
@@ -1696,7 +1802,7 @@ class TestCheckConstraintAutogenerateIntegration:
         upgrade_body = _upgrade_body(content)
         assert _dropped_names(upgrade_body) == ["o_status_check"]
         assert (
-            "create_check_constraint('o_status_check', 'o', \"status IN ('a', 'b')\", postgresql_not_valid=True)"
+            "create_check_constraint(op.f('o_status_check'), 'o', \"status IN ('a', 'b')\", postgresql_not_valid=True)"
             in (upgrade_body)
         )
         assert "# Backfill those rows before the revision that validates o_status_check." in upgrade_body

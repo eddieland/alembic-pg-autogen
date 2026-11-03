@@ -150,12 +150,13 @@ comparator. Keep `alembic.autogenerate.checkconstraint_byname` enabled, so that 
 
 The two sets of names are disjoint by construction, so each named constraint gets its operations from one comparator.
 For an unnamed constraint, our comparator discards the drop that Alembic emitted, and it avoids every name that the
-schema or the same migration already holds. One duplicate is known: on Alembic 1.20, a named non-native `Enum`
-constraint that the database lacks gets two identical adds. You gain nothing when you disable Alembic's comparator. You
-lose the detection of added constraints and removed constraints, and our comparator reports nothing in their place. On
-PostgreSQL, Alembic's own expression check always reports equality: `DefaultImpl.compare_check_constraint` returns
-`Equal()`, and the PostgreSQL dialect does not override that method. That result is the gap our comparator fills, and
-the reason the two comparators never collide.
+schema or the same migration already holds. Since Alembic 1.19.2, Alembic's plugin also adds a missing named constraint
+that a type generates, such as a non-native `Enum` constraint. Our comparator replaces that add with its own, so the
+migration holds one add. You gain nothing when you disable Alembic's comparator. You lose the detection of added
+constraints and removed constraints, and our comparator reports nothing in their place. On PostgreSQL, Alembic's own
+expression check always reports equality: `DefaultImpl.compare_check_constraint` returns `Equal()`, and the PostgreSQL
+dialect does not override that method. That result is the gap our comparator fills, and the reason the two comparators
+never collide.
 
 Remember one consequence. Your schema may drift only through constraints that you forgot to declare and constraints that
 you no longer want. This package then reports nothing, and Alembic emits every operation in the migration. That outcome
