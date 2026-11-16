@@ -99,6 +99,10 @@ An object type becomes *managed* when you declare it. Inside a managed type, you
 extension drops each object that it finds in the inspected schemas and that you did not declare. This rule is what makes
 the tool declarative.
 
+The declared set does not need to include objects that a PostgreSQL extension owns. The inspection skips each function,
+trigger, view, check constraint, and index that `CREATE EXTENSION` installed. For example, `pg_views` does not drop the
+PostGIS views `geometry_columns` and `geography_columns`.
+
 A key that you never pass leaves that object type unmanaged. The extension inspects nothing, compares nothing, and emits
 nothing for that type. The example above declares functions and triggers, so views stay unchanged. You can adopt the
 library one object type at a time.
