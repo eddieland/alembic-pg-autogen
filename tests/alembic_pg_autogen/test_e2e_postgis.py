@@ -5,13 +5,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from alembic.command import revision
 from sqlalchemy import create_engine, text
 from testcontainers.postgres import PostgresContainer
 
-from alembic_pg_autogen import inspect_functions, inspect_triggers
+from alembic_pg_autogen import inspect_functions, inspect_triggers, inspect_views
+
+from .alembic_helpers import AlembicProject
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+    from pathlib import Path
 
     from sqlalchemy.engine import Engine
 
@@ -101,3 +105,57 @@ class TestExtensionTriggersExcluded:
 
         trigger_names = {t.trigger_name for t in results}
         assert "my_test_trigger" in trigger_names
+
+
+@pytest.mark.integration
+@pytest.mark.postgis
+class TestExtensionViewsExcluded:
+    """Extension-owned views are excluded while user views are retained."""
+
+    def test_postgis_views_excluded_user_view_retained(self, postgis_engine: Engine) -> None:
+        with postgis_engine.begin() as conn:
+            extension_views = set(
+                conn.execute(
+                    text("""\
+                        SELECT c.relname
+                        FROM pg_catalog.pg_class c
+                        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_class'::regclass
+                                                    AND d.objid = c.oid
+                                                    AND d.deptype = 'e'
+                        WHERE n.nspname = 'public' AND c.relkind = 'v'
+                    """),
+                ).scalars()
+            )
+            conn.execute(text("CREATE VIEW my_user_view AS SELECT 1 AS x"))
+            try:
+                results = inspect_views(conn, ["public"])
+            finally:
+                conn.execute(text("DROP VIEW IF EXISTS my_user_view"))
+
+        assert {"geometry_columns", "geography_columns"} <= extension_views
+        names = {v.name for v in results}
+        assert names == {"my_user_view"}
+
+    def test_autogenerate_keeps_extension_views(self, postgis_engine: Engine, tmp_path: Path) -> None:
+        """A declared view list does not drop the views of an extension in the inspected schema."""
+        project = AlembicProject(postgis_engine, tmp_path)
+        try:
+            schema = project.schema
+            # pg_stat_statements is relocatable, so its views can live in the schema of the project.
+            project.execute(f"CREATE EXTENSION pg_stat_statements WITH SCHEMA {schema}")
+            cfg = project.config
+            cfg.attributes["pg_views"] = [f"CREATE OR REPLACE VIEW {schema}.my_view AS SELECT 1 AS x"]
+
+            revision(cfg, message="test", autogenerate=True)
+            (migration,) = (tmp_path / "alembic" / "versions").glob("*.py")
+            content = migration.read_text()
+        finally:
+            project.execute("DROP EXTENSION IF EXISTS pg_stat_statements")
+            project.teardown()
+
+        upgrade, downgrade = content.split("def downgrade()")
+        assert "CREATE OR REPLACE VIEW" in upgrade
+        assert "DROP VIEW" not in upgrade
+        assert f"DROP VIEW {schema}.my_view" in downgrade
+        assert "pg_stat_statements" not in content

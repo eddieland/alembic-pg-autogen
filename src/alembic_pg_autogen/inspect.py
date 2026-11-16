@@ -172,6 +172,8 @@ def inspect_views(conn: Connection, schemas: Sequence[str] | None = None) -> Seq
     Reconstructs the full ``CREATE OR REPLACE VIEW schema.name AS`` DDL by combining ``quote_ident()`` and
     ``pg_get_viewdef(oid, true)`` in the SQL query so that ``ViewInfo.definition`` contains complete DDL.
 
+    The query skips each view that an extension owns, for example ``geometry_columns`` from PostGIS.
+
     Args:
         conn: An open SQLAlchemy connection.
         schemas: Optional list of schema names to inspect.  When *None*, all schemas except ``pg_catalog`` and
@@ -439,6 +441,12 @@ FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind = 'v'
   AND ({schema_filter})
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_depend d
+      WHERE d.classid = 'pg_catalog.pg_class'::regclass
+        AND d.objid = c.oid
+        AND d.deptype = 'e'
+  )
 ORDER BY n.nspname, c.relname
 """
 
