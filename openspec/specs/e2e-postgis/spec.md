@@ -52,13 +52,13 @@ triggers in the same schema.
 
 ### Requirement: Extension views are excluded from inspection
 
-The test suite SHALL verify that `inspect_views` excludes extension-owned views while retaining user-defined views in
-the same schema. The test suite SHALL also verify that autogenerate keeps extension-owned views when `pg_views` is
-declared.
+The test suite SHALL verify that `inspect_views` omits the views that an extension owns. The same call SHALL return the
+user views in the same schema. The test suite SHALL also verify that autogenerate keeps the views of an extension when
+the configuration declares `pg_views`.
 
 #### Scenario: PostGIS views excluded, user views retained
 
-- **WHEN** PostGIS is installed in schema `public`
+- **WHEN** the PostGIS image has PostGIS in schema `public`
 - **AND** a user-defined view exists in the same schema
 - **AND** `inspect_views(conn, ["public"])` is called
 - **THEN** the result contains the user-defined view
@@ -66,7 +66,7 @@ declared.
 
 #### Scenario: Autogenerate does not drop extension views
 
-- **WHEN** `pg_stat_statements` is installed in the schema of an Alembic project
+- **WHEN** the test creates the extension `pg_stat_statements` in the schema of an Alembic project
 - **AND** `pg_views` declares one user view
 - **AND** autogenerate runs
 - **THEN** the upgrade creates the declared view

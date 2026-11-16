@@ -172,7 +172,7 @@ def inspect_views(conn: Connection, schemas: Sequence[str] | None = None) -> Seq
     Reconstructs the full ``CREATE OR REPLACE VIEW schema.name AS`` DDL by combining ``quote_ident()`` and
     ``pg_get_viewdef(oid, true)`` in the SQL query so that ``ViewInfo.definition`` contains complete DDL.
 
-    Views owned by an extension are excluded, for example ``geometry_columns`` from PostGIS.
+    The query skips each view that an extension owns, for example ``geometry_columns`` from PostGIS.
 
     Args:
         conn: An open SQLAlchemy connection.

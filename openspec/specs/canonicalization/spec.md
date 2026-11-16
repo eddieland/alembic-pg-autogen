@@ -131,7 +131,8 @@ views (INSTEAD OF triggers).
 
 After executing DDL within the savepoint, `canonicalize` SHALL read back the full catalog state using
 `inspect_functions`, `inspect_triggers`, and `inspect_views`. The result includes all functions, triggers, and views
-visible in the target schemas — not only those created by the provided DDL.
+visible in the target schemas — not only those created by the provided DDL. The result omits the functions, triggers,
+and views that a PostgreSQL extension owns, because the three `inspect_*` functions skip them.
 
 #### Scenario: Pre-existing views included in result
 

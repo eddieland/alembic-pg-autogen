@@ -191,9 +191,9 @@ The module SHALL provide a `ViewInfo` NamedTuple representing a single PostgreSQ
 
 The module SHALL provide an `inspect_views` function that queries `pg_class` joined with `pg_namespace` to retrieve all
 user-defined views. It SHALL use `pg_get_viewdef(oid, true)` for the canonical query body and reconstruct the full DDL
-using `quote_ident()` for the schema and view name. It SHALL return a sequence of `ViewInfo` instances. It SHALL exclude
-views owned by any PostgreSQL extension by filtering out rows where `pg_depend` contains a dependency with
-`deptype = 'e'` and `classid = 'pg_catalog.pg_class'::regclass`.
+using `quote_ident()` for the schema and view name. It SHALL return a sequence of `ViewInfo` instances. It SHALL skip
+each view that a PostgreSQL extension owns. A `pg_depend` row with `deptype = 'e'` and
+`classid = 'pg_catalog.pg_class'::regclass` marks such a view.
 
 #### Scenario: Load all views from default schemas
 
@@ -217,8 +217,8 @@ views owned by any PostgreSQL extension by filtering out rows where `pg_depend` 
 
 - **WHEN** a PostgreSQL extension installs views in a managed schema (e.g., `geometry_columns` and `geography_columns`
   from PostGIS)
-- **THEN** `inspect_views` does not include any extension-owned views in the results
-- **AND** user views in the same schema are included
+- **THEN** `inspect_views` omits the views that the extension owns
+- **AND** `inspect_views` returns the user views in the same schema
 - **AND** autogenerate with a declared `pg_views` list does not emit `DROP VIEW` for an extension-owned view
 
 #### Scenario: Empty result when no views exist

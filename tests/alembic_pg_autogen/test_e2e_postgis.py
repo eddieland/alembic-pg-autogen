@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,6 +15,7 @@ from .alembic_helpers import AlembicProject
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+    from pathlib import Path
 
     from sqlalchemy.engine import Engine
 
