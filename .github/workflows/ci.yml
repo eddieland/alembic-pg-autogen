@@ -71,11 +71,17 @@ jobs:
         run: uv run basedpyright --stats src tests
 
       # The squash tests need pg_dump. With ALEMBIC_PG_AUTOGEN_REQUIRE_PG_DUMP, a missing pg_dump fails them.
+      # Install pg_dump from the PostgreSQL apt repository, because the Ubuntu package can lag a minor release behind
+      # the server image. For example, pg_dump 16.15 dumps the column option pg_attver that newer servers set, and
+      # pg_dump 16.16 does not.
       - name: Install pg_dump
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
-          pg_dump --version
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-18
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/18/bin/pg_dump --version
 
       - name: Run tests with coverage
         if: matrix.python-version == '3.12'
